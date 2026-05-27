@@ -1,5 +1,30 @@
 import { supabase } from '../db/supabase'
 
+const EMAIL = 'gunholee@vi-tron.com'
+const TOKEN = 'ATATT3xFfGF0kjHZoBFmblOqF-K7dR64w7XwRHj39FMIlgtfZvIV5JUEAWKFudjdeCMRG9NYPxP46YcSC0gCk15CQmI5EpONpYeZ27V3sM2Se-Twbv9UM0M626SdePo-6vbMMKMFxff4yiRAQNYXmuAakiuem_c-kKEYcUyXEe2C0Y2ifSMV3wI=D6033BB9'
+
+// 환경에 따라 프록시 경로 자동 선택
+// 로컬 개발: Vite 프록시 (/jira-api)
+// 배포 환경: Vercel API Route (/api/jira-proxy)
+async function jiraFetch(path) {
+  const auth = 'Basic ' + btoa(EMAIL + ':' + TOKEN)
+  const isDev = import.meta.env.DEV
+
+  if (isDev) {
+    // 로컬: Vite 프록시 사용
+    const res = await fetch('/jira-api' + path, {
+      headers: { Authorization: auth, Accept: 'application/json' }
+    })
+    return res.json()
+  } else {
+    // 배포: Vercel API Route 사용
+    const res = await fetch('/api/jira-proxy?url=' + encodeURIComponent(path), {
+      headers: { 'x-jira-auth': auth }
+    })
+    return res.json()
+  }
+}
+
 // Jira 이슈 목록 조회 (트리 구조로 반환)
 export async function getJiraTree() {
   const { data, error } = await supabase
@@ -17,28 +42,21 @@ export async function getJiraTree() {
       .filter(c => c.parent_key === p.jira_key)
       .map(c => c.full_text)
   })
-
   return tree
 }
 
-// Jira API에서 동기화 (프록시 경유)
+// Jira API에서 동기화
 export async function syncJira() {
-  const email = 'gunholee@vi-tron.com'
-  const token = 'ATATT3xFfGF0_yUUn8ih_QEH8Qf7t61fol19De4P5M2EL9maPllkMI4Hig5L6vu4hpHoRq90lRFnn6ryvSwd0-H8jJw438UlcQuo8soROHJOySFVJkejy5lbUJ3TID0Xy40DrhJesBWiyBiiVOa9hp9ShciQ6AGAdNkHQ2fbRadk8a0dBLbjYCM=5860F5EF'
-  const auth = 'Basic ' + btoa(email + ':' + token)
-
-  let allIssues = []
-  let startAt = 0
+  let allIssues = [], startAt = 0
 
   while (true) {
-    const res = await fetch(
-      `/jira-api/rest/api/3/search/jql` +
-      `?jql=project=VITRON AND statusCategory != Done ORDER BY key ASC` +
-      `&maxResults=100&startAt=` + startAt +
-      `&fields=summary,key,assignee,parent`,
-      { headers: { Authorization: auth, Accept: 'application/json' } }
-    )
-    const json = await res.json()
+    const path =
+      '/rest/api/3/search/jql' +
+      '?jql=project=VITRON ORDER BY key ASC' +
+      '&maxResults=100&startAt=' + startAt +
+      '&fields=summary,key,assignee,parent'
+
+    const json = await jiraFetch(path)
     if (!json.issues?.length) break
     allIssues = [...allIssues, ...json.issues]
     if (json.issues.length < 100) break
@@ -58,7 +76,6 @@ export async function syncJira() {
     const { error } = await supabase.from('jira_issues').insert(rows)
     if (error) throw error
   }
-
   return rows.length
 }
 
