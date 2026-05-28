@@ -344,7 +344,7 @@ function TabToday({workers,grid,setGrid,jiraTree,selWorker,setSelWorker,onSave,o
           <thead><tr>
             <th style={{background:'#1e3a5f',color:'#fff',padding:'8px 10px',width:60,border:'1px solid #e5e7eb'}}>시간</th>
             {workers.map(w=>(
-              <th key={w.name} style={{background:selWorker===w.name?'#1a56db':'#64748b',color:'#fff',padding:'8px 12px',minWidth:180,border:'1px solid #e5e7eb'}}>
+              <th key={w.name} style={{background:selWorker===w.name?'#1a56db':'#64748b',color:'#fff',padding:'8px 12px',minWidth:155,border:'1px solid #e5e7eb'}}>
                 {selWorker===w.name?'✎ ':''}{w.name}{selWorker===w.name?' (나)':''}
               </th>
             ))}
@@ -359,7 +359,7 @@ function TabToday({workers,grid,setGrid,jiraTree,selWorker,setSelWorker,onSave,o
                   const key=`${h}_${w.name}`,val=grid[key]||'',isMe=selWorker===w.name
                   const pVal=parentSel[key]||'',subs=pVal?(jiraTree[pVal]||[]):[]
                   return isMe?(
-                    <td key={w.name} style={{border:'1px solid #e5e7eb',padding:4,verticalAlign:'top',minWidth:180}}>
+                    <td key={w.name} style={{border:'1px solid #e5e7eb',padding:4,verticalAlign:'top',minWidth:155}}>
                       <div style={{display:'flex',flexDirection:'column',gap:3}}>
                         <select value={pVal} onChange={e=>onParentChange(h,w.name,e.target.value)} style={{width:'100%',fontSize:11,padding:'3px 5px',border:'1px solid #93c5fd',borderRadius:5,background:'#eff6ff'}}>
                           <option value="">① 상위업무 선택</option>
