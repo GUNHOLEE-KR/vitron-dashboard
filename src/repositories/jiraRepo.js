@@ -54,6 +54,7 @@ export async function syncJira() {
     }
   )
   const data = await res.json()
+  if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`)
   if (data.error) throw new Error(data.error)
   return data.count
 }

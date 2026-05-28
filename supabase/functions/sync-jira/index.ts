@@ -30,9 +30,9 @@ Deno.serve(async (req) => {
     while (true) {
       const jiraRes = await fetch(
         'https://vi-tron.atlassian.net/rest/api/3/search/jql' +
-        '?jql=project=VITRON ORDER BY key ASC' +
+        '?jql=project%3DVITRON%20AND%20statusCategory%20!%3D%20Done%20ORDER%20BY%20key%20ASC' +
         '&maxResults=100&startAt=' + startAt +
-        '&fields=summary,key,assignee,parent,status',
+        '&fields=summary,key,assignee,parent',
         { headers: { Authorization: auth, Accept: 'application/json' } }
       )
 
@@ -46,31 +46,12 @@ Deno.serve(async (req) => {
 
       const json = await jiraRes.json()
       const issues = json.issues ?? []
-      allIssues = [...allIssues, ...issues]
+      allIssues.push(...issues)
       if (issues.length < 100) break
       startAt += issues.length
     }
 
-    // 완료 여부 판단 (statusCategory.key === 'done')
-    const isDone = (i: any) => i.fields.status?.statusCategory?.key === 'done'
-
-    // 부모별 자식 이슈 목록
-    const childrenByParent: Record<string, any[]> = {}
-    allIssues.filter(i => i.fields.parent).forEach(i => {
-      const pk = i.fields.parent.key
-      if (!childrenByParent[pk]) childrenByParent[pk] = []
-      childrenByParent[pk].push(i)
-    })
-
-    // 필터: 완료된 이슈 제외, 서브가 전부 완료된 상위 이슈도 제외
-    const filtered = allIssues.filter(i => {
-      if (isDone(i)) return false
-      if (i.fields.parent) return true
-      const children = childrenByParent[i.key] ?? []
-      return children.length === 0 || children.some(c => !isDone(c))
-    })
-
-    const rows = filtered.map((i: any) => ({
+    const rows = allIssues.map((i: any) => ({
       jira_key:   i.key,
       summary:    i.fields.summary,
       assignee:   i.fields.assignee?.displayName ?? '',
