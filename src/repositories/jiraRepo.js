@@ -43,36 +43,19 @@ export async function getJiraTree() {
 
 // Jira API에서 동기화
 export async function syncJira() {
-  let allIssues = [], startAt = 0
-
-  while (true) {
-    const path =
-      '/rest/api/3/search/jql' +
-      '?jql=project=VITRON ORDER BY key ASC' +
-      '&maxResults=100&startAt=' + startAt +
-      '&fields=summary,key,assignee,parent'
-
-    const json = await jiraFetch(path)
-    if (!json.issues?.length) break
-    allIssues = [...allIssues, ...json.issues]
-    if (json.issues.length < 100) break
-    startAt += json.issues.length
-  }
-
-  const rows = allIssues.map(i => ({
-    jira_key:   i.key,
-    summary:    i.fields.summary,
-    assignee:   i.fields.assignee?.displayName ?? '',
-    parent_key: i.fields.parent?.key ?? null,
-    synced_at:  new Date().toISOString()
-  }))
-
-  await supabase.from('jira_issues').delete().neq('id', '00000000-0000-0000-0000-000000000000')
-  if (rows.length > 0) {
-    const { error } = await supabase.from('jira_issues').insert(rows)
-    if (error) throw error
-  }
-  return rows.length
+  const res = await fetch(
+    'https://dwgyelenymwzlkfuvcbz.supabase.co/functions/v1/sync-jira',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer sb_publishable_elg9-sz1fSLw7uAl0XsBxw_6XnrOdRW',
+        'Content-Type': 'application/json'
+      }
+    }
+  )
+  const data = await res.json()
+  if (data.error) throw new Error(data.error)
+  return data.count
 }
 
 // 수동 Jira 추가
