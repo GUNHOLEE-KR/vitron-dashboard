@@ -208,7 +208,10 @@ export default function App(){
   )
   const jiraParents=Object.keys(jiraTree)
 
-  function showToast(msg){setToast(msg);setTimeout(()=>setToast(''),2500)}
+  function showToast(msg, duration=2500){
+    setToast(msg)
+    setTimeout(()=>setToast(''), duration)
+  }
 
   useEffect(()=>{
     Promise.all([getWorkers(),getHistory(),getJiraTree()])
@@ -656,9 +659,14 @@ function TabSettings({workers,setWorkers,jiraTree,setJiraTree,showToast}){
   }
 
   async function handleSyncJira(){
-    showToast('동기화 중...')
-    try{await syncJira();const tree=await getJiraTree();setJiraTree(tree);showToast('Jira 동기화 완료 ('+Object.keys(tree).length+'건)')}
-    catch(e){showToast('동기화 실패: '+e.message)}
+  showToast('동기화 중...', 60000)
+  try{
+      await syncJira()
+      const tree=await getJiraTree()
+      setJiraTree(tree)
+      showToast('✅ Jira 동기화 완료 ('+Object.keys(tree).length+'건)', 4000)
+    }
+    catch(e){showToast('❌ 동기화 실패: '+e.message, 4000)}
   }
   async function handleAddJira(){
     if(!newJira.trim())return
