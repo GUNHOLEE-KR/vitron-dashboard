@@ -10,6 +10,8 @@ async function jiraFetch(path) {
   const auth = 'Basic ' + btoa(EMAIL + ':' + TOKEN)
   const isDev = import.meta.env.DEV
 
+  console.log('isDev:', isDev, 'EMAIL:', EMAIL, 'TOKEN존재:', !!TOKEN)  // ← 추가
+
   if (isDev) {
     // 로컬: Vite 프록시 사용
     const res = await fetch('/jira-api' + path, {
