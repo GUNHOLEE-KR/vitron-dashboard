@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line,
          ComposedChart, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates } from './repositories/workerRepo'
@@ -198,6 +198,7 @@ export default function App(){
   const [viewYear,setViewYear]=useState(toYear(today()))
   const [loading,setLoading]=useState(true)
   const [toast,setToast]=useState('')
+  const toastTimerRef=useRef(null)
 
   // 오늘 기준 재직 중인 직원만 (입사일 이후 + 퇴사 전)
   const td=today()
@@ -209,8 +210,9 @@ export default function App(){
   const jiraParents=Object.keys(jiraTree)
 
   function showToast(msg, duration=2500){
+    if(toastTimerRef.current) clearTimeout(toastTimerRef.current)
     setToast(msg)
-    setTimeout(()=>setToast(''), duration)
+    if(duration>0) toastTimerRef.current=setTimeout(()=>setToast(''), duration)
   }
 
   useEffect(()=>{
@@ -659,7 +661,7 @@ function TabSettings({workers,setWorkers,jiraTree,setJiraTree,showToast}){
   }
 
   async function handleSyncJira(){
-  showToast('동기화 중...', 60000)
+  showToast('동기화 중...', 0)
   try{
       await syncJira()
       const tree=await getJiraTree()
