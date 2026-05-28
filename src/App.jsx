@@ -276,7 +276,7 @@ export default function App(){
               cursor:'pointer',whiteSpace:'nowrap'}}>{TAB_LABELS[t]}</button>
         ))}
       </nav>
-      <main style={{padding:20,maxWidth:1400,margin:'0 auto'}}>
+      <main style={{padding:20}}>
         {tab==='today'   &&<TabToday   workers={activeWorkers} grid={grid} setGrid={setGrid}
           jiraTree={jiraTree} selWorker={selWorker} setSelWorker={setSelWorker}
           onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}/>}
