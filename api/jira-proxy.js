@@ -2,13 +2,13 @@ export default async function handler(req, res) {
   const { url } = req.query
   if (!url) return res.status(400).json({ error: 'url required' })
 
-  const auth = req.headers['x-jira-auth']
+  const email = process.env.JIRA_EMAIL
+  const token = process.env.JIRA_TOKEN
+  const auth = 'Basic ' + Buffer.from(email + ':' + token).toString('base64')
+
   try {
     const response = await fetch('https://vi-tron.atlassian.net' + url, {
-      headers: {
-        Authorization: auth,
-        Accept: 'application/json'
-      }
+      headers: { Authorization: auth, Accept: 'application/json' }
     })
     const data = await response.json()
     res.status(response.status).json(data)

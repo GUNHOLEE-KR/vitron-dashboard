@@ -7,22 +7,16 @@ const TOKEN = import.meta.env.VITE_JIRA_TOKEN
 // 로컬 개발: Vite 프록시 (/jira-api)
 // 배포 환경: Vercel API Route (/api/jira-proxy)
 async function jiraFetch(path) {
-  const auth = 'Basic ' + btoa(EMAIL + ':' + TOKEN)
   const isDev = import.meta.env.DEV
 
-  console.log('isDev:', isDev, 'EMAIL:', EMAIL, 'TOKEN존재:', !!TOKEN)  // ← 추가
-
   if (isDev) {
-    // 로컬: Vite 프록시 사용
+    const auth = 'Basic ' + btoa(import.meta.env.VITE_JIRA_EMAIL + ':' + import.meta.env.VITE_JIRA_TOKEN)
     const res = await fetch('/jira-api' + path, {
       headers: { Authorization: auth, Accept: 'application/json' }
     })
     return res.json()
   } else {
-    // 배포: Vercel API Route 사용
-    const res = await fetch('/api/jira-proxy?url=' + encodeURIComponent(path), {
-      headers: { 'x-jira-auth': auth }
-    })
+    const res = await fetch('/api/jira-proxy?url=' + encodeURIComponent(path))
     return res.json()
   }
 }
