@@ -5,7 +5,7 @@ import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
 import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue } from './repositories/jiraRepo'
 
-const WORK_HOURS=[9,10,11,12,13,14,15,16,17,18]
+const WORK_HOURS=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
 const COLORS=['#3b82f6','#10b981','#f59e0b','#8b5cf6','#06b6d4','#ec4899','#84cc16','#f97316']
 const TABS=['today','daily','weekly','monthly','yearly','settings']
 const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'월간',yearly:'연간',settings:'설정'}
