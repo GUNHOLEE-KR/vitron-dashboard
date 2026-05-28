@@ -363,16 +363,16 @@ function TabToday({workers,grid,setGrid,jiraTree,selWorker,setSelWorker,onSave,o
                       <div style={{display:'flex',flexDirection:'column',gap:3}}>
                         <select value={pVal} onChange={e=>onParentChange(h,w.name,e.target.value)} style={{width:'100%',fontSize:11,padding:'3px 5px',border:'1px solid #93c5fd',borderRadius:5,background:'#eff6ff'}}>
                           <option value="">① 상위업무 선택</option>
-                          {jiraParents.map(p=><option key={p} value={p}>{p.length>30?p.slice(0,30)+'…':p}</option>)}
+                          {jiraParents.map(p=><option key={p} value={p}>{p}</option>)}
                         </select>
                         <select value={subs.includes(val)?val:''} onChange={e=>onSubChange(h,w.name,e.target.value)} disabled={subs.length===0}
                           style={{width:'100%',fontSize:11,padding:'3px 5px',borderRadius:5,border:'1px solid #6ee7b7',background:subs.length===0?'#f9fafb':'#f0fdf4',color:subs.length===0?'#9ca3af':'#111827'}}>
                           <option value="">{subs.length===0?'② 하위업무 없음':'② 하위업무 선택'}</option>
-                          {subs.map(s=><option key={s} value={s}>{s.length>30?s.slice(0,30)+'…':s}</option>)}
+                          {subs.map(s=><option key={s} value={s}>{s}</option>)}
                         </select>
                         <input value={(!pVal&&!subs.includes(val))?val:''} onChange={e=>onDirectInput(h,w.name,e.target.value)} placeholder="③ 직접 입력"
                           style={{width:'100%',fontSize:11,padding:'3px 5px',border:'1px dashed #fcd34d',borderRadius:5,background:'#fffbeb'}}/>
-                        {val&&<div style={{fontSize:10,color:'#374151',background:'#f1f5f9',padding:'2px 6px',borderRadius:4}}>✓ {val.length>28?val.slice(0,28)+'…':val}</div>}
+                        {val&&<div style={{fontSize:10,color:'#374151',background:'#f1f5f9',padding:'2px 6px',borderRadius:4}}>✓ {val}</div>}
                       </div>
                     </td>
                   ):(
@@ -777,7 +777,7 @@ function TabSettings({workers,setWorkers,jiraTree,setJiraTree,showToast}){
             style={{flex:1,padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
           <select value={newJiraParent} onChange={e=>setNewJiraParent(e.target.value)} style={{width:200,padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}>
             <option value="">상위업무로 추가</option>
-            {jiraParents.map(p=><option key={p} value={p}>{p.length>28?p.slice(0,28)+'…':p}</option>)}
+            {jiraParents.map(p=><option key={p} value={p}>{p}</option>)}
           </select>
           <button onClick={handleAddJira} style={{padding:'7px 14px',borderRadius:7,border:'none',background:'#1a56db',color:'#fff',cursor:'pointer',fontWeight:600}}>추가</button>
         </div>
