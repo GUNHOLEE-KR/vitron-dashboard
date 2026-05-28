@@ -276,7 +276,7 @@ export default function App(){
               cursor:'pointer',whiteSpace:'nowrap'}}>{TAB_LABELS[t]}</button>
         ))}
       </nav>
-      <main style={{padding:20}}>
+      <main style={{padding:'16px 0'}}>
         {tab==='today'   &&<TabToday   workers={activeWorkers} grid={grid} setGrid={setGrid}
           jiraTree={jiraTree} selWorker={selWorker} setSelWorker={setSelWorker}
           onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}/>}
@@ -334,8 +334,8 @@ function TabToday({workers,grid,setGrid,jiraTree,selWorker,setSelWorker,onSave,o
           ))}
         </div>
       </div>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:16,overflowX:'auto'}}>
-        <div style={{fontSize:11,color:'#6b7280',marginBottom:8,display:'flex',gap:16}}>
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'12px 0',overflowX:'auto'}}>
+        <div style={{fontSize:11,color:'#6b7280',marginBottom:8,display:'flex',gap:16,paddingLeft:12}}>
           <span><span style={{background:'#dbeafe',padding:'1px 8px',borderRadius:4,marginRight:4}}>①</span>상위업무</span>
           <span><span style={{background:'#dcfce7',padding:'1px 8px',borderRadius:4,marginRight:4}}>②</span>하위업무</span>
           <span><span style={{background:'#fffbeb',padding:'1px 8px',borderRadius:4,marginRight:4}}>③</span>직접 입력</span>
