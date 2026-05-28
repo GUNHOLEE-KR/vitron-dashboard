@@ -1,7 +1,7 @@
 import { supabase } from '../db/supabase'
 
-const EMAIL = 'gunholee@vi-tron.com'
-const TOKEN = 'ATATT3xFfGF0kjHZoBFmblOqF-K7dR64w7XwRHj39FMIlgtfZvIV5JUEAWKFudjdeCMRG9NYPxP46YcSC0gCk15CQmI5EpONpYeZ27V3sM2Se-Twbv9UM0M626SdePo-6vbMMKMFxff4yiRAQNYXmuAakiuem_c-kKEYcUyXEe2C0Y2ifSMV3wI=D6033BB9'
+const EMAIL = import.meta.env.VITE_JIRA_EMAIL
+const TOKEN = import.meta.env.VITE_JIRA_TOKEN
 
 // 환경에 따라 프록시 경로 자동 선택
 // 로컬 개발: Vite 프록시 (/jira-api)
