@@ -11,38 +11,47 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const email = Deno.env.get('JIRA_EMAIL')
-    const token = Deno.env.get('JIRA_TOKEN')
+    const email = Deno.env.get('JIRA_EMAIL') ?? ''
+    const token = Deno.env.get('JIRA_TOKEN') ?? ''
+
+    if (!email || !token) {
+      return new Response(
+        JSON.stringify({ error: 'JIRA credentials not set' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
     const auth = 'Basic ' + btoa(email + ':' + token)
 
-    // Jira API에서 이슈 수집
-    let allIssues = [], startAt = 0
+    // Jira API 전체 페이지네이션
+    let allIssues: any[] = []
+    let startAt = 0
 
     while (true) {
-      const url =
+      const jiraRes = await fetch(
         'https://vi-tron.atlassian.net/rest/api/3/search/jql' +
         '?jql=project=VITRON ORDER BY key ASC' +
         '&maxResults=100&startAt=' + startAt +
-        '&fields=summary,key,assignee,parent'
+        '&fields=summary,key,assignee,parent',
+        { headers: { Authorization: auth, Accept: 'application/json' } }
+      )
 
-      const res = await fetch(url, {
-        headers: { Authorization: auth, Accept: 'application/json' }
-      })
+      if (!jiraRes.ok) {
+        const text = await jiraRes.text()
+        return new Response(
+          JSON.stringify({ error: 'Jira API error: ' + jiraRes.status, detail: text.slice(0, 200) }),
+          { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        )
+      }
 
-      const json = await res.json()
-      if (!json.issues?.length) break
-      allIssues = [...allIssues, ...json.issues]
-      if (json.issues.length < 100) break
-      startAt += json.issues.length
+      const json = await jiraRes.json()
+      const issues = json.issues ?? []
+      allIssues = [...allIssues, ...issues]
+      if (issues.length < 100) break
+      startAt += issues.length
     }
 
-    // Supabase에 저장
-    const supabase = createClient(
-      Deno.env.get('SUPABASE_URL'),
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
-    )
-
-    const rows = allIssues.map(i => ({
+    const rows = allIssues.map((i: any) => ({
       jira_key:   i.key,
       summary:    i.fields.summary,
       assignee:   i.fields.assignee?.displayName ?? '',
@@ -50,7 +59,14 @@ Deno.serve(async (req) => {
       synced_at:  new Date().toISOString()
     }))
 
-    await supabase.from('jira_issues').delete().neq('id', '00000000-0000-0000-0000-000000000000')
+    // Supabase에 저장
+    const supabase = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    )
+
+    await supabase.from('jira_issues')
+      .delete().neq('id', '00000000-0000-0000-0000-000000000000')
 
     if (rows.length > 0) {
       await supabase.from('jira_issues').insert(rows)
@@ -61,7 +77,7 @@ Deno.serve(async (req) => {
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
 
-  } catch (e) {
+  } catch (e: any) {
     return new Response(
       JSON.stringify({ error: e.message }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
