@@ -301,6 +301,23 @@ function TabToday({workers,grid,setGrid,jiraTree,selWorker,setSelWorker,onSave,o
   const [ldDate,setLdDate]=useState(today())
   const curH=new Date().getHours()
   const jiraParents=Object.keys(jiraTree)
+  // 일괄 입력 상태
+  const [selHours,setSelHours]=useState(new Set())
+  const [batchP,setBatchP]=useState('')
+  const [batchS,setBatchS]=useState('')
+  const [batchD,setBatchD]=useState('')
+  const batchSubs=batchP?(jiraTree[batchP]||[]):[]
+  function toggleHour(h){setSelHours(s=>{const n=new Set(s);n.has(h)?n.delete(h):n.add(h);return n})}
+  function toggleAll(){setSelHours(s=>s.size===WORK_HOURS.length?new Set():new Set(WORK_HOURS))}
+  function applyBatch(){
+    if(!selWorker||selHours.size===0)return
+    const val=batchS||batchD
+    if(!val&&!batchP)return
+    const g={...grid},ps={...parentSel}
+    selHours.forEach(h=>{const k=`${h}_${selWorker}`;g[k]=val;ps[k]=batchP})
+    setGrid(g);setParentSel(ps)
+    setSelHours(new Set());setBatchP('');setBatchS('');setBatchD('')
+  }
   function onParentChange(h,w,val){const k=`${h}_${w}`;setParentSel(p=>({...p,[k]:val}));setGrid(g=>({...g,[k]:val}))}
   function onSubChange(h,w,val){setGrid(g=>({...g,[`${h}_${w}`]:val}))}
   function onDirectInput(h,w,val){const k=`${h}_${w}`;setParentSel(p=>({...p,[k]:''}));setGrid(g=>({...g,[k]:val}))}
@@ -340,8 +357,37 @@ function TabToday({workers,grid,setGrid,jiraTree,selWorker,setSelWorker,onSave,o
           <span><span style={{background:'#dcfce7',padding:'1px 8px',borderRadius:4,marginRight:4}}>②</span>하위업무</span>
           <span><span style={{background:'#fffbeb',padding:'1px 8px',borderRadius:4,marginRight:4}}>③</span>직접 입력</span>
         </div>
+        {/* ── 일괄 입력 바 ── */}
+        {selWorker&&selHours.size>0&&(
+          <div style={{background:'#f0f9ff',border:'2px solid #38bdf8',borderRadius:9,padding:'10px 14px',marginBottom:12,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+            <span style={{fontSize:12,fontWeight:700,color:'#0369a1',whiteSpace:'nowrap'}}>{selHours.size}시간 선택 — 일괄 입력</span>
+            <select value={batchP} onChange={e=>{setBatchP(e.target.value);setBatchS('')}}
+              style={{fontSize:11,padding:'4px 6px',border:'1px solid #93c5fd',borderRadius:5,background:'#eff6ff'}}>
+              <option value="">① 상위업무</option>
+              {jiraParents.map(p=><option key={p} value={p}>{p}</option>)}
+            </select>
+            <select value={batchS} onChange={e=>setBatchS(e.target.value)} disabled={batchSubs.length===0}
+              style={{fontSize:11,padding:'4px 6px',borderRadius:5,border:'1px solid #6ee7b7',background:batchSubs.length===0?'#f9fafb':'#f0fdf4',color:batchSubs.length===0?'#9ca3af':'#111'}}>
+              <option value="">{batchSubs.length===0?'② 하위없음':'② 하위업무'}</option>
+              {batchSubs.map(s=><option key={s} value={s}>{s}</option>)}
+            </select>
+            <input value={batchD} onChange={e=>setBatchD(e.target.value)} placeholder="③ 직접 입력"
+              style={{fontSize:11,padding:'4px 6px',border:'1px dashed #fcd34d',borderRadius:5,background:'#fffbeb',width:140}}/>
+            <button onClick={applyBatch}
+              style={{padding:'5px 14px',borderRadius:6,border:'none',background:'#0369a1',color:'#fff',cursor:'pointer',fontSize:12,fontWeight:700}}>
+              일괄 적용
+            </button>
+            <button onClick={()=>setSelHours(new Set())}
+              style={{padding:'5px 10px',borderRadius:6,border:'1px solid #cbd5e1',background:'#fff',cursor:'pointer',fontSize:11,color:'#64748b'}}>
+              선택 해제
+            </button>
+          </div>
+        )}
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
           <thead><tr>
+            {selWorker&&<th style={{background:'#1e3a5f',color:'#fff',padding:'6px 8px',width:32,border:'1px solid #e5e7eb',textAlign:'center'}}>
+              <input type="checkbox" checked={selHours.size===WORK_HOURS.length} onChange={toggleAll} style={{cursor:'pointer'}}/>
+            </th>}
             <th style={{background:'#1e3a5f',color:'#fff',padding:'8px 10px',width:60,border:'1px solid #e5e7eb'}}>시간</th>
             {workers.map(w=>(
               <th key={w.name} style={{background:selWorker===w.name?'#1a56db':'#64748b',color:'#fff',padding:'8px 12px',minWidth:155,border:'1px solid #e5e7eb'}}>
@@ -351,8 +397,11 @@ function TabToday({workers,grid,setGrid,jiraTree,selWorker,setSelWorker,onSave,o
           </tr></thead>
           <tbody>
             {WORK_HOURS.map(h=>(
-              <tr key={h} style={{background:h===curH?'#fef9c3':'#fff'}}>
-                <td style={{background:h===curH?'#fef08a':'#f9fafb',fontWeight:700,fontSize:11,color:'#6b7280',padding:'4px 8px',border:'1px solid #e5e7eb',textAlign:'center',whiteSpace:'nowrap'}}>
+              <tr key={h} style={{background:selHours.has(h)?'#e0f2fe':h===curH?'#fef9c3':'#fff'}}>
+                {selWorker&&<td style={{border:'1px solid #e5e7eb',textAlign:'center',padding:'4px',background:selHours.has(h)?'#bae6fd':h===curH?'#fef08a':'#f9fafb'}}>
+                  <input type="checkbox" checked={selHours.has(h)} onChange={()=>toggleHour(h)} style={{cursor:'pointer'}}/>
+                </td>}
+                <td style={{background:selHours.has(h)?'#7dd3fc':h===curH?'#fef08a':'#f9fafb',fontWeight:700,fontSize:11,color:'#6b7280',padding:'4px 8px',border:'1px solid #e5e7eb',textAlign:'center',whiteSpace:'nowrap'}}>
                   {String(h).padStart(2,'0')}:00{h===curH?' ▶':''}
                 </td>
                 {workers.map(w=>{
