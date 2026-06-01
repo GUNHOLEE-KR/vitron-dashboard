@@ -225,15 +225,14 @@ export default function App(){
       }).finally(()=>setLoading(false))
   },[])
 
-  async function handleSave(){
+  async function handleSave(ds=today()){
     if(!selWorker){showToast('이름을 먼저 선택하세요');return}
-    const ds=today()
     const rows=WORK_HOURS.filter(h=>grid[`${h}_${selWorker}`])
       .map(h=>({work_date:ds,work_hour:h,worker_name:selWorker,work_text:grid[`${h}_${selWorker}`]}))
     try{
       await saveWorkerHistory(selWorker,rows)
       setHistory([...history.filter(r=>!(r.work_date===ds&&r.worker_name===selWorker)),...rows])
-      showToast(`${selWorker} 저장 완료 (${rows.length}건)`)
+      showToast(`${selWorker} 저장 완료 (${ds}, ${rows.length}건)`)
     }catch(e){showToast('저장 실패: '+e.message)}
   }
 
@@ -331,7 +330,7 @@ function TabToday({workers,grid,setGrid,jiraTree,selWorker,setSelWorker,onSave,o
         <div style={{display:'flex',gap:8}}>
           <button onClick={()=>{if(!selWorker)return;const g={...grid};WORK_HOURS.forEach(h=>delete g[`${h}_${selWorker}`]);setGrid(g);const ps={...parentSel};WORK_HOURS.forEach(h=>delete ps[`${h}_${selWorker}`]);setParentSel(ps)}}
             style={{padding:'6px 14px',borderRadius:7,border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:13}}>초기화</button>
-          <button onClick={onSave} style={{padding:'6px 14px',borderRadius:7,border:'none',background:'#0d7a4e',color:'#fff',cursor:'pointer',fontSize:13,fontWeight:600}}>
+          <button onClick={()=>onSave(ldDate)} style={{padding:'6px 14px',borderRadius:7,border:'none',background:'#0d7a4e',color:'#fff',cursor:'pointer',fontSize:13,fontWeight:600}}>
             {selWorker?`${selWorker} 저장`:'이름 선택 후 저장'}
           </button>
         </div>
