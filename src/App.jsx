@@ -325,6 +325,7 @@ function TabToday({workers,grid,setGrid,jiraTree,selWorker,setSelWorker,onSave,o
         <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
           <strong>오늘 업무 입력</strong>
           <input type="date" value={ldDate} onChange={e=>setLdDate(e.target.value)} style={{padding:'6px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
+          <button onClick={()=>{setLdDate(today());onLoadDate(today())}} style={{padding:'6px 12px',borderRadius:7,border:'1px solid #1a56db',background:'#eff6ff',color:'#1a56db',cursor:'pointer',fontSize:13,fontWeight:600}}>오늘</button>
           <button onClick={()=>onLoadDate(ldDate)} style={{padding:'6px 14px',borderRadius:7,border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:13}}>조회</button>
         </div>
         <div style={{display:'flex',gap:8}}>
