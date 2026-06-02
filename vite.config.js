@@ -5,6 +5,10 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
+      '/api': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
       '/jira-api': {
         target: 'https://vi-tron.atlassian.net',
         changeOrigin: true,

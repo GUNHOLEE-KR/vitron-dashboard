@@ -1,60 +1,42 @@
-import { supabase } from '../db/supabase'
+const BASE = '/api'
 
-// 전체 직원 목록 조회
 export async function getWorkers() {
-  const { data, error } = await supabase
-    .from('workers')
-    .select('*')
-    .order('hired_at', { ascending: true })
-    .order('created_at')
-  if (error) throw error
-  return data
+  const res = await fetch(`${BASE}/workers`)
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
 }
 
-// 직원 추가 (입사일 포함)
 export async function addWorker(name, hiredAt) {
-  const { data, error } = await supabase
-    .from('workers')
-    .insert({
-      name,
-      active: true,
-      hired_at: hiredAt || new Date().toISOString().slice(0, 10)
-    })
-    .select()
-    .single()
-  if (error) throw error
-  return data
+  const res = await fetch(`${BASE}/workers`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, hired_at: hiredAt })
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
 }
 
-// 재직/퇴사 상태 변경 (퇴사일 포함)
 export async function setWorkerStatus(name, active, resignedAt = null) {
-  const updates = { active }
-  if (!active) {
-    updates.resigned_at = resignedAt || new Date().toISOString().slice(0, 10)
-  } else {
-    updates.resigned_at = null
-  }
-  const { error } = await supabase
-    .from('workers')
-    .update(updates)
-    .eq('name', name)
-  if (error) throw error
+  const res = await fetch(`${BASE}/workers/${encodeURIComponent(name)}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ active, resigned_at: resignedAt })
+  })
+  if (!res.ok) throw new Error(await res.text())
 }
 
-// 직원 삭제
-export async function removeWorker(name) {
-  const { error } = await supabase
-    .from('workers')
-    .delete()
-    .eq('name', name)
-  if (error) throw error
-}
-
-// 입사일/퇴사일 수정
 export async function updateWorkerDates(name, hiredAt, resignedAt) {
-  const { error } = await supabase
-    .from('workers')
-    .update({ hired_at: hiredAt || null, resigned_at: resignedAt || null })
-    .eq('name', name)
-  if (error) throw error
+  const res = await fetch(`${BASE}/workers/${encodeURIComponent(name)}/dates`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hired_at: hiredAt, resigned_at: resignedAt })
+  })
+  if (!res.ok) throw new Error(await res.text())
+}
+
+export async function removeWorker(name) {
+  const res = await fetch(`${BASE}/workers/${encodeURIComponent(name)}`, {
+    method: 'DELETE'
+  })
+  if (!res.ok) throw new Error(await res.text())
 }

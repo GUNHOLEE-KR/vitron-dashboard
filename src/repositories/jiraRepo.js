@@ -1,33 +1,9 @@
-import { supabase } from '../db/supabase'
+const BASE = '/api'
 
-const EMAIL = import.meta.env.VITE_JIRA_EMAIL
-const TOKEN = import.meta.env.VITE_JIRA_TOKEN
-
-// 환경에 따라 프록시 경로 자동 선택
-// 로컬 개발: Vite 프록시 (/jira-api)
-// 배포 환경: Vercel API Route (/api/jira-proxy)
-async function jiraFetch(path) {
-  const isDev = import.meta.env.DEV
-
-  if (isDev) {
-    const auth = 'Basic ' + btoa(import.meta.env.VITE_JIRA_EMAIL + ':' + import.meta.env.VITE_JIRA_TOKEN)
-    const res = await fetch('/jira-api' + path, {
-      headers: { Authorization: auth, Accept: 'application/json' }
-    })
-    return res.json()
-  } else {
-    const res = await fetch('/api/jira-proxy?url=' + encodeURIComponent(path))
-    return res.json()
-  }
-}
-
-// Jira 이슈 목록 조회 (트리 구조로 반환)
 export async function getJiraTree() {
-  const { data, error } = await supabase
-    .from('jira_issues')
-    .select('*')
-    .order('jira_key')
-  if (error) throw error
+  const res = await fetch(`${BASE}/jira-issues`)
+  if (!res.ok) throw new Error(await res.text())
+  const data = await res.json()
 
   const tree = {}
   const parents = data.filter(i => !i.parent_key)
@@ -41,47 +17,27 @@ export async function getJiraTree() {
   return tree
 }
 
-// Jira API에서 동기화
 export async function syncJira() {
-  const res = await fetch(
-    'https://dwgyelenymwzlkfuvcbz.supabase.co/functions/v1/sync-jira',
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer sb_publishable_elg9-sz1fSLw7uAl0XsBxw_6XnrOdRW',
-        'Content-Type': 'application/json'
-      }
-    }
-  )
+  const res = await fetch(`${BASE}/jira-sync`, { method: 'POST' })
   const data = await res.json()
-  if (!res.ok) throw new Error(data.message || data.error || `HTTP ${res.status}`)
-  if (data.error) throw new Error(data.error)
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
   return data.count
 }
 
-// 수동 Jira 추가
 export async function addJiraIssue(fullText, parentText) {
-  let parentKey = null
-  if (parentText) {
-    const { data } = await supabase
-      .from('jira_issues')
-      .select('jira_key')
-      .eq('full_text', parentText)
-      .single()
-    parentKey = data?.jira_key ?? null
-  }
-  const manualKey = 'MANUAL-' + Date.now()
-  const { error } = await supabase
-    .from('jira_issues')
-    .insert({ jira_key: manualKey, summary: fullText, parent_key: parentKey })
-  if (error) throw error
+  const res = await fetch(`${BASE}/jira-issues`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ full_text: fullText, parent_text: parentText })
+  })
+  if (!res.ok) throw new Error(await res.text())
 }
 
-// Jira 삭제
 export async function removeJiraIssue(fullText) {
-  const { error } = await supabase
-    .from('jira_issues')
-    .delete()
-    .eq('full_text', fullText)
-  if (error) throw error
+  const res = await fetch(`${BASE}/jira-issues`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ full_text: fullText })
+  })
+  if (!res.ok) throw new Error(await res.text())
 }

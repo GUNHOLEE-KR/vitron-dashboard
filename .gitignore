@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# 환경변수 (DB 비밀번호, Jira 토큰 포함)
+.env
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
