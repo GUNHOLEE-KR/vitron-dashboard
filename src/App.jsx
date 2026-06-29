@@ -325,6 +325,11 @@ function MixTrend({data,tasks}){
           {tasks.map((t,i)=>{const nm=cleanName(t);return <Area key={t} type="monotone" dataKey={t} name={nm.length>14?nm.slice(0,14)+'…':nm} stackId="m" stroke={COLORS[i%COLORS.length]} fill={COLORS[i%COLORS.length]} fillOpacity={0.6}/>})}
         </AreaChart>
       </ResponsiveContainer>
+      <div style={{fontSize:11,color:'#6b7280',marginTop:8,lineHeight:1.6,background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,padding:'8px 12px'}}>
+        💡 <b>읽는 법</b> — 세로축은 항상 100%입니다. 각 기간(가로)에서 업무유형이 차지하는 <b>비중(%)</b>을 보여줍니다.
+        색 띠가 가로로 가며 <b>두꺼워지면 그 업무 비중↑</b>, 얇아지면 비중↓. 어느 업무가 늘고 줄었는지 <b>구성 변화</b>를 봅니다.
+        (절대 시간(양)은 위 ‘분포’ 차트로 확인 — 이 차트는 <b>비율 전용</b>이라 일이 많았던 기간도 높이는 100%로 동일합니다.)
+      </div>
     </Card>
   )
 }
