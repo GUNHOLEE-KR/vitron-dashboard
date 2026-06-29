@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
-import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, LabelList,
-         ComposedChart, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, LabelList, Treemap,
+         ComposedChart, XAxis, YAxis, Tooltip, Legend, ReferenceLine, ResponsiveContainer } from 'recharts'
 import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates } from './repositories/workerRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
 import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue } from './repositories/jiraRepo'
@@ -15,8 +15,8 @@ const tdS={padding:'6px 10px',border:'1px solid #e5e7eb',textAlign:'center',vert
 // 차트 공통 헬퍼 — 단위는 모두 "시간(h)"
 const numLabel=(v)=>(v?String(v):'')              // 0/빈값은 라벨 숨김
 const hourTip=(v)=>`${v??0}h`                       // 툴팁 값에 h 부착
-// 업무명 표시 정리: 맨 앞 "[VITRON-167]" 같은 지라번호 prefix 제거 → 순수 이름만 (저장값엔 영향 없음)
-const cleanName=(s)=>String(s||'').replace(/^\s*\[[^\]]*\]\s*/,'')
+// 업무명 표시 정리: "[VITRON-167] …" 또는 "VITRON-166 …" 같은 지라번호 prefix 제거 → 순수 이름만 (저장값엔 영향 없음)
+const cleanName=(s)=>String(s||'').replace(/^\s*\[[^\]]*\]\s*/,'').replace(/^\s*[A-Z][A-Z0-9]*-\d+\s*/,'')
 
 function today(){return new Date().toISOString().slice(0,10)}
 function toMonth(d){return d.slice(0,7)}
@@ -93,8 +93,8 @@ function WorkerAnalysis({rows,workers}){
     })
   })
   return(
-    <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
+    <div style={{display:'flex',flexDirection:'column',gap:16,marginBottom:16}}>
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
         <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>직원별 업무 구성 · 단위: 시간(h)</div>
         <ResponsiveContainer width="100%" height={Math.max(200,wNames.length*52+60)}>
           <BarChart data={barData} layout="vertical">
@@ -109,7 +109,7 @@ function WorkerAnalysis({rows,workers}){
           </BarChart>
         </ResponsiveContainer>
       </div>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,flex:1.5,minWidth:260,maxWidth:'100%',boxSizing:'border-box',overflowX:'auto'}}>
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,minWidth:260,maxWidth:'100%',boxSizing:'border-box',overflowX:'auto'}}>
         <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>직원별 업무 상세</div>
         <table style={{width:'100%',borderCollapse:'collapse'}}>
           <thead><tr>
@@ -149,8 +149,8 @@ function ProjectAnalysis({rows,allHistory}){
       return{name:nm.length>16?nm.slice(0,16)+'…':nm,fullName:nm,기간:ph,누적:th,집중도:Math.round(ph/th*100)}
     })
   return(
-    <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
+    <div style={{display:'flex',flexDirection:'column',gap:16,marginBottom:16}}>
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
         <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>프로젝트 기간/누적 비교 · 단위: 시간(h), 집중도(%)</div>
         <ResponsiveContainer width="100%" height={280}>
           <ComposedChart data={data}>
@@ -168,7 +168,7 @@ function ProjectAnalysis({rows,allHistory}){
           </ComposedChart>
         </ResponsiveContainer>
       </div>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,flex:1.5,minWidth:260,maxWidth:'100%',boxSizing:'border-box',overflowX:'auto'}}>
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,minWidth:260,maxWidth:'100%',boxSizing:'border-box',overflowX:'auto'}}>
         <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>프로젝트 집중도 상세</div>
         <table style={{width:'100%',borderCollapse:'collapse'}}>
           <thead><tr>
@@ -196,6 +196,111 @@ function ProjectAnalysis({rows,allHistory}){
         </table>
       </div>
     </div>
+  )
+}
+
+// ── 요일×시간대 히트맵 (프로토타입) ──────────────────────
+function WorkHeatmap({rows}){
+  if(!rows.length)return null
+  const dayNames=['월','화','수','목','금','토','일']
+  const grid=Array.from({length:7},()=>Array(24).fill(0))
+  rows.forEach(r=>{const di=(new Date(r.work_date).getDay()+6)%7;grid[di][r.work_hour]++})
+  const max=Math.max(1,...grid.flat())
+  const heatColor=v=>{
+    if(!v)return '#f3f4f6'
+    const t=v/max,ch=(a,b)=>Math.round(a+(b-a)*t)
+    return `rgb(${ch(219,26)},${ch(234,86)},${ch(254,219)})`   // #dbeafe → #1a56db
+  }
+  const hours=Array.from({length:24},(_,h)=>h)
+  return(
+    <Card title="시간대 패턴 (요일 × 시간대) · 색이 진할수록 시간(h) 많음">
+      <div style={{overflowX:'auto'}}>
+        <table style={{borderCollapse:'collapse',fontSize:10}}>
+          <thead><tr>
+            <th style={{width:28}}/>
+            {hours.map(h=><th key={h} style={{minWidth:22,padding:'0 0 4px',color:'#9ca3af',fontWeight:600,textAlign:'center'}}>{h}</th>)}
+          </tr></thead>
+          <tbody>
+            {dayNames.map((dn,di)=>(
+              <tr key={dn}>
+                <td style={{color:'#6b7280',fontWeight:700,padding:'0 8px 0 2px',textAlign:'right',whiteSpace:'nowrap'}}>{dn}</td>
+                {grid[di].map((v,h)=>(
+                  <td key={h} title={`${dn} ${String(h).padStart(2,'0')}:00 — ${v}h`}
+                    style={{width:22,height:22,background:heatColor(v),border:'2px solid #fff',textAlign:'center',
+                      color:(v&&v/max>0.55)?'#fff':'#9ca3af',fontWeight:600}}>{v||''}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div style={{display:'flex',alignItems:'center',gap:6,marginTop:10,fontSize:10,color:'#6b7280'}}>
+        <span>적음</span>
+        {[0,0.25,0.5,0.75,1].map((t,i)=>{const ch=(a,b)=>Math.round(a+(b-a)*t);return <div key={i} style={{width:20,height:11,background:`rgb(${ch(219,26)},${ch(234,86)},${ch(254,219)})`}}/>})}
+        <span>많음</span>
+        <span style={{marginLeft:10}}>최다 {max}h/칸</span>
+      </div>
+    </Card>
+  )
+}
+
+// ── 업무 계층 트리맵 (프로토타입) ──────────────────────
+function buildTreemapData(rows,jiraTree){
+  const parentOf=t=>{if(jiraTree&&jiraTree[t]!==undefined)return t;if(jiraTree){for(const[p,subs]of Object.entries(jiraTree)){if(subs.includes(t))return p}}return '기타'}
+  const tmMap={}
+  rows.forEach(r=>{const p=cleanName(parentOf(r.work_text)),c=cleanName(r.work_text);if(!tmMap[p])tmMap[p]={};tmMap[p][c]=(tmMap[p][c]||0)+1})
+  return Object.entries(tmMap).map(([p,kids])=>({name:p,children:Object.entries(kids).map(([c,v])=>({name:c,size:v}))}))
+}
+function TreemapCell(props){
+  const {x,y,width,height,depth,name,index}=props
+  if(width<=0||height<=0)return null
+  const val=props.size??props.value
+  const fill=depth===1?COLORS[index%COLORS.length]:'rgba(255,255,255,0)'
+  return(
+    <g>
+      <title>{`${name}${val?` ${val}h`:''}`}</title>
+      <rect x={x} y={y} width={width} height={height} style={{fill,stroke:'#fff',strokeWidth:depth===1?3:1,strokeOpacity:depth===1?1:0.7}}/>
+      {depth===1&&width>54&&height>22&&<text x={x+6} y={y+16} fill="#fff" fontSize={11} fontWeight={700}>{name}</text>}
+      {depth===2&&width>50&&height>26&&<text x={x+width/2} y={y+height/2} textAnchor="middle" fill="#111827" fontSize={9} dominantBaseline="central">{val}h</text>}
+    </g>
+  )
+}
+function TreemapAnalysis({data}){
+  if(!data||!data.length)return null
+  return(
+    <Card title="업무 계층 비중 (트리맵) · 면적=시간(h), 상위업무→하위업무">
+      <ResponsiveContainer width="100%" height={340}>
+        <Treemap data={data} dataKey="size" stroke="#fff" isAnimationActive={false} content={<TreemapCell/>}/>
+      </ResponsiveContainer>
+    </Card>
+  )
+}
+
+// ── 업무 편중 파레토 (프로토타입) ──────────────────────
+function ParetoAnalysis({rows}){
+  if(!rows.length)return null
+  const agg=Object.entries(aggByWork(rows)).sort((a,b)=>b[1]-a[1])
+  const total=agg.reduce((s,[,v])=>s+v,0)||1
+  let cum=0
+  const data=agg.slice(0,12).map(([name,v])=>{cum+=v;const nm=cleanName(name);return{name:nm.length>14?nm.slice(0,14)+'…':nm,시간:v,누적:Math.round(cum/total*100)}})
+  return(
+    <Card title="업무 편중 (파레토) · 막대=시간(h), 선=누적 비중(%)">
+      <ResponsiveContainer width="100%" height={300}>
+        <ComposedChart data={data} margin={{top:16,right:24,left:0,bottom:70}}>
+          <XAxis dataKey="name" tick={{fontSize:10}} interval={0} angle={-30} textAnchor="end" height={80}/>
+          <YAxis yAxisId="left" unit="h" tick={{fontSize:11}}/>
+          <YAxis yAxisId="right" orientation="right" unit="%" domain={[0,100]} tick={{fontSize:11}}/>
+          <Tooltip formatter={(v,n)=>n==='누적'?`${v}%`:`${v}h`}/><Legend wrapperStyle={{fontSize:11}}/>
+          <ReferenceLine yAxisId="right" y={80} stroke="#ef4444" strokeDasharray="4 3" label={{value:'80%',fontSize:10,fill:'#ef4444',position:'insideTopRight'}}/>
+          <Bar yAxisId="left" dataKey="시간" fill="#3b82f6" radius={[4,4,0,0]}>
+            <LabelList dataKey="시간" position="top" fontSize={9} fill="#374151" formatter={numLabel}/>
+          </Bar>
+          <Line yAxisId="right" type="monotone" dataKey="누적" stroke="#f59e0b" strokeWidth={2} dot={{r:3}}>
+            <LabelList dataKey="누적" position="top" fontSize={9} fill="#b45309" formatter={(v)=>`${v}%`}/>
+          </Line>
+        </ComposedChart>
+      </ResponsiveContainer>
+    </Card>
   )
 }
 
@@ -294,9 +399,9 @@ export default function App(){
           jiraTree={jiraTree} selWorker={selWorker} setSelWorker={setSelWorker}
           onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}/>}
         {tab==='daily'   &&<TabDaily   history={history} workers={workers} viewDate={viewDate} setViewDate={setViewDate}/>}
-        {tab==='weekly'  &&<TabWeekly  history={history} workers={workers} viewDate={viewDate} setViewDate={setViewDate}/>}
-        {tab==='monthly' &&<TabMonthly history={history} workers={workers} viewMonth={viewMonth} setViewMonth={setViewMonth}/>}
-        {tab==='yearly'  &&<TabYearly  history={history} workers={workers} viewYear={viewYear} setViewYear={setViewYear}/>}
+        {tab==='weekly'  &&<TabWeekly  history={history} workers={workers} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
+        {tab==='monthly' &&<TabMonthly history={history} workers={workers} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
+        {tab==='yearly'  &&<TabYearly  history={history} workers={workers} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
         {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers}
           jiraTree={jiraTree} setJiraTree={setJiraTree} showToast={showToast}/>}
       </main>
@@ -500,7 +605,7 @@ function TabDaily({history,workers,viewDate,setViewDate}){
 }
 
 // ── 주간 탭 ───────────────────────────────────────────────
-function TabWeekly({history,workers,viewDate,setViewDate}){
+function TabWeekly({history,workers,viewDate,setViewDate,jiraTree}){
   const ym=toMonth(viewDate),wk=weekNum(viewDate)
   const wS=weekStart(viewDate),wE=weekEnd(viewDate)
   const rows=history.filter(r=>toMonth(r.work_date)===ym&&weekNum(r.work_date)===wk)
@@ -511,6 +616,7 @@ function TabWeekly({history,workers,viewDate,setViewDate}){
   const dm={}
   rows.forEach(r=>{if(!dm[r.work_date])dm[r.work_date]={};dm[r.work_date][r.worker_name]=(dm[r.work_date][r.worker_name]||0)+1})
   const barData=days.map(d=>{const o={name:d.slice(5)+'('+dayName(d)+')'};wNames.forEach(n=>{o[n]=dm[d][n]||0});return o})
+  const tmData=buildTreemapData(rows,jiraTree)
   return(
     <div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 18px',marginBottom:16,display:'flex',gap:10,alignItems:'center'}}>
@@ -534,6 +640,12 @@ function TabWeekly({history,workers,viewDate,setViewDate}){
           </AreaChart>
         </ResponsiveContainer>
       </Card>
+      <SectionTitle>시간대 패턴 (요일 × 시간대)</SectionTitle>
+      <WorkHeatmap rows={rows}/>
+      <SectionTitle>업무 편중 (파레토)</SectionTitle>
+      <ParetoAnalysis rows={rows}/>
+      <SectionTitle>업무 계층 비중 (트리맵)</SectionTitle>
+      <TreemapAnalysis data={tmData}/>
       <SectionTitle>직원별 업무 분석</SectionTitle>
       <WorkerAnalysis rows={rows} workers={periodWorkers}/>
       <SectionTitle>프로젝트 집중도 분석</SectionTitle>
@@ -543,7 +655,7 @@ function TabWeekly({history,workers,viewDate,setViewDate}){
 }
 
 // ── 월간 탭 ───────────────────────────────────────────────
-function TabMonthly({history,workers,viewMonth,setViewMonth}){
+function TabMonthly({history,workers,viewMonth,setViewMonth,jiraTree}){
   const mS=viewMonth+'-01',mE=monthEnd(viewMonth)
   const rows=history.filter(r=>toMonth(r.work_date)===viewMonth)
   const periodWorkers=workersForPeriod(workers,mS,mE)
@@ -554,6 +666,7 @@ function TabMonthly({history,workers,viewMonth,setViewMonth}){
   const wNames=periodWorkers.map(w=>w.name)
   const wData=Object.entries(wm).sort((a,b)=>a[0].localeCompare(b[0])).map(([name,d])=>{const o={name};wNames.forEach(n=>{o[n]=d[n]||0});return o})
   const t8=top8(rows)
+  const tmData=buildTreemapData(rows,jiraTree)
   return(
     <div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 18px',marginBottom:16,display:'flex',gap:10,alignItems:'center'}}>
@@ -585,6 +698,12 @@ function TabMonthly({history,workers,viewMonth,setViewMonth}){
           </ResponsiveContainer>
         </Card>}
       </div>
+      <SectionTitle>시간대 패턴 (요일 × 시간대)</SectionTitle>
+      <WorkHeatmap rows={rows}/>
+      <SectionTitle>업무 편중 (파레토)</SectionTitle>
+      <ParetoAnalysis rows={rows}/>
+      <SectionTitle>업무 계층 비중 (트리맵)</SectionTitle>
+      <TreemapAnalysis data={tmData}/>
       <SectionTitle>직원별 업무 분석</SectionTitle>
       <WorkerAnalysis rows={rows} workers={periodWorkers}/>
       <SectionTitle>프로젝트 집중도 분석</SectionTitle>
@@ -594,7 +713,7 @@ function TabMonthly({history,workers,viewMonth,setViewMonth}){
 }
 
 // ── 연간 탭 ───────────────────────────────────────────────
-function TabYearly({history,workers,viewYear,setViewYear}){
+function TabYearly({history,workers,viewYear,setViewYear,jiraTree}){
   const yS=viewYear+'-01-01',yE=viewYear+'-12-31'
   const rows=history.filter(r=>toYear(r.work_date)===viewYear)
   const periodWorkers=workersForPeriod(workers,yS,yE)
@@ -606,6 +725,7 @@ function TabYearly({history,workers,viewYear,setViewYear}){
   const mData=Object.entries(mm).sort((a,b)=>parseInt(a[0])-parseInt(b[0])).map(([name,d])=>({name,...d}))
   const t8=top8(rows)
   const wbData=wNames.map((n,i)=>({name:n,업무수:agg[n]?.total||0,fill:COLORS[i%COLORS.length]}))
+  const tmData=buildTreemapData(rows,jiraTree)
   return(
     <div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 18px',marginBottom:16,display:'flex',gap:10,alignItems:'center'}}>
@@ -648,6 +768,12 @@ function TabYearly({history,workers,viewYear,setViewYear}){
           </ResponsiveContainer>
         </Card>}
       </div>
+      <SectionTitle>시간대 패턴 (요일 × 시간대)</SectionTitle>
+      <WorkHeatmap rows={rows}/>
+      <SectionTitle>업무 편중 (파레토)</SectionTitle>
+      <ParetoAnalysis rows={rows}/>
+      <SectionTitle>업무 계층 비중 (트리맵)</SectionTitle>
+      <TreemapAnalysis data={tmData}/>
       <SectionTitle>직원별 업무 분석</SectionTitle>
       <WorkerAnalysis rows={rows} workers={periodWorkers}/>
       <SectionTitle>프로젝트 집중도 분석</SectionTitle>
