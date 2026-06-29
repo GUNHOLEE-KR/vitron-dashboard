@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, LabelList, Treemap,
+         RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
          ComposedChart, XAxis, YAxis, Tooltip, Legend, ReferenceLine, ResponsiveContainer } from 'recharts'
 import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates } from './repositories/workerRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
@@ -299,6 +300,56 @@ function ParetoAnalysis({rows}){
             <LabelList dataKey="누적" position="top" fontSize={9} fill="#b45309" formatter={(v)=>`${v}%`}/>
           </Line>
         </ComposedChart>
+      </ResponsiveContainer>
+    </Card>
+  )
+}
+
+// ── 업무 구성 비율 추이 100% 누적 (프로토타입) ──────────────────────
+function buildTaskMix(rows,keyOf){
+  const topTasks=Object.entries(aggByWork(rows)).sort((a,b)=>b[1]-a[1]).slice(0,6).map(e=>e[0])
+  const set=new Set(topTasks),buckets={}
+  rows.forEach(r=>{if(!set.has(r.work_text))return;const {k,label}=keyOf(r);if(!buckets[k])buckets[k]={label,o:{}};buckets[k].o[r.work_text]=(buckets[k].o[r.work_text]||0)+1})
+  const data=Object.keys(buckets).sort().map(k=>{const o={name:buckets[k].label};topTasks.forEach(t=>{o[t]=buckets[k].o[t]||0});return o})
+  return {topTasks,data}
+}
+function MixTrend({data,tasks}){
+  if(!data||!data.length)return null
+  return(
+    <Card title="업무 구성 비율 추이 (100% 누적) · 기간별 업무유형 비중(%)">
+      <ResponsiveContainer width="100%" height={300}>
+        <AreaChart data={data} stackOffset="expand" margin={{top:10,right:12,left:0,bottom:0}}>
+          <XAxis dataKey="name" tick={{fontSize:11}}/>
+          <YAxis tickFormatter={v=>Math.round(v*100)+'%'} tick={{fontSize:11}}/>
+          <Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:10}}/>
+          {tasks.map((t,i)=>{const nm=cleanName(t);return <Area key={t} type="monotone" dataKey={t} name={nm.length>14?nm.slice(0,14)+'…':nm} stackId="m" stroke={COLORS[i%COLORS.length]} fill={COLORS[i%COLORS.length]} fillOpacity={0.6}/>})}
+        </AreaChart>
+      </ResponsiveContainer>
+    </Card>
+  )
+}
+
+// ── 직원 역량 비교 레이더 (프로토타입) ──────────────────────
+function RadarAnalysis({rows,workers}){
+  if(!rows.length)return null
+  const wNames=workers.map(w=>w.name).filter(n=>rows.some(r=>r.worker_name===n))
+  const topTasks=Object.entries(aggByWork(rows)).sort((a,b)=>b[1]-a[1]).slice(0,6).map(e=>e[0])
+  if(!topTasks.length||!wNames.length)return null
+  const data=topTasks.map(t=>{
+    const nm=cleanName(t),o={task:nm.length>10?nm.slice(0,10)+'…':nm}
+    wNames.forEach(w=>{o[w]=rows.filter(r=>r.worker_name===w&&r.work_text===t).length})
+    return o
+  })
+  return(
+    <Card title="직원 역량 비교 (레이더) · 상위 6개 업무유형별 시간(h)">
+      <ResponsiveContainer width="100%" height={380}>
+        <RadarChart data={data} outerRadius="72%">
+          <PolarGrid/>
+          <PolarAngleAxis dataKey="task" tick={{fontSize:10}}/>
+          <PolarRadiusAxis tick={{fontSize:9}}/>
+          <Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:11}}/>
+          {wNames.map((w,i)=><Radar key={w} name={w} dataKey={w} stroke={COLORS[i%COLORS.length]} fill={COLORS[i%COLORS.length]} fillOpacity={0.15}/>)}
+        </RadarChart>
       </ResponsiveContainer>
     </Card>
   )
@@ -617,6 +668,7 @@ function TabWeekly({history,workers,viewDate,setViewDate,jiraTree}){
   rows.forEach(r=>{if(!dm[r.work_date])dm[r.work_date]={};dm[r.work_date][r.worker_name]=(dm[r.work_date][r.worker_name]||0)+1})
   const barData=days.map(d=>{const o={name:d.slice(5)+'('+dayName(d)+')'};wNames.forEach(n=>{o[n]=dm[d][n]||0});return o})
   const tmData=buildTreemapData(rows,jiraTree)
+  const mix=buildTaskMix(rows,r=>({k:r.work_date,label:r.work_date.slice(5)+'('+dayName(r.work_date)+')'}))
   return(
     <div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 18px',marginBottom:16,display:'flex',gap:10,alignItems:'center'}}>
@@ -646,6 +698,10 @@ function TabWeekly({history,workers,viewDate,setViewDate,jiraTree}){
       <ParetoAnalysis rows={rows}/>
       <SectionTitle>업무 계층 비중 (트리맵)</SectionTitle>
       <TreemapAnalysis data={tmData}/>
+      <SectionTitle>직원 역량 비교 (레이더)</SectionTitle>
+      <RadarAnalysis rows={rows} workers={periodWorkers}/>
+      <SectionTitle>업무 구성 비율 추이 (100%)</SectionTitle>
+      <MixTrend data={mix.data} tasks={mix.topTasks}/>
       <SectionTitle>직원별 업무 분석</SectionTitle>
       <WorkerAnalysis rows={rows} workers={periodWorkers}/>
       <SectionTitle>프로젝트 집중도 분석</SectionTitle>
@@ -667,6 +723,7 @@ function TabMonthly({history,workers,viewMonth,setViewMonth,jiraTree}){
   const wData=Object.entries(wm).sort((a,b)=>a[0].localeCompare(b[0])).map(([name,d])=>{const o={name};wNames.forEach(n=>{o[n]=d[n]||0});return o})
   const t8=top8(rows)
   const tmData=buildTreemapData(rows,jiraTree)
+  const mix=buildTaskMix(rows,r=>({k:String(weekNum(r.work_date)),label:weekNum(r.work_date)+'주'}))
   return(
     <div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 18px',marginBottom:16,display:'flex',gap:10,alignItems:'center'}}>
@@ -704,6 +761,10 @@ function TabMonthly({history,workers,viewMonth,setViewMonth,jiraTree}){
       <ParetoAnalysis rows={rows}/>
       <SectionTitle>업무 계층 비중 (트리맵)</SectionTitle>
       <TreemapAnalysis data={tmData}/>
+      <SectionTitle>직원 역량 비교 (레이더)</SectionTitle>
+      <RadarAnalysis rows={rows} workers={periodWorkers}/>
+      <SectionTitle>업무 구성 비율 추이 (100%)</SectionTitle>
+      <MixTrend data={mix.data} tasks={mix.topTasks}/>
       <SectionTitle>직원별 업무 분석</SectionTitle>
       <WorkerAnalysis rows={rows} workers={periodWorkers}/>
       <SectionTitle>프로젝트 집중도 분석</SectionTitle>
@@ -726,6 +787,7 @@ function TabYearly({history,workers,viewYear,setViewYear,jiraTree}){
   const t8=top8(rows)
   const wbData=wNames.map((n,i)=>({name:n,업무수:agg[n]?.total||0,fill:COLORS[i%COLORS.length]}))
   const tmData=buildTreemapData(rows,jiraTree)
+  const mix=buildTaskMix(rows,r=>({k:r.work_date.slice(5,7),label:parseInt(r.work_date.slice(5,7))+'월'}))
   return(
     <div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 18px',marginBottom:16,display:'flex',gap:10,alignItems:'center'}}>
@@ -774,6 +836,10 @@ function TabYearly({history,workers,viewYear,setViewYear,jiraTree}){
       <ParetoAnalysis rows={rows}/>
       <SectionTitle>업무 계층 비중 (트리맵)</SectionTitle>
       <TreemapAnalysis data={tmData}/>
+      <SectionTitle>직원 역량 비교 (레이더)</SectionTitle>
+      <RadarAnalysis rows={rows} workers={periodWorkers}/>
+      <SectionTitle>업무 구성 비율 추이 (100%)</SectionTitle>
+      <MixTrend data={mix.data} tasks={mix.topTasks}/>
       <SectionTitle>직원별 업무 분석</SectionTitle>
       <WorkerAnalysis rows={rows} workers={periodWorkers}/>
       <SectionTitle>프로젝트 집중도 분석</SectionTitle>
