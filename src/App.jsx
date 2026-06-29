@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line,
+import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, LabelList,
          ComposedChart, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates } from './repositories/workerRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
@@ -11,6 +11,19 @@ const TABS=['today','daily','weekly','monthly','yearly','settings']
 const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'월간',yearly:'연간',settings:'설정'}
 const thS={background:'#f9fafb',padding:'8px 10px',textAlign:'center',fontWeight:700,border:'1px solid #e5e7eb',fontSize:11,color:'#6b7280',whiteSpace:'nowrap'}
 const tdS={padding:'6px 10px',border:'1px solid #e5e7eb',textAlign:'center',verticalAlign:'middle',fontSize:12}
+
+// 차트 공통 헬퍼 — 단위는 모두 "시간(h)"
+const RAD=Math.PI/180
+const numLabel=(v)=>(v?String(v):'')              // 0/빈값은 라벨 숨김
+const hourTip=(v)=>`${v??0}h`                       // 툴팁 값에 h 부착
+// 파이 조각 외부 라벨: "이름 N h(%)" — 툴팁(벌룬) 내용을 차트에 직접 표기
+function renderPieLabel({cx,cy,midAngle,outerRadius,percent,name,value}){
+  if(percent<0.06)return null                       // 너무 작은 조각은 생략(겹침 방지)
+  const r=outerRadius+12
+  const x=cx+r*Math.cos(-midAngle*RAD),y=cy+r*Math.sin(-midAngle*RAD)
+  const nm=name.length>8?name.slice(0,8)+'…':name
+  return <text x={x} y={y} fill="#374151" fontSize={10} fontWeight={600} textAnchor={x>=cx?'start':'end'} dominantBaseline="central">{`${nm} ${value}h(${Math.round(percent*100)}%)`}</text>
+}
 
 function today(){return new Date().toISOString().slice(0,10)}
 function toMonth(d){return d.slice(0,7)}
@@ -88,18 +101,22 @@ function WorkerAnalysis({rows,workers}){
   })
   return(
     <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,flex:2,minWidth:300}}>
-        <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>직원별 업무 구성</div>
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
+        <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>직원별 업무 구성 · 단위: 시간(h)</div>
         <ResponsiveContainer width="100%" height={Math.max(200,wNames.length*52+60)}>
           <BarChart data={barData} layout="vertical">
-            <XAxis type="number" tick={{fontSize:11}}/>
+            <XAxis type="number" unit="h" tick={{fontSize:11}}/>
             <YAxis type="category" dataKey="name" tick={{fontSize:12}} width={55}/>
-            <Tooltip/><Legend wrapperStyle={{fontSize:10}}/>
-            {taskLabels.map((t,i)=><Bar key={t} dataKey={t} stackId="a" fill={COLORS[i%COLORS.length]} radius={i===taskLabels.length-1?[0,4,4,0]:[0,0,0,0]}/>)}
+            <Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:10}}/>
+            {taskLabels.map((t,i)=>(
+              <Bar key={t} dataKey={t} stackId="a" fill={COLORS[i%COLORS.length]} radius={i===taskLabels.length-1?[0,4,4,0]:[0,0,0,0]}>
+                <LabelList dataKey={t} position="center" fontSize={9} fill="#fff" formatter={numLabel}/>
+              </Bar>
+            ))}
           </BarChart>
         </ResponsiveContainer>
       </div>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,flex:1.5,minWidth:280,overflowX:'auto'}}>
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,flex:1.5,minWidth:260,maxWidth:'100%',boxSizing:'border-box',overflowX:'auto'}}>
         <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>직원별 업무 상세</div>
         <table style={{width:'100%',borderCollapse:'collapse'}}>
           <thead><tr>
@@ -140,21 +157,25 @@ function ProjectAnalysis({rows,allHistory}){
     })
   return(
     <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,flex:2,minWidth:300}}>
-        <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>프로젝트 기간/누적 비교</div>
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
+        <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>프로젝트 기간/누적 비교 · 단위: 시간(h), 집중도(%)</div>
         <ResponsiveContainer width="100%" height={280}>
           <ComposedChart data={data}>
             <XAxis dataKey="name" tick={{fontSize:10}} interval={0} angle={-20} textAnchor="end" height={55}/>
-            <YAxis yAxisId="left" orientation="left" tick={{fontSize:11}}/>
+            <YAxis yAxisId="left" orientation="left" unit="h" tick={{fontSize:11}}/>
             <YAxis yAxisId="right" orientation="right" unit="%" domain={[0,100]} tick={{fontSize:11}}/>
-            <Tooltip/><Legend wrapperStyle={{fontSize:11}}/>
-            <Bar yAxisId="left" dataKey="기간" fill="#3b82f6" barSize={18} radius={[4,4,0,0]}/>
+            <Tooltip formatter={(v,n)=>n==='집중도'?`${v??0}%`:`${v??0}h`}/><Legend wrapperStyle={{fontSize:11}}/>
+            <Bar yAxisId="left" dataKey="기간" fill="#3b82f6" barSize={18} radius={[4,4,0,0]}>
+              <LabelList dataKey="기간" position="top" fontSize={9} fill="#374151" formatter={numLabel}/>
+            </Bar>
             <Bar yAxisId="left" dataKey="누적" fill="#e5e7eb" barSize={18} radius={[4,4,0,0]}/>
-            <Line yAxisId="right" type="monotone" dataKey="집중도" stroke="#f59e0b" strokeWidth={2} dot={{r:4}}/>
+            <Line yAxisId="right" type="monotone" dataKey="집중도" stroke="#f59e0b" strokeWidth={2} dot={{r:4}}>
+              <LabelList dataKey="집중도" position="top" fontSize={9} fill="#b45309" formatter={(v)=>v?`${v}%`:''}/>
+            </Line>
           </ComposedChart>
         </ResponsiveContainer>
       </div>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,flex:1.5,minWidth:280,overflowX:'auto'}}>
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,flex:1.5,minWidth:260,maxWidth:'100%',boxSizing:'border-box',overflowX:'auto'}}>
         <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>프로젝트 집중도 상세</div>
         <table style={{width:'100%',borderCollapse:'collapse'}}>
           <thead><tr>
@@ -275,7 +296,7 @@ export default function App(){
               cursor:'pointer',whiteSpace:'nowrap'}}>{TAB_LABELS[t]}</button>
         ))}
       </nav>
-      <main style={{padding:'16px 0'}}>
+      <main style={{padding:'16px 20px'}}>
         {tab==='today'   &&<TabToday   workers={activeWorkers} grid={grid} setGrid={setGrid}
           jiraTree={jiraTree} selWorker={selWorker} setSelWorker={setSelWorker}
           onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}/>}
@@ -459,18 +480,21 @@ function TabDaily({history,workers,viewDate,setViewDate}){
         {label:'1인 평균',value:Object.keys(agg).length>0?Math.round(total/Object.keys(agg).length):0,color:'#6d28d9'}
       ]}/>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
-        <Card title="직원별 업무량" style={{flex:2,minWidth:280}}>
+        <Card title="직원별 업무량 · 단위: 시간(h)" style={{flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
           <ResponsiveContainer width="100%" height={230}>
-            <BarChart data={barData}><XAxis dataKey="name" tick={{fontSize:12}}/><YAxis/><Tooltip/>
-              <Bar dataKey="업무수" radius={[4,4,0,0]}>{barData.map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Bar>
+            <BarChart data={barData}><XAxis dataKey="name" tick={{fontSize:12}}/><YAxis unit="h"/><Tooltip formatter={hourTip}/>
+              <Bar dataKey="업무수" radius={[4,4,0,0]}>
+                {barData.map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
+                <LabelList dataKey="업무수" position="top" fontSize={10} fill="#374151" formatter={numLabel}/>
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
         </Card>
-        {t8.length>0&&<Card title="업무 비중" style={{flex:1,minWidth:240}}>
-          <ResponsiveContainer width="100%" height={230}>
-            <PieChart><Pie data={t8} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80}>
+        {t8.length>0&&<Card title="업무 비중 · 단위: 시간(h)" style={{flex:1,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
+          <ResponsiveContainer width="100%" height={250}>
+            <PieChart margin={{top:8,right:70,left:70,bottom:8}}><Pie data={t8} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={62} label={renderPieLabel} labelLine={true}>
               {t8.map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Pie>
-              <Tooltip/><Legend wrapperStyle={{fontSize:11}}/></PieChart>
+              <Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:11}}/></PieChart>
           </ResponsiveContainer>
         </Card>}
       </div>
@@ -493,7 +517,7 @@ function TabWeekly({history,workers,viewDate,setViewDate}){
   const wNames=periodWorkers.map(w=>w.name)
   const dm={}
   rows.forEach(r=>{if(!dm[r.work_date])dm[r.work_date]={};dm[r.work_date][r.worker_name]=(dm[r.work_date][r.worker_name]||0)+1})
-  const barData=days.map(d=>({name:d.slice(5)+'('+dayName(d)+')',...dm[d]}))
+  const barData=days.map(d=>{const o={name:d.slice(5)+'('+dayName(d)+')'};wNames.forEach(n=>{o[n]=dm[d][n]||0});return o})
   return(
     <div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 18px',marginBottom:16,display:'flex',gap:10,alignItems:'center'}}>
@@ -506,11 +530,13 @@ function TabWeekly({history,workers,viewDate,setViewDate}){
         {label:'일평균',value:days.length>0?Math.round(total/days.length):0,color:'#b45309'},
         {label:'1인 합계',value:wNames.length>0?Math.round(total/wNames.length):0,color:'#6d28d9'}
       ]}/>
-      <Card title="일별 분포">
+      <Card title="일별 분포 (누적 영역) · 단위: 시간(h)">
         <ResponsiveContainer width="100%" height={260}>
-          <BarChart data={barData}><XAxis dataKey="name" tick={{fontSize:11}}/><YAxis/><Tooltip/><Legend wrapperStyle={{fontSize:11}}/>
-            {wNames.map((n,i)=><Bar key={n} dataKey={n} stackId="a" fill={COLORS[i%COLORS.length]} radius={i===wNames.length-1?[3,3,0,0]:[0,0,0,0]}/>)}
-          </BarChart>
+          <AreaChart data={barData}><XAxis dataKey="name" tick={{fontSize:11}}/><YAxis unit="h"/><Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:11}}/>
+            {wNames.map((n,i)=>(
+              <Area key={n} type="monotone" dataKey={n} stackId="a" stroke={COLORS[i%COLORS.length]} fill={COLORS[i%COLORS.length]} fillOpacity={0.5}/>
+            ))}
+          </AreaChart>
         </ResponsiveContainer>
       </Card>
       <SectionTitle>직원별 업무 분석</SectionTitle>
@@ -531,7 +557,7 @@ function TabMonthly({history,workers,viewMonth,setViewMonth}){
   const wm={}
   rows.forEach(r=>{const w=weekNum(r.work_date)+'주';if(!wm[w])wm[w]={};wm[w][r.worker_name]=(wm[w][r.worker_name]||0)+1})
   const wNames=periodWorkers.map(w=>w.name)
-  const wData=Object.entries(wm).sort((a,b)=>a[0].localeCompare(b[0])).map(([name,d])=>({name,...d}))
+  const wData=Object.entries(wm).sort((a,b)=>a[0].localeCompare(b[0])).map(([name,d])=>{const o={name};wNames.forEach(n=>{o[n]=d[n]||0});return o})
   const t8=top8(rows)
   return(
     <div>
@@ -545,18 +571,20 @@ function TabMonthly({history,workers,viewMonth,setViewMonth}){
         {label:'1인 총 업무',value:wNames.length>0?Math.round(total/wNames.length):0,color:'#6d28d9'}
       ]}/>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
-        <Card title="주차별 분포" style={{flex:2,minWidth:280}}>
+        <Card title="주차별 분포 (누적 영역) · 단위: 시간(h)" style={{flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
           <ResponsiveContainer width="100%" height={250}>
-            <BarChart data={wData}><XAxis dataKey="name" tick={{fontSize:12}}/><YAxis/><Tooltip/><Legend wrapperStyle={{fontSize:11}}/>
-              {wNames.map((n,i)=><Bar key={n} dataKey={n} stackId="a" fill={COLORS[i%COLORS.length]} radius={i===wNames.length-1?[3,3,0,0]:[0,0,0,0]}/>)}
-            </BarChart>
+            <AreaChart data={wData}><XAxis dataKey="name" tick={{fontSize:12}}/><YAxis unit="h"/><Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:11}}/>
+              {wNames.map((n,i)=>(
+                <Area key={n} type="monotone" dataKey={n} stackId="a" stroke={COLORS[i%COLORS.length]} fill={COLORS[i%COLORS.length]} fillOpacity={0.5}/>
+              ))}
+            </AreaChart>
           </ResponsiveContainer>
         </Card>
-        {t8.length>0&&<Card title="업무 유형" style={{flex:1,minWidth:240}}>
+        {t8.length>0&&<Card title="업무 유형 · 단위: 시간(h)" style={{flex:1,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
           <ResponsiveContainer width="100%" height={250}>
-            <PieChart><Pie data={t8} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80}>
+            <PieChart margin={{top:8,right:70,left:70,bottom:8}}><Pie data={t8} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={62} label={renderPieLabel} labelLine={true}>
               {t8.map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Pie>
-              <Tooltip/><Legend wrapperStyle={{fontSize:10}}/></PieChart>
+              <Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:10}}/></PieChart>
           </ResponsiveContainer>
         </Card>}
       </div>
@@ -592,27 +620,30 @@ function TabYearly({history,workers,viewYear,setViewYear}){
         {label:'업무 종류',value:Object.keys(aggByWork(rows)).length,color:'#b45309'},
         {label:'1인 연간 합계',value:wNames.length>0?Math.round(total/wNames.length):0,color:'#6d28d9'}
       ]}/>
-      <Card title="월별 업무량 추이">
+      <Card title="월별 업무량 추이 · 단위: 시간(h)">
         <ResponsiveContainer width="100%" height={260}>
-          <LineChart data={mData}><XAxis dataKey="name" tick={{fontSize:11}}/><YAxis/><Tooltip/><Legend wrapperStyle={{fontSize:11}}/>
+          <LineChart data={mData}><XAxis dataKey="name" tick={{fontSize:11}}/><YAxis unit="h"/><Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:11}}/>
             {wNames.map((n,i)=><Line key={n} type="monotone" dataKey={n} stroke={COLORS[i%COLORS.length]} strokeWidth={2} dot={{r:3}}/>)}
           </LineChart>
         </ResponsiveContainer>
       </Card>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
-        <Card title="직원별 연간 실적" style={{flex:1.5,minWidth:280}}>
-          <ResponsiveContainer width="100%" height={wNames.length*44+60}>
+        <Card title="직원별 연간 실적 · 단위: 시간(h)" style={{flex:1.5,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
+          <ResponsiveContainer width="100%" height={Math.max(240,wNames.length*44+60)}>
             <BarChart data={wbData} layout="vertical">
-              <XAxis type="number"/><YAxis type="category" dataKey="name" tick={{fontSize:12}} width={60}/><Tooltip/>
-              <Bar dataKey="업무수" radius={[0,4,4,0]}>{wbData.map((d,i)=><Cell key={i} fill={d.fill}/>)}</Bar>
+              <XAxis type="number" unit="h"/><YAxis type="category" dataKey="name" tick={{fontSize:12}} width={60}/><Tooltip formatter={hourTip}/>
+              <Bar dataKey="업무수" radius={[0,4,4,0]}>
+                {wbData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
+                <LabelList dataKey="업무수" position="right" fontSize={10} fill="#374151" formatter={numLabel}/>
+              </Bar>
             </BarChart>
           </ResponsiveContainer>
         </Card>
-        {t8.length>0&&<Card title="연간 업무 비중" style={{flex:1,minWidth:240}}>
-          <ResponsiveContainer width="100%" height={wNames.length*44+60}>
-            <PieChart><Pie data={t8} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80}>
+        {t8.length>0&&<Card title="연간 업무 비중 · 단위: 시간(h)" style={{flex:1,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
+          <ResponsiveContainer width="100%" height={Math.max(240,wNames.length*44+60)}>
+            <PieChart margin={{top:8,right:70,left:70,bottom:8}}><Pie data={t8} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={62} label={renderPieLabel} labelLine={true}>
               {t8.map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Pie>
-              <Tooltip/><Legend wrapperStyle={{fontSize:10}}/></PieChart>
+              <Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:10}}/></PieChart>
           </ResponsiveContainer>
         </Card>}
       </div>
