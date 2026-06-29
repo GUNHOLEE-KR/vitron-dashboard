@@ -13,17 +13,10 @@ const thS={background:'#f9fafb',padding:'8px 10px',textAlign:'center',fontWeight
 const tdS={padding:'6px 10px',border:'1px solid #e5e7eb',textAlign:'center',verticalAlign:'middle',fontSize:12}
 
 // 차트 공통 헬퍼 — 단위는 모두 "시간(h)"
-const RAD=Math.PI/180
 const numLabel=(v)=>(v?String(v):'')              // 0/빈값은 라벨 숨김
 const hourTip=(v)=>`${v??0}h`                       // 툴팁 값에 h 부착
-// 파이 조각 외부 라벨: "이름 N h(%)" — 툴팁(벌룬) 내용을 차트에 직접 표기
-function renderPieLabel({cx,cy,midAngle,outerRadius,percent,name,value}){
-  if(percent<0.06)return null                       // 너무 작은 조각은 생략(겹침 방지)
-  const r=outerRadius+12
-  const x=cx+r*Math.cos(-midAngle*RAD),y=cy+r*Math.sin(-midAngle*RAD)
-  const nm=name.length>8?name.slice(0,8)+'…':name
-  return <text x={x} y={y} fill="#374151" fontSize={10} fontWeight={600} textAnchor={x>=cx?'start':'end'} dominantBaseline="central">{`${nm} ${value}h(${Math.round(percent*100)}%)`}</text>
-}
+// 업무명 표시 정리: 맨 앞 "[VITRON-167]" 같은 지라번호 prefix 제거 → 순수 이름만 (저장값엔 영향 없음)
+const cleanName=(s)=>String(s||'').replace(/^\s*\[[^\]]*\]\s*/,'')
 
 function today(){return new Date().toISOString().slice(0,10)}
 function toMonth(d){return d.slice(0,7)}
@@ -66,7 +59,7 @@ function aggByWorker(rows){
 function aggByWork(rows){const m={};rows.forEach(r=>{m[r.work_text]=(m[r.work_text]||0)+1});return m}
 function top8(rows){
   return Object.entries(aggByWork(rows)).sort((a,b)=>b[1]-a[1]).slice(0,8)
-    .map(([name,value])=>({name:name.length>15?name.slice(0,15)+'…':name,value}))
+    .map(([name,value])=>{const nm=cleanName(name);return{name:nm.length>15?nm.slice(0,15)+'…':nm,value}})
 }
 function buildParentSel(rows,jiraTree){
   const ps={}
@@ -83,11 +76,11 @@ function WorkerAnalysis({rows,workers}){
   if(!rows.length)return null
   const wNames=workers.map(w=>w.name).filter(n=>rows.some(r=>r.worker_name===n))
   const topTasks=Object.entries(aggByWork(rows)).sort((a,b)=>b[1]-a[1]).slice(0,8).map(e=>e[0])
-  const taskLabels=topTasks.map(t=>t.length>16?t.slice(0,16)+'…':t)
+  const taskName=t=>{const nm=cleanName(t);return nm.length>16?nm.slice(0,16)+'…':nm}
   const barData=wNames.map(w=>{
     const wRows=rows.filter(r=>r.worker_name===w)
     const obj={name:w,total:wRows.length}
-    topTasks.forEach((t,i)=>{obj[taskLabels[i]]=wRows.filter(r=>r.work_text===t).length})
+    topTasks.forEach(t=>{obj[t]=wRows.filter(r=>r.work_text===t).length})
     return obj
   })
   const tableRows=[]
@@ -108,8 +101,8 @@ function WorkerAnalysis({rows,workers}){
             <XAxis type="number" unit="h" tick={{fontSize:11}}/>
             <YAxis type="category" dataKey="name" tick={{fontSize:12}} width={55}/>
             <Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:10}}/>
-            {taskLabels.map((t,i)=>(
-              <Bar key={t} dataKey={t} stackId="a" fill={COLORS[i%COLORS.length]} radius={i===taskLabels.length-1?[0,4,4,0]:[0,0,0,0]}>
+            {topTasks.map((t,i)=>(
+              <Bar key={t} dataKey={t} name={taskName(t)} stackId="a" fill={COLORS[i%COLORS.length]} radius={i===topTasks.length-1?[0,4,4,0]:[0,0,0,0]}>
                 <LabelList dataKey={t} position="center" fontSize={9} fill="#fff" formatter={numLabel}/>
               </Bar>
             ))}
@@ -127,7 +120,7 @@ function WorkerAnalysis({rows,workers}){
             {tableRows.map((r,i)=>(
               <tr key={i} style={{background:i%2===0?'#f9fafb':'#fff'}}>
                 <td style={{...tdS,fontWeight:600,color:COLORS[r.wi%COLORS.length]}}>{r.worker}</td>
-                <td style={{...tdS,textAlign:'left',maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={r.task}>{r.task}</td>
+                <td style={{...tdS,textAlign:'left',maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={cleanName(r.task)}>{cleanName(r.task)}</td>
                 <td style={tdS}><span style={{background:'#eff6ff',color:'#1a56db',padding:'2px 8px',borderRadius:12,fontWeight:700}}>{r.hours}h</span></td>
                 <td style={tdS}>
                   <div style={{display:'flex',alignItems:'center',gap:5}}>
@@ -152,8 +145,8 @@ function ProjectAnalysis({rows,allHistory}){
   const periodAgg=aggByWork(rows),totalAgg=aggByWork(allHistory)
   const data=Object.entries(periodAgg).sort((a,b)=>b[1]-a[1]).slice(0,10)
     .map(([name,ph])=>{
-      const th=totalAgg[name]||ph
-      return{name:name.length>16?name.slice(0,16)+'…':name,fullName:name,기간:ph,누적:th,집중도:Math.round(ph/th*100)}
+      const th=totalAgg[name]||ph,nm=cleanName(name)
+      return{name:nm.length>16?nm.slice(0,16)+'…':nm,fullName:nm,기간:ph,누적:th,집중도:Math.round(ph/th*100)}
     })
   return(
     <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
@@ -482,7 +475,7 @@ function TabDaily({history,workers,viewDate,setViewDate}){
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <Card title="직원별 업무량 · 단위: 시간(h)" style={{flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
           <ResponsiveContainer width="100%" height={230}>
-            <BarChart data={barData}><XAxis dataKey="name" tick={{fontSize:12}}/><YAxis unit="h"/><Tooltip formatter={hourTip}/>
+            <BarChart data={barData} margin={{top:16,right:8,left:0,bottom:0}}><XAxis dataKey="name" tick={{fontSize:12}}/><YAxis unit="h"/><Tooltip formatter={hourTip}/>
               <Bar dataKey="업무수" radius={[4,4,0,0]}>
                 {barData.map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
                 <LabelList dataKey="업무수" position="top" fontSize={10} fill="#374151" formatter={numLabel}/>
@@ -492,7 +485,7 @@ function TabDaily({history,workers,viewDate,setViewDate}){
         </Card>
         {t8.length>0&&<Card title="업무 비중 · 단위: 시간(h)" style={{flex:1,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
           <ResponsiveContainer width="100%" height={250}>
-            <PieChart margin={{top:8,right:70,left:70,bottom:8}}><Pie data={t8} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={62} label={renderPieLabel} labelLine={true}>
+            <PieChart><Pie data={t8} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80}>
               {t8.map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Pie>
               <Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:11}}/></PieChart>
           </ResponsiveContainer>
@@ -532,9 +525,11 @@ function TabWeekly({history,workers,viewDate,setViewDate}){
       ]}/>
       <Card title="일별 분포 (누적 영역) · 단위: 시간(h)">
         <ResponsiveContainer width="100%" height={260}>
-          <AreaChart data={barData}><XAxis dataKey="name" tick={{fontSize:11}}/><YAxis unit="h"/><Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:11}}/>
+          <AreaChart data={barData} margin={{top:16,right:12,left:0,bottom:0}}><XAxis dataKey="name" tick={{fontSize:11}}/><YAxis unit="h"/><Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:11}}/>
             {wNames.map((n,i)=>(
-              <Area key={n} type="monotone" dataKey={n} stackId="a" stroke={COLORS[i%COLORS.length]} fill={COLORS[i%COLORS.length]} fillOpacity={0.5}/>
+              <Area key={n} type="monotone" dataKey={n} stackId="a" stroke={COLORS[i%COLORS.length]} fill={COLORS[i%COLORS.length]} fillOpacity={0.5}>
+                <LabelList dataKey={n} position="top" fontSize={9} fill="#374151" formatter={numLabel}/>
+              </Area>
             ))}
           </AreaChart>
         </ResponsiveContainer>
@@ -573,16 +568,18 @@ function TabMonthly({history,workers,viewMonth,setViewMonth}){
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <Card title="주차별 분포 (누적 영역) · 단위: 시간(h)" style={{flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
           <ResponsiveContainer width="100%" height={250}>
-            <AreaChart data={wData}><XAxis dataKey="name" tick={{fontSize:12}}/><YAxis unit="h"/><Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:11}}/>
+            <AreaChart data={wData} margin={{top:16,right:12,left:0,bottom:0}}><XAxis dataKey="name" tick={{fontSize:12}}/><YAxis unit="h"/><Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:11}}/>
               {wNames.map((n,i)=>(
-                <Area key={n} type="monotone" dataKey={n} stackId="a" stroke={COLORS[i%COLORS.length]} fill={COLORS[i%COLORS.length]} fillOpacity={0.5}/>
+                <Area key={n} type="monotone" dataKey={n} stackId="a" stroke={COLORS[i%COLORS.length]} fill={COLORS[i%COLORS.length]} fillOpacity={0.5}>
+                  <LabelList dataKey={n} position="top" fontSize={9} fill="#374151" formatter={numLabel}/>
+                </Area>
               ))}
             </AreaChart>
           </ResponsiveContainer>
         </Card>
         {t8.length>0&&<Card title="업무 유형 · 단위: 시간(h)" style={{flex:1,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
           <ResponsiveContainer width="100%" height={250}>
-            <PieChart margin={{top:8,right:70,left:70,bottom:8}}><Pie data={t8} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={62} label={renderPieLabel} labelLine={true}>
+            <PieChart><Pie data={t8} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80}>
               {t8.map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Pie>
               <Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:10}}/></PieChart>
           </ResponsiveContainer>
@@ -622,15 +619,19 @@ function TabYearly({history,workers,viewYear,setViewYear}){
       ]}/>
       <Card title="월별 업무량 추이 · 단위: 시간(h)">
         <ResponsiveContainer width="100%" height={260}>
-          <LineChart data={mData}><XAxis dataKey="name" tick={{fontSize:11}}/><YAxis unit="h"/><Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:11}}/>
-            {wNames.map((n,i)=><Line key={n} type="monotone" dataKey={n} stroke={COLORS[i%COLORS.length]} strokeWidth={2} dot={{r:3}}/>)}
+          <LineChart data={mData} margin={{top:14,right:30,left:0,bottom:0}}><XAxis dataKey="name" tick={{fontSize:11}}/><YAxis unit="h"/><Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:11}}/>
+            {wNames.map((n,i)=>(
+              <Line key={n} type="monotone" dataKey={n} stroke={COLORS[i%COLORS.length]} strokeWidth={2} dot={{r:3}}>
+                <LabelList dataKey={n} position="top" fontSize={9} fill="#374151" formatter={numLabel}/>
+              </Line>
+            ))}
           </LineChart>
         </ResponsiveContainer>
       </Card>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <Card title="직원별 연간 실적 · 단위: 시간(h)" style={{flex:1.5,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
           <ResponsiveContainer width="100%" height={Math.max(240,wNames.length*44+60)}>
-            <BarChart data={wbData} layout="vertical">
+            <BarChart data={wbData} layout="vertical" margin={{right:32}}>
               <XAxis type="number" unit="h"/><YAxis type="category" dataKey="name" tick={{fontSize:12}} width={60}/><Tooltip formatter={hourTip}/>
               <Bar dataKey="업무수" radius={[0,4,4,0]}>
                 {wbData.map((d,i)=><Cell key={i} fill={d.fill}/>)}
@@ -641,7 +642,7 @@ function TabYearly({history,workers,viewYear,setViewYear}){
         </Card>
         {t8.length>0&&<Card title="연간 업무 비중 · 단위: 시간(h)" style={{flex:1,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
           <ResponsiveContainer width="100%" height={Math.max(240,wNames.length*44+60)}>
-            <PieChart margin={{top:8,right:70,left:70,bottom:8}}><Pie data={t8} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={62} label={renderPieLabel} labelLine={true}>
+            <PieChart><Pie data={t8} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={80}>
               {t8.map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Pie>
               <Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:10}}/></PieChart>
           </ResponsiveContainer>
