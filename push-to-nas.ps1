@@ -5,6 +5,9 @@
 #
 # 커밋된 내용(git HEAD)만 배포되므로 node_modules 와 .env 는 전송되지 않는다.
 # NAS 의 .env 는 그대로 유지된다.
+#
+# SSH 키가 등록돼 있어 비밀번호는 묻지 않는다. 만약 비밀번호를 묻는다면
+# ~/.ssh/id_ed25519 가 사라졌거나 NAS 의 authorized_keys 가 초기화된 경우다.
 
 param([switch]$Force)
 
@@ -34,11 +37,11 @@ Write-Host "[1/3] 압축 (커밋 $commit)" -ForegroundColor Cyan
 git archive --format=tar.gz -o $archive HEAD
 
 try {
-    Write-Host "[2/3] NAS 전송 — 비밀번호를 입력해 주세요" -ForegroundColor Cyan
+    Write-Host "[2/3] NAS 전송" -ForegroundColor Cyan
     scp ".\$archive" "${nas}:$remoteDir/"
     if ($LASTEXITCODE -ne 0) { throw "전송 실패 (scp exit $LASTEXITCODE)" }
 
-    Write-Host "[3/3] 원격 배포 — 비밀번호를 한 번 더 입력해 주세요" -ForegroundColor Cyan
+    Write-Host "[3/3] 원격 빌드 및 컨테이너 교체" -ForegroundColor Cyan
     ssh $nas "cd $remoteDir && tar -xzf $archive && ./deploy.sh"
     if ($LASTEXITCODE -ne 0) { throw "원격 배포 실패 (ssh exit $LASTEXITCODE)" }
 }
