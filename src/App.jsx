@@ -7,6 +7,9 @@ import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/
 import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
 
 const WORK_HOURS=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
+// 정규 근무시간 (09:00 시작 ~ 18:00 종료 → 17:00 행까지 포함) — 입력표에서 노랗게 강조
+const BUSINESS_START_HOUR=9, BUSINESS_END_HOUR=17
+const isBusinessHour=h=>h>=BUSINESS_START_HOUR&&h<=BUSINESS_END_HOUR
 const COLORS=['#3b82f6','#10b981','#f59e0b','#8b5cf6','#06b6d4','#ec4899','#84cc16','#f97316']
 const TABS=['today','daily','weekly','monthly','yearly','settings']
 const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'월간',yearly:'연간',settings:'설정'}
@@ -497,7 +500,6 @@ export default function App(){
 // ── 오늘 업무 탭 ─────────────────────────────────────────
 function TabToday({workers,grid,setGrid,jiraTree,selWorker,setSelWorker,onSave,onLoadDate,parentSel,setParentSel}){
   const [ldDate,setLdDate]=useState(today())
-  const curH=new Date().getHours()
   const jiraParents=Object.keys(jiraTree)
   // 다중 시간 선택
   const [selHours,setSelHours]=useState(new Set())
@@ -576,12 +578,12 @@ function TabToday({workers,grid,setGrid,jiraTree,selWorker,setSelWorker,onSave,o
           </tr></thead>
           <tbody>
             {WORK_HOURS.map(h=>(
-              <tr key={h} style={{background:selHours.has(h)?'#e0f2fe':h===curH?'#fef9c3':'#fff'}}>
-                {selWorker&&<td style={{border:'1px solid #e5e7eb',textAlign:'center',padding:'4px',background:selHours.has(h)?'#bae6fd':h===curH?'#fef08a':'#f9fafb'}}>
+              <tr key={h} style={{background:selHours.has(h)?'#e0f2fe':isBusinessHour(h)?'#fef9c3':'#fff'}}>
+                {selWorker&&<td style={{border:'1px solid #e5e7eb',textAlign:'center',padding:'4px',background:selHours.has(h)?'#bae6fd':isBusinessHour(h)?'#fef08a':'#f9fafb'}}>
                   <input type="checkbox" checked={selHours.has(h)} onChange={()=>toggleHour(h)} style={{cursor:'pointer'}}/>
                 </td>}
-                <td style={{background:selHours.has(h)?'#7dd3fc':h===curH?'#fef08a':'#f9fafb',fontWeight:700,fontSize:11,color:'#6b7280',padding:'4px 8px',border:'1px solid #e5e7eb',textAlign:'center',whiteSpace:'nowrap'}}>
-                  {String(h).padStart(2,'0')}:00{h===curH?' ▶':''}
+                <td style={{background:selHours.has(h)?'#7dd3fc':isBusinessHour(h)?'#fef08a':'#f9fafb',fontWeight:700,fontSize:11,color:'#6b7280',padding:'4px 8px',border:'1px solid #e5e7eb',textAlign:'center',whiteSpace:'nowrap'}}>
+                  {String(h).padStart(2,'0')}:00
                 </td>
                 {workers.map(w=>{
                   const key=`${h}_${w.name}`,val=grid[key]||'',isMe=selWorker===w.name
