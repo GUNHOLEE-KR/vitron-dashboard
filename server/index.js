@@ -46,37 +46,43 @@ app.post('/api/workers', async (req, res) => {
   }
 })
 
-app.patch('/api/workers/:name/status', async (req, res) => {
-  const { name } = req.params
+// 아래 세 API 는 이름이 아니라 id 로 대상을 지정한다.
+// 동명이인이 있으면 이름으로는 누구를 고칠지 특정할 수 없기 때문이다.
+app.patch('/api/workers/:id/status', async (req, res) => {
+  const { id } = req.params
   const { active, resigned_at } = req.body
   try {
-    await pool.query(
-      'UPDATE workers SET active = $1, resigned_at = $2 WHERE name = $3',
-      [active, active ? null : (resigned_at || new Date().toISOString().slice(0, 10)), name]
+    const { rowCount } = await pool.query(
+      'UPDATE workers SET active = $1, resigned_at = $2 WHERE id = $3',
+      [active, active ? null : (resigned_at || new Date().toISOString().slice(0, 10)), id]
     )
+    if (rowCount === 0) return res.status(404).json({ error: '해당 직원을 찾을 수 없습니다.' })
     res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
 })
 
-app.patch('/api/workers/:name/dates', async (req, res) => {
-  const { name } = req.params
+app.patch('/api/workers/:id/dates', async (req, res) => {
+  const { id } = req.params
   const { hired_at, resigned_at } = req.body
   try {
-    await pool.query(
-      'UPDATE workers SET hired_at = $1, resigned_at = $2 WHERE name = $3',
-      [hired_at || null, resigned_at || null, name]
+    const { rowCount } = await pool.query(
+      'UPDATE workers SET hired_at = $1, resigned_at = $2 WHERE id = $3',
+      [hired_at || null, resigned_at || null, id]
     )
+    if (rowCount === 0) return res.status(404).json({ error: '해당 직원을 찾을 수 없습니다.' })
     res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
 })
 
-app.delete('/api/workers/:name', async (req, res) => {
+app.delete('/api/workers/:id', async (req, res) => {
   try {
-    await pool.query('DELETE FROM workers WHERE name = $1', [req.params.name])
+    // 업무 기록은 남긴다 (worker_id·worker_name 이 그대로 보존된다)
+    const { rowCount } = await pool.query('DELETE FROM workers WHERE id = $1', [req.params.id])
+    if (rowCount === 0) return res.status(404).json({ error: '해당 직원을 찾을 수 없습니다.' })
     res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -122,21 +128,27 @@ app.get('/api/history/range', async (req, res) => {
 })
 
 app.post('/api/history/save', async (req, res) => {
-  const { worker_name, work_date, rows } = req.body
+  const { worker_id, worker_name, work_date, rows } = req.body
+  if (!worker_id) {
+    return res.status(400).json({ error: 'worker_id 가 필요합니다.' })
+  }
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    // 지울 대상도 id 로 특정한다. 이름으로 지우면 동명이인의 기록까지 함께 사라진다.
     await client.query(
-      'DELETE FROM work_history WHERE work_date = $1 AND worker_name = $2',
-      [work_date, worker_name]
+      'DELETE FROM work_history WHERE work_date = $1 AND worker_id = $2',
+      [work_date, worker_id]
     )
     if (rows && rows.length > 0) {
       const values = rows.map((_, i) =>
-        `($${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}, $${i * 4 + 4})`
+        `($${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`
       ).join(', ')
-      const params = rows.flatMap(r => [r.worker_name, r.work_date, r.work_hour, r.work_text])
+      const params = rows.flatMap(r =>
+        [worker_id, r.worker_name || worker_name, r.work_date, r.work_hour, r.work_text])
       await client.query(
-        `INSERT INTO work_history (worker_name, work_date, work_hour, work_text) VALUES ${values}`,
+        `INSERT INTO work_history (worker_id, worker_name, work_date, work_hour, work_text)
+         VALUES ${values}`,
         params
       )
     }

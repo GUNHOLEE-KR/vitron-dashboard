@@ -28,6 +28,35 @@ function toYear(d){return parseInt(d.slice(0,4))}
 function weekNum(d){return Math.ceil(new Date(d).getDate()/7)}
 function dayName(d){return['일','월','화','수','목','금','토'][new Date(d).getDay()]}
 
+// ── 동명이인 구분 ────────────────────────────────────
+// 직원의 진짜 식별자는 id 다. 이름은 개명·오타 정정으로 바뀔 수 있어서다.
+// 다만 화면에는 이름을 보여줘야 읽기 쉬우므로, 같은 이름이 둘 이상일 때만
+// 입사일을 덧붙여 구분한다. (예: "홍길동 (2026-05-26 입사)")
+function duplicatedNames(workers) {
+  const count = {}
+  workers.forEach(w => { count[w.name] = (count[w.name] || 0) + 1 })
+  return new Set(Object.keys(count).filter(n => count[n] > 1))
+}
+function workerLabel(worker, dupNames) {
+  if (!worker) return ''
+  return dupNames.has(worker.name)
+    ? `${worker.name} (${worker.hired_at || '입사일 미정'} 입사)`
+    : worker.name
+}
+// 업무 기록의 worker_name 을 화면 표시용 이름으로 바꿔 둔다.
+// 이렇게 해두면 집계·차트 코드는 그대로 두고도 동명이인이 자동 분리된다.
+// 원본 이름은 worker_name_raw 로 남긴다 (기록 당시의 이름).
+function withDisplayNames(history, workers) {
+  const byId = new Map(workers.map(w => [w.id, w]))
+  const dupNames = duplicatedNames(workers)
+  return history.map(r => {
+    const w = byId.get(r.worker_id)
+    // 직원이 삭제됐으면 기록에 남은 이름을 그대로 쓴다
+    const label = w ? workerLabel(w, dupNames) : r.worker_name
+    return { ...r, worker_name: label, worker_name_raw: r.worker_name }
+  })
+}
+
 // 기간별 직원 필터 헬퍼
 function workersForPeriod(workers, periodStart, periodEnd) {
   return workers.filter(w => {
@@ -65,10 +94,14 @@ function top8(rows){
   return Object.entries(aggByWork(rows)).sort((a,b)=>b[1]-a[1]).slice(0,8)
     .map(([name,value])=>{const nm=cleanName(name);return{name:nm.length>15?nm.slice(0,15)+'…':nm,value}})
 }
+// 입력표의 칸을 가리키는 키. 이름이 아니라 id 를 쓴다 —
+// 동명이인이 있으면 이름으로는 두 사람이 같은 칸을 공유하게 된다.
+function cellKey(hour, workerId){ return `${hour}_${workerId}` }
+
 function buildParentSel(rows,jiraTree){
   const ps={}
   rows.forEach(r=>{
-    const key=`${r.work_hour}_${r.worker_name}`,val=r.work_text
+    const key=cellKey(r.work_hour,r.worker_id),val=r.work_text
     if(jiraTree[val]!==undefined){ps[key]=val}
     else{for(const[p,s]of Object.entries(jiraTree)){if(s.includes(val)){ps[key]=p;break}}}
   })
@@ -390,7 +423,7 @@ export default function App(){
   const [jiraTree,setJiraTree]=useState({})
   const [grid,setGrid]=useState({})
   const [parentSel,setParentSel]=useState({})
-  const [selWorker,setSelWorker]=useState('')
+  const [selWorkerId,setSelWorkerId]=useState(null)   // 이름이 아니라 id 로 선택 대상을 잡는다
   const [viewDate,setViewDate]=useState(today())
   const [viewMonth,setViewMonth]=useState(toMonth(today()))
   const [viewYear,setViewYear]=useState(toYear(today()))
@@ -407,6 +440,11 @@ export default function App(){
     (!w.resigned_at || w.resigned_at>=td)
   )
   const jiraParents=Object.keys(jiraTree)
+  const dupNames=duplicatedNames(workers)
+  const selWorker=workers.find(w=>w.id===selWorkerId)||null
+  // 분석 탭은 workers 의 이름으로 기록을 찾는다. history 의 worker_name 이
+  // 표시 이름으로 바뀌어 있으므로 workers 쪽도 같은 이름으로 맞춰 넘긴다.
+  const workersLabeled=workers.map(w=>({...w,name:workerLabel(w,dupNames),name_raw:w.name}))
 
   function showToast(msg, duration=2500){
     if(toastTimerRef.current) clearTimeout(toastTimerRef.current)
@@ -417,9 +455,9 @@ export default function App(){
   useEffect(()=>{
     Promise.all([getWorkers(),getHistory(),getJiraTree()])
       .then(([w,h,j])=>{
-        setWorkers(w);setHistory(h);setJiraTree(j)
+        setWorkers(w);setHistory(withDisplayNames(h,w));setJiraTree(j)
         const tr=h.filter(r=>r.work_date===today())
-        const g={}; tr.forEach(r=>{g[`${r.work_hour}_${r.worker_name}`]=r.work_text})
+        const g={}; tr.forEach(r=>{g[cellKey(r.work_hour,r.worker_id)]=r.work_text})
         setGrid(g); setParentSel(buildParentSel(tr,j))
       }).finally(()=>setLoading(false))
     // 토큰 만료 안내는 본 데이터 로딩을 막지 않도록 따로 조회한다
@@ -428,12 +466,18 @@ export default function App(){
 
   async function handleSave(ds=today()){
     if(!selWorker){showToast('이름을 먼저 선택하세요');return}
-    const rows=WORK_HOURS.filter(h=>grid[`${h}_${selWorker}`])
-      .map(h=>({work_date:ds,work_hour:h,worker_name:selWorker,work_text:grid[`${h}_${selWorker}`]}))
+    const label=workerLabel(selWorker,dupNames)
+    const rows=WORK_HOURS.filter(h=>grid[cellKey(h,selWorker.id)])
+      .map(h=>({work_date:ds,work_hour:h,worker_id:selWorker.id,
+                worker_name:selWorker.name,work_text:grid[cellKey(h,selWorker.id)]}))
     try{
-      await saveWorkerHistory(selWorker,rows)
-      setHistory([...history.filter(r=>!(r.work_date===ds&&r.worker_name===selWorker)),...rows])
-      showToast(`${selWorker} 저장 완료 (${ds}, ${rows.length}건)`)
+      await saveWorkerHistory(selWorker.id,selWorker.name,rows,ds)
+      // 화면 목록에서도 방금 저장한 사람의 그 날짜 기록만 갈아 끼운다 (id 로 특정)
+      setHistory([
+        ...history.filter(r=>!(r.work_date===ds&&r.worker_id===selWorker.id)),
+        ...rows.map(r=>({...r,worker_name:label,worker_name_raw:selWorker.name}))
+      ])
+      showToast(`${label} 저장 완료 (${ds}, ${rows.length}건)`)
     }catch(e){showToast('저장 실패: '+e.message)}
   }
 
@@ -441,7 +485,7 @@ export default function App(){
     try{
       showToast('조회 중...')
       const rows=await getHistoryByDate(date)
-      const g={}; rows.forEach(r=>{g[`${r.work_hour}_${r.worker_name}`]=r.work_text})
+      const g={}; rows.forEach(r=>{g[cellKey(r.work_hour,r.worker_id)]=r.work_text})
       setGrid(g); setParentSel(buildParentSel(rows,jiraTree))
       showToast(date+' 조회 완료')
     }catch(e){showToast('조회 실패')}
@@ -478,14 +522,14 @@ export default function App(){
         ))}
       </nav>
       <main style={{padding:'16px 20px'}}>
-        {tab==='today'   &&<TabToday   workers={activeWorkers} grid={grid} setGrid={setGrid}
-          jiraTree={jiraTree} selWorker={selWorker} setSelWorker={setSelWorker}
+        {tab==='today'   &&<TabToday   workers={activeWorkers} dupNames={dupNames} grid={grid} setGrid={setGrid}
+          jiraTree={jiraTree} selWorkerId={selWorkerId} setSelWorkerId={setSelWorkerId}
           onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}/>}
-        {tab==='daily'   &&<TabDaily   history={history} workers={workers} viewDate={viewDate} setViewDate={setViewDate}/>}
-        {tab==='weekly'  &&<TabWeekly  history={history} workers={workers} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
-        {tab==='monthly' &&<TabMonthly history={history} workers={workers} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
-        {tab==='yearly'  &&<TabYearly  history={history} workers={workers} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
-        {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers}
+        {tab==='daily'   &&<TabDaily   history={history} workers={workersLabeled} viewDate={viewDate} setViewDate={setViewDate}/>}
+        {tab==='weekly'  &&<TabWeekly  history={history} workers={workersLabeled} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
+        {tab==='monthly' &&<TabMonthly history={history} workers={workersLabeled} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
+        {tab==='yearly'  &&<TabYearly  history={history} workers={workersLabeled} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
+        {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers} dupNames={dupNames}
           jiraTree={jiraTree} setJiraTree={setJiraTree} showToast={showToast} tokenStatus={tokenStatus}/>}
       </main>
       {toast&&(
@@ -498,27 +542,29 @@ export default function App(){
 }
 
 // ── 오늘 업무 탭 ─────────────────────────────────────────
-function TabToday({workers,grid,setGrid,jiraTree,selWorker,setSelWorker,onSave,onLoadDate,parentSel,setParentSel}){
+function TabToday({workers,dupNames,grid,setGrid,jiraTree,selWorkerId,setSelWorkerId,onSave,onLoadDate,parentSel,setParentSel}){
   const [ldDate,setLdDate]=useState(today())
   const jiraParents=Object.keys(jiraTree)
+  const selWorker=workers.find(w=>w.id===selWorkerId)||null
   // 다중 시간 선택
   const [selHours,setSelHours]=useState(new Set())
   function toggleHour(h){setSelHours(s=>{const n=new Set(s);n.has(h)?n.delete(h):n.add(h);return n})}
   function toggleAll(){setSelHours(s=>s.size===WORK_HOURS.length?new Set():new Set(WORK_HOURS))}
   // 체크된 시간 전체에 동시 반영 (체크 안 된 시간은 개별 반영)
-  function onParentChange(h,w,val){
+  // wid = 직원 id (이름이 아니다 — 동명이인이 같은 칸을 공유하지 않도록)
+  function onParentChange(h,wid,val){
     const hours=selHours.has(h)?[...selHours]:[h]
-    setParentSel(p=>{const n={...p};hours.forEach(sh=>{n[`${sh}_${w}`]=val});return n})
-    setGrid(g=>{const n={...g};hours.forEach(sh=>{n[`${sh}_${w}`]=val});return n})
+    setParentSel(p=>{const n={...p};hours.forEach(sh=>{n[cellKey(sh,wid)]=val});return n})
+    setGrid(g=>{const n={...g};hours.forEach(sh=>{n[cellKey(sh,wid)]=val});return n})
   }
-  function onSubChange(h,w,val){
+  function onSubChange(h,wid,val){
     const hours=selHours.has(h)?[...selHours]:[h]
-    setGrid(g=>{const n={...g};hours.forEach(sh=>{n[`${sh}_${w}`]=val});return n})
+    setGrid(g=>{const n={...g};hours.forEach(sh=>{n[cellKey(sh,wid)]=val});return n})
   }
-  function onDirectInput(h,w,val){
+  function onDirectInput(h,wid,val){
     const hours=selHours.has(h)?[...selHours]:[h]
-    setParentSel(p=>{const n={...p};hours.forEach(sh=>{n[`${sh}_${w}`]=''});return n})
-    setGrid(g=>{const n={...g};hours.forEach(sh=>{n[`${sh}_${w}`]=val});return n})
+    setParentSel(p=>{const n={...p};hours.forEach(sh=>{n[cellKey(sh,wid)]=''});return n})
+    setGrid(g=>{const n={...g};hours.forEach(sh=>{n[cellKey(sh,wid)]=val});return n})
   }
   return(
     <div>
@@ -530,10 +576,10 @@ function TabToday({workers,grid,setGrid,jiraTree,selWorker,setSelWorker,onSave,o
           <button onClick={()=>onLoadDate(ldDate)} style={{padding:'6px 14px',borderRadius:7,border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:13}}>조회</button>
         </div>
         <div style={{display:'flex',gap:8}}>
-          <button onClick={()=>{if(!selWorker)return;const g={...grid};WORK_HOURS.forEach(h=>delete g[`${h}_${selWorker}`]);setGrid(g);const ps={...parentSel};WORK_HOURS.forEach(h=>delete ps[`${h}_${selWorker}`]);setParentSel(ps)}}
+          <button onClick={()=>{if(!selWorker)return;const g={...grid};WORK_HOURS.forEach(h=>delete g[cellKey(h,selWorker.id)]);setGrid(g);const ps={...parentSel};WORK_HOURS.forEach(h=>delete ps[cellKey(h,selWorker.id)]);setParentSel(ps)}}
             style={{padding:'6px 14px',borderRadius:7,border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:13}}>초기화</button>
           <button onClick={()=>onSave(ldDate)} style={{padding:'6px 14px',borderRadius:7,border:'none',background:'#0d7a4e',color:'#fff',cursor:'pointer',fontSize:13,fontWeight:600}}>
-            {selWorker?`${selWorker} 저장`:'이름 선택 후 저장'}
+            {selWorker?`${selWorker.name} 저장`:'이름 선택 후 저장'}
           </button>
         </div>
       </div>
@@ -541,12 +587,12 @@ function TabToday({workers,grid,setGrid,jiraTree,selWorker,setSelWorker,onSave,o
         <div style={{fontSize:12,color:'#6b7280',marginBottom:8}}>내 이름을 선택하면 해당 열만 편집됩니다</div>
         <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
           {workers.map(w=>(
-            <button key={w.name} onClick={()=>setSelWorker(w.name)}
+            <button key={w.id} onClick={()=>setSelWorkerId(w.id)}
               style={{padding:'6px 16px',borderRadius:20,fontSize:13,cursor:'pointer',
-                border:`2px solid ${selWorker===w.name?'#1a56db':'#e5e7eb'}`,
-                background:selWorker===w.name?'#1a56db':'#fff',
-                color:selWorker===w.name?'#fff':'#6b7280',fontWeight:selWorker===w.name?700:500}}>
-              {selWorker===w.name?'✎ ':''}{w.name}{selWorker===w.name?' (나)':''}
+                border:`2px solid ${selWorkerId===w.id?'#1a56db':'#e5e7eb'}`,
+                background:selWorkerId===w.id?'#1a56db':'#fff',
+                color:selWorkerId===w.id?'#fff':'#6b7280',fontWeight:selWorkerId===w.id?700:500}}>
+              {selWorkerId===w.id?'✎ ':''}{workerLabel(w,dupNames)}{selWorkerId===w.id?' (나)':''}
             </button>
           ))}
         </div>
@@ -571,8 +617,8 @@ function TabToday({workers,grid,setGrid,jiraTree,selWorker,setSelWorker,onSave,o
             </th>}
             <th style={{background:'#1e3a5f',color:'#fff',padding:'8px 10px',width:60,border:'1px solid #e5e7eb'}}>시간</th>
             {workers.map(w=>(
-              <th key={w.name} style={{background:selWorker===w.name?'#1a56db':'#64748b',color:'#fff',padding:'8px 12px',minWidth:155,border:'1px solid #e5e7eb'}}>
-                {selWorker===w.name?'✎ ':''}{w.name}{selWorker===w.name?' (나)':''}
+              <th key={w.id} style={{background:selWorkerId===w.id?'#1a56db':'#64748b',color:'#fff',padding:'8px 12px',minWidth:155,border:'1px solid #e5e7eb'}}>
+                {selWorkerId===w.id?'✎ ':''}{workerLabel(w,dupNames)}{selWorkerId===w.id?' (나)':''}
               </th>
             ))}
           </tr></thead>
@@ -586,27 +632,27 @@ function TabToday({workers,grid,setGrid,jiraTree,selWorker,setSelWorker,onSave,o
                   {String(h).padStart(2,'0')}:00
                 </td>
                 {workers.map(w=>{
-                  const key=`${h}_${w.name}`,val=grid[key]||'',isMe=selWorker===w.name
+                  const key=cellKey(h,w.id),val=grid[key]||'',isMe=selWorkerId===w.id
                   const pVal=parentSel[key]||'',subs=pVal?(jiraTree[pVal]||[]):[]
                   return isMe?(
-                    <td key={w.name} style={{border:'1px solid #e5e7eb',padding:4,verticalAlign:'top',minWidth:155}}>
+                    <td key={w.id} style={{border:'1px solid #e5e7eb',padding:4,verticalAlign:'top',minWidth:155}}>
                       <div style={{display:'flex',flexDirection:'column',gap:3}}>
-                        <select value={pVal} onChange={e=>onParentChange(h,w.name,e.target.value)} style={{width:'100%',fontSize:11,padding:'3px 5px',border:'1px solid #93c5fd',borderRadius:5,background:'#eff6ff'}}>
+                        <select value={pVal} onChange={e=>onParentChange(h,w.id,e.target.value)} style={{width:'100%',fontSize:11,padding:'3px 5px',border:'1px solid #93c5fd',borderRadius:5,background:'#eff6ff'}}>
                           <option value="">① 상위업무 선택</option>
                           {jiraParents.map(p=><option key={p} value={p}>{p}</option>)}
                         </select>
-                        <select value={subs.includes(val)?val:''} onChange={e=>onSubChange(h,w.name,e.target.value)} disabled={subs.length===0}
+                        <select value={subs.includes(val)?val:''} onChange={e=>onSubChange(h,w.id,e.target.value)} disabled={subs.length===0}
                           style={{width:'100%',fontSize:11,padding:'3px 5px',borderRadius:5,border:'1px solid #6ee7b7',background:subs.length===0?'#f9fafb':'#f0fdf4',color:subs.length===0?'#9ca3af':'#111827'}}>
                           <option value="">{subs.length===0?'② 하위업무 없음':'② 하위업무 선택'}</option>
                           {subs.map(s=><option key={s} value={s}>{s}</option>)}
                         </select>
-                        <input value={(!pVal&&!subs.includes(val))?val:''} onChange={e=>onDirectInput(h,w.name,e.target.value)} placeholder="③ 직접 입력"
+                        <input value={(!pVal&&!subs.includes(val))?val:''} onChange={e=>onDirectInput(h,w.id,e.target.value)} placeholder="③ 직접 입력"
                           style={{width:'100%',fontSize:11,padding:'3px 5px',border:'1px dashed #fcd34d',borderRadius:5,background:'#fffbeb'}}/>
                         {val&&<div style={{fontSize:10,color:'#374151',background:'#f1f5f9',padding:'2px 6px',borderRadius:4}}>✓ {val}</div>}
                       </div>
                     </td>
                   ):(
-                    <td key={w.name} style={{border:'1px solid #e5e7eb',padding:'6px 8px',background:val?'#f8fafc':'#fff',verticalAlign:'top'}}>
+                    <td key={w.id} style={{border:'1px solid #e5e7eb',padding:'6px 8px',background:val?'#f8fafc':'#fff',verticalAlign:'top'}}>
                       {val?<span style={{fontSize:11,color:'#374151',background:'#f1f5f9',padding:'2px 6px',borderRadius:4,display:'block'}}>{val}</span>:<span style={{color:'#e2e8f0',fontSize:11}}>-</span>}
                     </td>
                   )
@@ -880,33 +926,37 @@ function TabYearly({history,workers,viewYear,setViewYear,jiraTree}){
 }
 
 // ── 설정 탭 ───────────────────────────────────────────────
-function TabSettings({workers,setWorkers,jiraTree,setJiraTree,showToast,tokenStatus={configured:false}}){
+// 직원 수정·삭제는 모두 id 로 대상을 지정한다 (동명이인 구분).
+// editingWorkerId / resigningWorkerId 도 이름이 아니라 id 를 담는다.
+function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree,showToast,tokenStatus={configured:false}}){
   const [newWorker,setNewWorker]=useState('')
   const [newHiredAt,setNewHiredAt]=useState(today())
-  const [resigningWorker,setResigningWorker]=useState(null)
+  const [resigningWorkerId,setResigningWorkerId]=useState(null)
   const [resignDate,setResignDate]=useState(today())
-  const [editingWorker,setEditingWorker]=useState(null)
+  const [editingWorkerId,setEditingWorkerId]=useState(null)
   const [editHiredAt,setEditHiredAt]=useState('')
   const [editResignedAt,setEditResignedAt]=useState('')
   const [newJira,setNewJira]=useState('')
   const [newJiraParent,setNewJiraParent]=useState('')
   const jiraParents=Object.keys(jiraTree)
+  const nameOf=id=>{const w=workers.find(x=>x.id===id);return w?workerLabel(w,dupNames):''}
 
   function startEdit(w) {
-    setEditingWorker(w.name)
+    setEditingWorkerId(w.id)
     setEditHiredAt(w.hired_at||'')
     setEditResignedAt(w.resigned_at||'')
-    setResigningWorker(null)
+    setResigningWorkerId(null)
   }
 
   async function confirmEdit() {
+    const label=nameOf(editingWorkerId)
     try {
-      await updateWorkerDates(editingWorker, editHiredAt||null, editResignedAt||null)
-      setWorkers(workers.map(w => w.name===editingWorker
+      await updateWorkerDates(editingWorkerId, editHiredAt||null, editResignedAt||null)
+      setWorkers(workers.map(w => w.id===editingWorkerId
         ? {...w, hired_at:editHiredAt||null, resigned_at:editResignedAt||null}
         : w))
-      showToast(editingWorker+' 날짜 수정 완료')
-      setEditingWorker(null)
+      showToast(label+' 날짜 수정 완료')
+      setEditingWorkerId(null)
     } catch(e) { showToast('수정 실패') }
   }
 
@@ -919,28 +969,30 @@ function TabSettings({workers,setWorkers,jiraTree,setJiraTree,showToast,tokenSta
     }catch(e){showToast('추가 실패: '+e.message)}
   }
 
-  function handleToggle(name,active){
+  function handleToggle(id,active){
     if(!active){
-      setResigningWorker(name);setResignDate(today());setEditingWorker(null)
+      setResigningWorkerId(id);setResignDate(today());setEditingWorkerId(null)
     }else{
-      setWorkerStatus(name,true,null)
-        .then(()=>{setWorkers(workers.map(w=>w.name===name?{...w,active:true,resigned_at:null}:w));showToast(name+' 재직 처리')})
+      setWorkerStatus(id,true,null)
+        .then(()=>{setWorkers(workers.map(w=>w.id===id?{...w,active:true,resigned_at:null}:w));showToast(nameOf(id)+' 재직 처리')})
         .catch(()=>showToast('변경 실패'))
     }
   }
 
   async function confirmResign(){
+    const label=nameOf(resigningWorkerId)
     try{
-      await setWorkerStatus(resigningWorker,false,resignDate)
-      setWorkers(workers.map(w=>w.name===resigningWorker?{...w,active:false,resigned_at:resignDate}:w))
-      showToast(resigningWorker+' 퇴사 처리 ('+resignDate+')')
-      setResigningWorker(null)
+      await setWorkerStatus(resigningWorkerId,false,resignDate)
+      setWorkers(workers.map(w=>w.id===resigningWorkerId?{...w,active:false,resigned_at:resignDate}:w))
+      showToast(label+' 퇴사 처리 ('+resignDate+')')
+      setResigningWorkerId(null)
     }catch(e){showToast('변경 실패')}
   }
 
-  async function handleDelWorker(name){
-    if(!confirm(name+' 완전 삭제합니까?'))return
-    try{await removeWorker(name);setWorkers(workers.filter(w=>w.name!==name));showToast(name+' 삭제 완료')}
+  async function handleDelWorker(w){
+    const label=workerLabel(w,dupNames)
+    if(!confirm(label+' 완전 삭제합니까?\n(업무 기록은 그대로 남습니다)'))return
+    try{await removeWorker(w.id);setWorkers(workers.filter(x=>x.id!==w.id));showToast(label+' 삭제 완료')}
     catch(e){showToast('삭제 실패')}
   }
 
@@ -978,12 +1030,18 @@ function TabSettings({workers,setWorkers,jiraTree,setJiraTree,showToast,tokenSta
           <div style={{fontSize:11,color:'#6b7280',marginBottom:12}}>직원명 + 입사일 입력 후 추가</div>
 
           {workers.map(w=>(
-            <div key={w.name} style={{border:'1px solid #e5e7eb',borderRadius:8,marginBottom:6,overflow:'hidden'}}>
+            <div key={w.id} style={{border:'1px solid #e5e7eb',borderRadius:8,marginBottom:6,overflow:'hidden'}}>
 
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:w.active?'#fff':'#f9fafb'}}>
                 <div>
                   <div style={{display:'flex',alignItems:'center',gap:8}}>
                     <span style={{fontWeight:600}}>{w.name}</span>
+                    {dupNames.has(w.name)&&(
+                      <span title="같은 이름의 직원이 둘 이상 있어 입사일로 구분합니다"
+                        style={{fontSize:10,padding:'2px 6px',borderRadius:8,background:'#fffbeb',color:'#92400e',border:'1px solid #fcd34d'}}>
+                        동명이인
+                      </span>
+                    )}
                     <span style={{fontSize:11,padding:'2px 8px',borderRadius:10,fontWeight:600,
                       background:w.active?'#f0fdf4':'#fef2f2',color:w.active?'#0d7a4e':'#b91c1c'}}>
                       {w.active?'재직':'퇴사'}
@@ -995,20 +1053,20 @@ function TabSettings({workers,setWorkers,jiraTree,setJiraTree,showToast,tokenSta
                   </div>
                 </div>
                 <div style={{display:'flex',gap:8,alignItems:'center'}}>
-                  <button onClick={()=>editingWorker===w.name?setEditingWorker(null):startEdit(w)}
+                  <button onClick={()=>editingWorkerId===w.id?setEditingWorkerId(null):startEdit(w)}
                     style={{padding:'4px 10px',borderRadius:6,border:'1px solid #e5e7eb',
-                      background:editingWorker===w.name?'#f1f5f9':'#fff',cursor:'pointer',fontSize:11,color:'#6b7280'}}>
+                      background:editingWorkerId===w.id?'#f1f5f9':'#fff',cursor:'pointer',fontSize:11,color:'#6b7280'}}>
                     ✏️ 날짜수정
                   </button>
                   <label style={{display:'flex',alignItems:'center',gap:4,cursor:'pointer',fontSize:12}}>
-                    <input type="checkbox" checked={w.active} onChange={e=>handleToggle(w.name,e.target.checked)}/>재직
+                    <input type="checkbox" checked={w.active} onChange={e=>handleToggle(w.id,e.target.checked)}/>재직
                   </label>
-                  <span onClick={()=>handleDelWorker(w.name)} style={{cursor:'pointer',color:'#b91c1c',fontSize:18,fontWeight:700}}>&times;</span>
+                  <span onClick={()=>handleDelWorker(w)} style={{cursor:'pointer',color:'#b91c1c',fontSize:18,fontWeight:700}}>&times;</span>
                 </div>
               </div>
 
               {/* 날짜 수정 패널 */}
-              {editingWorker===w.name&&(
+              {editingWorkerId===w.id&&(
                 <div style={{background:'#f0f9ff',borderTop:'1px solid #bae6fd',padding:'12px 14px'}}>
                   <div style={{fontSize:11,fontWeight:700,color:'#0369a1',marginBottom:8}}>날짜 수정</div>
                   <div style={{display:'flex',gap:12,flexWrap:'wrap',alignItems:'flex-end'}}>
@@ -1025,7 +1083,7 @@ function TabSettings({workers,setWorkers,jiraTree,setJiraTree,showToast,tokenSta
                     <div style={{display:'flex',gap:6}}>
                       <button onClick={confirmEdit}
                         style={{padding:'6px 14px',borderRadius:6,border:'none',background:'#0369a1',color:'#fff',cursor:'pointer',fontSize:12,fontWeight:600}}>저장</button>
-                      <button onClick={()=>setEditingWorker(null)}
+                      <button onClick={()=>setEditingWorkerId(null)}
                         style={{padding:'6px 14px',borderRadius:6,border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:12}}>취소</button>
                     </div>
                   </div>
@@ -1033,14 +1091,14 @@ function TabSettings({workers,setWorkers,jiraTree,setJiraTree,showToast,tokenSta
               )}
 
               {/* 퇴사 처리 패널 */}
-              {resigningWorker===w.name&&(
+              {resigningWorkerId===w.id&&(
                 <div style={{background:'#fef2f2',borderTop:'1px solid #fecaca',padding:'10px 14px',display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
                   <span style={{fontSize:12,fontWeight:600,color:'#b91c1c'}}>퇴사일자:</span>
                   <input type="date" value={resignDate} onChange={e=>setResignDate(e.target.value)}
                     style={{padding:'5px 8px',border:'1px solid #fca5a5',borderRadius:6,fontSize:13}}/>
                   <button onClick={confirmResign}
                     style={{padding:'5px 12px',borderRadius:6,border:'none',background:'#b91c1c',color:'#fff',cursor:'pointer',fontSize:12,fontWeight:600}}>확인</button>
-                  <button onClick={()=>setResigningWorker(null)}
+                  <button onClick={()=>setResigningWorkerId(null)}
                     style={{padding:'5px 12px',borderRadius:6,border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:12}}>취소</button>
                 </div>
               )}
