@@ -34,6 +34,17 @@ export async function syncJira() {
   return data.count
 }
 
+// Jira API 토큰 만료까지 남은 일수 (서버에 만료일이 기록돼 있을 때만 값이 온다)
+export async function getJiraTokenStatus() {
+  try {
+    const res = await fetch(`${BASE}/jira/token-status`)
+    if (!res.ok) return { configured: false }
+    return await res.json()
+  } catch {
+    return { configured: false }   // 안내 기능이 본 화면을 막지 않도록 조용히 넘어간다
+  }
+}
+
 export async function addJiraIssue(fullText, parentText) {
   const res = await fetch(`${BASE}/jira-issues`, {
     method: 'POST',

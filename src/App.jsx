@@ -4,7 +4,7 @@ import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, L
          ComposedChart, XAxis, YAxis, Tooltip, Legend, ReferenceLine, ResponsiveContainer } from 'recharts'
 import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates } from './repositories/workerRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
-import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue } from './repositories/jiraRepo'
+import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
 
 const WORK_HOURS=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
 const COLORS=['#3b82f6','#10b981','#f59e0b','#8b5cf6','#06b6d4','#ec4899','#84cc16','#f97316']
@@ -360,6 +360,26 @@ function RadarAnalysis({rows,workers}){
   )
 }
 
+// ── Jira 토큰 만료 임박 배너 ──────────────────────
+// 토큰이 만료되면 동기화가 전부 멈추므로, 만료 30일 전부터 화면 상단에 알린다.
+function TokenExpiryBanner({status}){
+  if(!status.configured||status.level==='ok')return null
+  const expired=status.level==='expired'
+  const c=expired
+    ?{bg:'#fef2f2',border:'#fca5a5',text:'#991b1b'}
+    :{bg:'#fffbeb',border:'#fcd34d',text:'#92400e'}
+  return(
+    <div style={{background:c.bg,borderBottom:`1px solid ${c.border}`,color:c.text,
+      padding:'10px 20px',fontSize:13,display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+      <strong>{expired?'⛔ Jira 토큰이 만료되었습니다':`⚠️ Jira 토큰 만료 ${status.daysLeft}일 전`}</strong>
+      <span style={{opacity:.85}}>
+        (만료일 {status.expiresAt}) — {expired?'동기화가 동작하지 않습니다. ':''}
+        Atlassian 계정 설정에서 새 토큰을 발급해 서버 환경변수를 교체해 주세요.
+      </span>
+    </div>
+  )
+}
+
 export default function App(){
   const [tab,setTab]=useState('today')
   const [workers,setWorkers]=useState([])
@@ -373,6 +393,7 @@ export default function App(){
   const [viewYear,setViewYear]=useState(toYear(today()))
   const [loading,setLoading]=useState(true)
   const [toast,setToast]=useState('')
+  const [tokenStatus,setTokenStatus]=useState({configured:false})
   const toastTimerRef=useRef(null)
 
   // 오늘 기준 재직 중인 직원만 (입사일 이후 + 퇴사 전)
@@ -398,6 +419,8 @@ export default function App(){
         const g={}; tr.forEach(r=>{g[`${r.work_hour}_${r.worker_name}`]=r.work_text})
         setGrid(g); setParentSel(buildParentSel(tr,j))
       }).finally(()=>setLoading(false))
+    // 토큰 만료 안내는 본 데이터 로딩을 막지 않도록 따로 조회한다
+    getJiraTokenStatus().then(setTokenStatus)
   },[])
 
   async function handleSave(ds=today()){
@@ -441,6 +464,7 @@ export default function App(){
           <span>누적 <strong style={{color:'#1a56db'}}>{history.length.toLocaleString()}</strong>건</span>
         </div>
       </header>
+      <TokenExpiryBanner status={tokenStatus}/>
       <nav style={{background:'#fff',borderBottom:'1px solid #e5e7eb',display:'flex',padding:'0 20px',overflowX:'auto'}}>
         {TABS.map(t=>(
           <button key={t} onClick={()=>setTab(t)}
@@ -459,7 +483,7 @@ export default function App(){
         {tab==='monthly' &&<TabMonthly history={history} workers={workers} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
         {tab==='yearly'  &&<TabYearly  history={history} workers={workers} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
         {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers}
-          jiraTree={jiraTree} setJiraTree={setJiraTree} showToast={showToast}/>}
+          jiraTree={jiraTree} setJiraTree={setJiraTree} showToast={showToast} tokenStatus={tokenStatus}/>}
       </main>
       {toast&&(
         <div style={{position:'fixed',bottom:24,left:'50%',transform:'translateX(-50%)',
@@ -854,7 +878,7 @@ function TabYearly({history,workers,viewYear,setViewYear,jiraTree}){
 }
 
 // ── 설정 탭 ───────────────────────────────────────────────
-function TabSettings({workers,setWorkers,jiraTree,setJiraTree,showToast}){
+function TabSettings({workers,setWorkers,jiraTree,setJiraTree,showToast,tokenStatus={configured:false}}){
   const [newWorker,setNewWorker]=useState('')
   const [newHiredAt,setNewHiredAt]=useState(today())
   const [resigningWorker,setResigningWorker]=useState(null)
@@ -1026,6 +1050,12 @@ function TabSettings({workers,setWorkers,jiraTree,setJiraTree,showToast}){
         <Card title="Jira 동기화" style={{flex:1,minWidth:280}}>
           <button onClick={handleSyncJira} style={{padding:'8px 16px',borderRadius:7,border:'none',background:'#0d7a4e',color:'#fff',cursor:'pointer',fontWeight:600,marginBottom:12}}>Jira 동기화</button>
           <div style={{background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:8,padding:'10px 12px',fontSize:12,color:'#1e40af'}}>동기화 버튼을 눌러 Jira 이슈를 불러오세요.</div>
+          {tokenStatus.configured&&(
+            <div style={{marginTop:8,fontSize:12,color:tokenStatus.level==='ok'?'#6b7280':'#b45309'}}>
+              API 토큰 만료: <strong>{tokenStatus.expiresAt}</strong>
+              {tokenStatus.daysLeft>=0?` (${tokenStatus.daysLeft}일 남음)`:' (만료됨)'}
+            </div>
+          )}
         </Card>
       </div>
 

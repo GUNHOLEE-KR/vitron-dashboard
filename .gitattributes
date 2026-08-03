@@ -1,0 +1,7 @@
+# 셸 스크립트가 CRLF 로 체크아웃되면 리눅스(NAS)에서 bad interpreter 오류가 난다
+*.sh  text eol=lf
+
+# 컨테이너 안에서 쓰이는 설정 파일도 LF 로 고정
+nginx.conf text eol=lf
+Dockerfile* text eol=lf
+*.yml text eol=lf

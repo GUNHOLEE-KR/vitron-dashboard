@@ -361,6 +361,31 @@ app.post('/api/jira-sync', async (req, res) => {
   }
 })
 
+// ─── Jira 토큰 만료 안내 ─────────────────────────────────────
+
+// Atlassian 은 API 토큰의 만료일을 조회하는 API 를 제공하지 않는다.
+// 그래서 발급 시 확인한 만료일을 JIRA_TOKEN_EXPIRES(YYYY-MM-DD)에 기록해 두고
+// 남은 일수를 계산한다. 값이 없으면 안내를 표시하지 않는다.
+const TOKEN_WARN_DAYS = 30
+
+app.get('/api/jira/token-status', (req, res) => {
+  const expiresAt = process.env.JIRA_TOKEN_EXPIRES
+  if (!expiresAt || !/^\d{4}-\d{2}-\d{2}$/.test(expiresAt)) {
+    return res.json({ configured: false })
+  }
+
+  // 날짜만 비교한다 (시간대 차이로 하루가 밀리지 않도록 UTC 자정 기준)
+  const todayUtc = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00Z')
+  const expiryUtc = new Date(expiresAt + 'T00:00:00Z')
+  const daysLeft = Math.round((expiryUtc - todayUtc) / 86400000)
+
+  const level = daysLeft < 0 ? 'expired'
+    : daysLeft <= TOKEN_WARN_DAYS ? 'warn'
+    : 'ok'
+
+  res.json({ configured: true, expiresAt, daysLeft, level })
+})
+
 // ─── 헬스체크 ────────────────────────────────────────────────
 
 app.get('/api/health', async (req, res) => {

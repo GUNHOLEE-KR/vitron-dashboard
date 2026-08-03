@@ -14,39 +14,72 @@
 
 ## 기술 스택
 - **Frontend**: React + Vite (단일 파일 구조 — `src/App.jsx`)
-- **Backend**: Supabase (DB + Edge Function)
-- **배포**: Vercel (main 브랜치 push 시 자동 배포)
+- **Backend**: Node.js + Express (`server/index.js`)
+- **DB**: 사내 PostgreSQL (`vitron-nas:5432`, DB `vitron_dashboard`)
+- **배포**: 사내 NAS Docker (`http://vitron-nas:8082`) — 아래 배포 절차 참고
 - **GitHub**: https://github.com/GUNHOLEE-KR/vitron-dashboard
+
+> Supabase·Vercel 은 2026-06-02 에 걷어냈다. `supabase/`·`api/` 폴더는 잔재이며 사용하지 않는다.
 
 ## 주요 파일 구조
 ```
 src/
   App.jsx                  # 전체 UI (컴포넌트 분리 없이 단일 파일)
-  repositories/
+  repositories/            # 백엔드 REST API 호출 (fetch)
     workerRepo.js          # 직원 CRUD
     historyRepo.js         # 업무 기록 CRUD
-    jiraRepo.js            # Jira 동기화 및 이슈 관리
-  db/supabase.js           # Supabase 클라이언트
-supabase/
-  functions/sync-jira/     # Jira API → Supabase 동기화 Edge Function
+    jiraRepo.js            # Jira 동기화·이슈 관리·토큰 만료 조회
+server/
+  index.js                 # Express REST API + Jira 동기화 (단일 파일)
+db/init.sql                # PostgreSQL 스키마 (테이블 3개)
+Dockerfile.frontend        # React 빌드 → nginx
+Dockerfile.backend         # Node.js API 서버
+nginx.conf                 # /api/* → backend 프록시, 타임아웃 300초
+docker-compose.yml         # 프론트(8082) + 백엔드 2개 컨테이너
+deploy.sh                  # NAS 배포 스크립트
 ```
 
-## Supabase 테이블
+## PostgreSQL 테이블
 - `workers` — 직원 정보 (name, active, hired_at, resigned_at)
 - `work_history` — 업무 기록 (worker_name, work_date, work_hour, work_text)
 - `jira_issues` — Jira 이슈 캐시 (jira_key, summary, parent_key, full_text)
 
+⚠️ `DATE` 타입은 `pg` 가 Date 객체로 바꿔 프론트의 `slice(0,7)` 를 깨뜨린다.
+`server/index.js` 에서 `types.setTypeParser(1082, …)` 로 문자열 유지 중이니 제거하지 말 것.
+
 ## Jira 동기화
-- Supabase Edge Function(`sync-jira`)을 POST로 호출
-- 로컬 개발: Vite 프록시(`/jira-api`) 사용
-- 배포 환경: Vercel API Route(`/api/jira-proxy`) 사용
+- 프론트 → 백엔드 `POST /api/jira-sync` → Jira REST API → PostgreSQL
+- 토큰은 서버 환경변수에만 있으므로 **로그인 없이 누구나 동기화 가능**
+- 검색은 신형 `/rest/api/3/search/jql` + `nextPageToken` 페이지네이션
+  (구형 `/rest/api/3/search` 는 Atlassian 이 제거해 410)
+- 조회 0건이면 **기존 목록을 지우지 않고 중단** (전량 삭제 사고 방지)
+- 페이지 100장·이슈 2만 건 상한 + 토큰 반복 감지 — 메모리 고갈 방지
 - 동기화 중 토스트는 `duration=0`으로 완료 전까지 계속 표시
 
+### Jira API 토큰
+- Atlassian 정책상 **최대 유효기간 365일**, 무기한 토큰 없음
+- 만료일 조회 API 가 없어 `.env` 의 `JIRA_TOKEN_EXPIRES=YYYY-MM-DD` 에 직접 기록
+- 만료 30일 전부터 화면 상단 배너 + 설정 탭에 남은 일수 표시
+- 갱신 시 `.env`(NAS 는 `/volume1/docker-build/.env`) 교체 후 `./deploy.sh`
+
 ## 개발 서버
+백엔드와 프론트를 **둘 다** 띄워야 한다. Vite 가 `/api` 를 3001 로 프록시한다.
 ```powershell
-npm run dev   # http://localhost:5173
+cd server; node index.js   # 백엔드 :3001 (.env 는 프로젝트 루트에서 읽음)
+npm run dev                # 프론트 :5173
 ```
 `.claude/launch.json`에 서버 설정 있음 — Preview 도구로 브라우저 테스트 가능.
+
+## 배포 (사내 NAS)
+NAS 소스 폴더는 `/volume1/docker-build`. SSH `ssh root@vitron-nas` 접속 후:
+```bash
+cd /volume1/docker-build && ./deploy.sh
+```
+- NAS 에 `git` 이 없어 소스 갱신은 PC 에서 전송해야 한다
+  (`git archive --format=tar.gz -o ../vitron-src.tar.gz HEAD` → `scp` → `tar -xzf`)
+- Portainer 스택(`vitron-dashboard`)으로 등록돼 있고 컨테이너 이름을 이어받는다.
+  Portainer 화면에는 Editor 가 안 뜨므로 **갱신은 CLI(`deploy.sh`)로 한다**
+- `.env` 는 git 에 없다. NAS 에 있는 파일을 유지하거나 `.env.example` 로 새로 만든다
 
 ## 주의사항
 - `App.jsx`는 의도적으로 단일 파일 구조 유지 (분리 금지)
