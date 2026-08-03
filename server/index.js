@@ -2,7 +2,7 @@ require('dotenv').config({ path: require('path').join(__dirname, '../.env') })
 const express = require('express')
 const { Pool } = require('pg')
 const cors = require('cors')
-const fetch = require('node-fetch')
+// fetch 는 Node 18+ 내장 전역을 쓴다 (node-fetch v2 는 AbortSignal.timeout 과 호환되지 않음)
 
 // DATE 타입을 JS Date 객체가 아닌 YYYY-MM-DD 문자열로 반환
 const { types } = require('pg')
@@ -197,17 +197,39 @@ app.delete('/api/jira-issues', async (req, res) => {
 
 // 신형 검색 API(/rest/api/3/search/jql)를 nextPageToken 방식으로 끝까지 조회한다.
 // 구형 /rest/api/3/search 는 Atlassian 이 제거해 410 을 반환한다.
+// 페이지 반복이 끝나지 않으면 메모리를 모두 소진해 프로세스가 죽는다
+// (실제로 배포본에서 heap out of memory 로 백엔드가 사망한 사례가 있었다)
+const MAX_PAGES  = 100    // 페이지당 100건 → 최대 1만 건
+const MAX_ISSUES = 20000
+const JIRA_TIMEOUT_MS = 30000
+
 async function searchJiraIssues(baseUrl, auth, jql, fields) {
   const issues = []
+  const seenTokens = new Set()
   let pageToken = null
+  let page = 0
 
   do {
+    if (++page > MAX_PAGES) {
+      throw new Error(`Jira 조회가 ${MAX_PAGES}페이지를 넘겨 중단했습니다. 검색 조건을 확인해 주세요.`)
+    }
+
     const params = new URLSearchParams({ jql, maxResults: '100', fields })
     if (pageToken) params.set('nextPageToken', pageToken)
 
-    const response = await fetch(`${baseUrl}/rest/api/3/search/jql?${params}`, {
-      headers: { Authorization: auth, Accept: 'application/json' }
-    })
+    let response
+    try {
+      response = await fetch(`${baseUrl}/rest/api/3/search/jql?${params}`, {
+        headers: { Authorization: auth, Accept: 'application/json' },
+        signal: AbortSignal.timeout(JIRA_TIMEOUT_MS)
+      })
+    } catch (e) {
+      const reason = e.name === 'TimeoutError'
+        ? `응답이 ${JIRA_TIMEOUT_MS / 1000}초 안에 오지 않았습니다`
+        : e.message
+      throw new Error(`Jira 서버에 연결할 수 없습니다 (${reason}).`)
+    }
+
     const body = await response.text()
 
     if (!response.ok) {
@@ -221,10 +243,38 @@ async function searchJiraIssues(baseUrl, auth, jql, fields) {
 
     const data = JSON.parse(body)
     issues.push(...(data.issues || []))
-    pageToken = data.isLast ? null : (data.nextPageToken || null)
+
+    if (issues.length > MAX_ISSUES) {
+      throw new Error(`Jira 이슈가 ${MAX_ISSUES}건을 넘어 중단했습니다.`)
+    }
+
+    const nextToken = data.isLast ? null : (data.nextPageToken || null)
+    // 같은 토큰이 다시 오면 영원히 같은 페이지를 받게 된다
+    if (nextToken && seenTokens.has(nextToken)) {
+      throw new Error('Jira 가 같은 페이지를 반복해 반환했습니다. 무한 반복을 막기 위해 중단했습니다.')
+    }
+    if (nextToken) seenTokens.add(nextToken)
+    pageToken = nextToken
   } while (pageToken)
 
   return issues
+}
+
+// 토큰이 만료되면 Jira 가 401 대신 빈 결과를 주는 경우가 있어 0건과 구분되지 않는다.
+// 계정 조회로 인증 상태를 확인해 사용자가 원인을 알 수 있는 문구를 만든다.
+async function explainEmptyResult(baseUrl, auth) {
+  const generic = 'Jira 조회 결과가 0건입니다. 기존 업무 목록을 보존하기 위해 동기화를 중단했습니다.'
+  try {
+    const response = await fetch(`${baseUrl}/rest/api/3/myself`, {
+      headers: { Authorization: auth, Accept: 'application/json' },
+      signal: AbortSignal.timeout(JIRA_TIMEOUT_MS)
+    })
+    if (response.status === 401 || response.status === 403) {
+      return 'Jira 인증에 실패했습니다. API 토큰이 만료되었거나 잘못되었습니다. ' +
+             '관리자에게 토큰 갱신을 요청해 주세요. (기존 업무 목록은 그대로 보존했습니다)'
+    }
+  } catch { /* 확인 자체가 실패하면 일반 문구를 쓴다 */ }
+  return generic
 }
 
 app.post('/api/jira-sync', async (req, res) => {
@@ -265,10 +315,9 @@ app.post('/api/jira-sync', async (req, res) => {
 
     // 안전장치: 조회 결과가 비어 있으면 기존 목록을 지우지 않고 중단한다.
     // (과거 코드는 Jira 오류 응답을 빈 목록으로 취급해 전체 삭제로 이어졌다)
+    // 502/503/504 는 nginx 가 자체 오류로 가로채므로 500 으로 돌려준다
     if (allIssues.length === 0) {
-      return res.status(502).json({
-        error: 'Jira 조회 결과가 0건입니다. 기존 업무 목록을 보존하기 위해 동기화를 중단했습니다.'
-      })
+      return res.status(500).json({ error: await explainEmptyResult(baseUrl, auth) })
     }
 
     // 같은 INSERT 문에 중복 키가 들어가면 ON CONFLICT 가 오류를 내므로 미리 제거한다
