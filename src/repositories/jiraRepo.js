@@ -19,8 +19,18 @@ export async function getJiraTree() {
 
 export async function syncJira() {
   const res = await fetch(`${BASE}/jira-sync`, { method: 'POST' })
-  const data = await res.json()
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+  const text = await res.text()
+
+  // 프록시(nginx) 오류 등으로 JSON 이 아닌 HTML 이 올 수 있으므로 먼저 파싱을 시도한다
+  let data = null
+  try { data = JSON.parse(text) } catch { /* 아래에서 원문으로 안내한다 */ }
+
+  if (!res.ok) {
+    throw new Error(data?.error || `서버 오류 HTTP ${res.status} — ${text.slice(0, 120)}`)
+  }
+  if (!data) {
+    throw new Error(`서버가 JSON 이 아닌 응답을 반환했습니다 — ${text.slice(0, 120)}`)
+  }
   return data.count
 }
 

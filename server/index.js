@@ -195,6 +195,38 @@ app.delete('/api/jira-issues', async (req, res) => {
 
 // ─── Jira Sync ───────────────────────────────────────────────
 
+// 신형 검색 API(/rest/api/3/search/jql)를 nextPageToken 방식으로 끝까지 조회한다.
+// 구형 /rest/api/3/search 는 Atlassian 이 제거해 410 을 반환한다.
+async function searchJiraIssues(baseUrl, auth, jql, fields) {
+  const issues = []
+  let pageToken = null
+
+  do {
+    const params = new URLSearchParams({ jql, maxResults: '100', fields })
+    if (pageToken) params.set('nextPageToken', pageToken)
+
+    const response = await fetch(`${baseUrl}/rest/api/3/search/jql?${params}`, {
+      headers: { Authorization: auth, Accept: 'application/json' }
+    })
+    const body = await response.text()
+
+    if (!response.ok) {
+      let detail = body.slice(0, 300)
+      try {
+        const parsed = JSON.parse(body)
+        if (parsed.errorMessages?.length) detail = parsed.errorMessages.join(' ')
+      } catch { /* JSON 이 아니면 원문 앞부분을 그대로 쓴다 */ }
+      throw new Error(`Jira 조회 실패 (HTTP ${response.status}): ${detail}`)
+    }
+
+    const data = JSON.parse(body)
+    issues.push(...(data.issues || []))
+    pageToken = data.isLast ? null : (data.nextPageToken || null)
+  } while (pageToken)
+
+  return issues
+}
+
 app.post('/api/jira-sync', async (req, res) => {
   const email = process.env.JIRA_EMAIL
   const token = process.env.JIRA_TOKEN
@@ -209,27 +241,21 @@ app.post('/api/jira-sync', async (req, res) => {
 
   try {
     // 에픽(상위 이슈) 조회
-    const epicRes = await fetch(
-      `${baseUrl}/rest/api/3/search?jql=issuetype=Epic&maxResults=100&fields=summary,key`,
-      { headers: { Authorization: auth, Accept: 'application/json' } }
-    )
-    const epicData = await epicRes.json()
+    const epics = await searchJiraIssues(baseUrl, auth, 'issuetype=Epic', 'summary')
 
     // 하위 이슈 조회
-    const childRes = await fetch(
-      `${baseUrl}/rest/api/3/search?jql=issuetype!=Epic AND "Epic Link" is not EMPTY&maxResults=500&fields=summary,key,parent`,
-      { headers: { Authorization: auth, Accept: 'application/json' } }
+    const children = await searchJiraIssues(
+      baseUrl, auth, 'issuetype!=Epic AND parent is not EMPTY', 'summary,parent'
     )
-    const childData = await childRes.json()
 
     const allIssues = [
-      ...(epicData.issues || []).map(i => ({
+      ...epics.map(i => ({
         jira_key:   i.key,
         summary:    i.fields.summary,
         parent_key: null,
         full_text:  `[${i.key}] ${i.fields.summary}`
       })),
-      ...(childData.issues || []).map(i => ({
+      ...children.map(i => ({
         jira_key:   i.key,
         summary:    i.fields.summary,
         parent_key: i.fields.parent?.key ?? null,
@@ -237,17 +263,39 @@ app.post('/api/jira-sync', async (req, res) => {
       }))
     ]
 
+    // 안전장치: 조회 결과가 비어 있으면 기존 목록을 지우지 않고 중단한다.
+    // (과거 코드는 Jira 오류 응답을 빈 목록으로 취급해 전체 삭제로 이어졌다)
+    if (allIssues.length === 0) {
+      return res.status(502).json({
+        error: 'Jira 조회 결과가 0건입니다. 기존 업무 목록을 보존하기 위해 동기화를 중단했습니다.'
+      })
+    }
+
+    // 같은 INSERT 문에 중복 키가 들어가면 ON CONFLICT 가 오류를 내므로 미리 제거한다
+    const uniqueIssues = [...new Map(allIssues.map(i => [i.jira_key, i])).values()]
+
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
       await client.query('DELETE FROM jira_issues WHERE jira_key NOT LIKE \'MANUAL-%\'')
-      for (const issue of allIssues) {
+
+      // 건별 왕복 대신 500건씩 묶어 INSERT (NAS 환경에서 응답 지연 방지)
+      const CHUNK_SIZE = 500
+      for (let start = 0; start < uniqueIssues.length; start += CHUNK_SIZE) {
+        const chunk = uniqueIssues.slice(start, start + CHUNK_SIZE)
+        const placeholders = chunk.map((_, n) => {
+          const base = n * 4
+          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`
+        })
+        const values = chunk.flatMap(i => [i.jira_key, i.summary, i.parent_key, i.full_text])
         await client.query(
           `INSERT INTO jira_issues (jira_key, summary, parent_key, full_text)
-           VALUES ($1, $2, $3, $4)
+           VALUES ${placeholders.join(', ')}
            ON CONFLICT (jira_key) DO UPDATE
-           SET summary = $2, parent_key = $3, full_text = $4`,
-          [issue.jira_key, issue.summary, issue.parent_key, issue.full_text]
+           SET summary = EXCLUDED.summary,
+               parent_key = EXCLUDED.parent_key,
+               full_text = EXCLUDED.full_text`,
+          values
         )
       }
       await client.query('COMMIT')
@@ -258,7 +306,7 @@ app.post('/api/jira-sync', async (req, res) => {
       client.release()
     }
 
-    res.json({ ok: true, count: allIssues.length })
+    res.json({ ok: true, count: uniqueIssues.length })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
