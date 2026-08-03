@@ -15,6 +15,9 @@ dist-ssr
 # 환경변수 (DB 비밀번호, Jira 토큰 포함)
 .env
 
+# push-to-nas.ps1 이 만드는 임시 전송 파일
+vitron-src.tar.gz
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

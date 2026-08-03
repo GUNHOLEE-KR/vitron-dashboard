@@ -71,15 +71,27 @@ npm run dev                # 프론트 :5173
 `.claude/launch.json`에 서버 설정 있음 — Preview 도구로 브라우저 테스트 가능.
 
 ## 배포 (사내 NAS)
-NAS 소스 폴더는 `/volume1/docker-build`. SSH `ssh root@vitron-nas` 접속 후:
-```bash
-cd /volume1/docker-build && ./deploy.sh
+**PC 에서 이 한 줄이면 끝난다.** (압축 → 전송 → 원격 빌드·교체까지 자동)
+```powershell
+.\push-to-nas.ps1
 ```
-- NAS 에 `git` 이 없어 소스 갱신은 PC 에서 전송해야 한다
-  (`git archive --format=tar.gz -o ../vitron-src.tar.gz HEAD` → `scp` → `tar -xzf`)
+- 커밋된 내용(git HEAD)만 배포된다. 미커밋 변경이 있으면 경고하고 확인을 받는다
+- 비밀번호를 두 번(scp·ssh) 묻는다. SSH 키를 등록하면 생략된다
+- NAS 소스 폴더 `/volume1/docker-build`, 실제 빌드는 그 안의 `deploy.sh` 가 수행
+- 수동으로 할 경우: `git archive --format=tar.gz -o vitron-src.tar.gz HEAD` → `scp`
+  → NAS 에서 `tar -xzf vitron-src.tar.gz && ./deploy.sh`
+
+### 배포 관련 주의사항
+- NAS 에는 `git` 이 없다 (그래서 파일 전송 방식)
 - Portainer 스택(`vitron-dashboard`)으로 등록돼 있고 컨테이너 이름을 이어받는다.
-  Portainer 화면에는 Editor 가 안 뜨므로 **갱신은 CLI(`deploy.sh`)로 한다**
-- `.env` 는 git 에 없다. NAS 에 있는 파일을 유지하거나 `.env.example` 로 새로 만든다
+  Portainer 화면에는 Editor 가 안 뜨므로 **갱신은 항상 위 스크립트/`deploy.sh` 로 한다**
+  (Portainer UI 에서 스택을 Update 하면 옛 정의로 되돌아갈 수 있다)
+- `.env` 는 git 에 없다. NAS 의 `/volume1/docker-build/.env` 를 그대로 유지한다
+  (tar 에 포함되지 않으므로 배포해도 덮어써지지 않는다)
+- ⚠️ **`.ps1` 은 UTF-8 BOM 으로 저장해야 한다.** BOM 이 없으면 PowerShell 5.1 이
+  ANSI 로 읽어 한글이 깨지고 파싱 오류가 난다
+- ⚠️ **`.sh` 는 LF 로 유지해야 한다.** CRLF 면 NAS 에서 bad interpreter 오류가 난다
+  (`.gitattributes` 로 고정해 둠)
 
 ## 주의사항
 - `App.jsx`는 의도적으로 단일 파일 구조 유지 (분리 금지)
