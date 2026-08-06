@@ -6,14 +6,31 @@ export async function getWorkers() {
   return res.json()
 }
 
-export async function addWorker(name, hiredAt) {
+export async function addWorker(name, hiredAt, email) {
   const res = await fetch(`${BASE}/workers`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, hired_at: hiredAt })
+    body: JSON.stringify({ name, hired_at: hiredAt, email })
   })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
+}
+
+// 회사 메일 주소. KPI 추적 시스템(8083)이 이 값을 로그인 아이디로 쓴다.
+export async function updateWorkerEmail(id, email) {
+  const res = await fetch(`${BASE}/workers/${id}/email`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email })
+  })
+  if (!res.ok) {
+    // 서버는 {"error":"..."} 로 답한다. 그 문구만 꺼내 쓴다.
+    // try 안에서 곧바로 throw 하면 자기 catch 에 걸려 원본 JSON 이 그대로 화면에 뜬다.
+    const text = await res.text()
+    let message = text
+    try { message = JSON.parse(text).error || text } catch { /* JSON 이 아니면 원문을 쓴다 */ }
+    throw new Error(message)
+  }
 }
 
 // 아래 세 함수는 이름이 아니라 id 로 대상을 지정한다.

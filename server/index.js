@@ -34,13 +34,31 @@ app.get('/api/workers', async (req, res) => {
 })
 
 app.post('/api/workers', async (req, res) => {
-  const { name, hired_at } = req.body
+  const { name, hired_at, email } = req.body
   try {
     const { rows } = await pool.query(
-      'INSERT INTO workers (name, active, hired_at) VALUES ($1, true, $2) RETURNING *',
-      [name, hired_at || new Date().toISOString().slice(0, 10)]
+      'INSERT INTO workers (name, active, hired_at, email) VALUES ($1, true, $2, $3) RETURNING *',
+      [name, hired_at || new Date().toISOString().slice(0, 10), email || null]
     )
     res.json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 회사 메일 주소. KPI 추적 시스템(8083)이 이 값을 로그인 아이디로 쓴다.
+app.patch('/api/workers/:id/email', async (req, res) => {
+  const { email } = req.body
+  const value = String(email || '').trim()
+  if (value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
+    return res.status(400).json({ error: '메일 주소 형식이 올바르지 않습니다.' })
+  }
+  try {
+    const { rowCount } = await pool.query(
+      'UPDATE workers SET email = $1 WHERE id = $2', [value || null, req.params.id]
+    )
+    if (rowCount === 0) return res.status(404).json({ error: '해당 직원을 찾을 수 없습니다.' })
+    res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }

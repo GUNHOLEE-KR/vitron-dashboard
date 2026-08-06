@@ -17,11 +17,16 @@ CREATE TABLE IF NOT EXISTS workers (
   active      BOOLEAN NOT NULL DEFAULT true,
   hired_at    DATE,
   resigned_at DATE,
+  -- 회사 메일 주소. KPI 추적 시스템(8083)이 로그인 아이디로 쓴다.
+  email       VARCHAR(200),
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   -- 이름 단독 UNIQUE 는 동명이인을 막아버린다. (이름, 입사일) 조합으로 바꿔
   -- 동명이인은 허용하고 완전 중복(같은 이름·같은 입사일)만 거부한다.
   CONSTRAINT workers_name_hired_at_key UNIQUE (name, hired_at)
 );
+
+-- 이미 만들어진 DB 에도 컬럼을 더한다 (이 파일은 여러 번 실행돼도 안전해야 한다)
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS email VARCHAR(200);
 
 -- 업무 기록 테이블
 CREATE TABLE IF NOT EXISTS work_history (

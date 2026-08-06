@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, LabelList, Treemap,
          RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
          ComposedChart, XAxis, YAxis, Tooltip, Legend, ReferenceLine, ResponsiveContainer } from 'recharts'
-import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates } from './repositories/workerRepo'
+import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates, updateWorkerEmail } from './repositories/workerRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
 import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
 
@@ -931,11 +931,13 @@ function TabYearly({history,workers,viewYear,setViewYear,jiraTree}){
 function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree,showToast,tokenStatus={configured:false}}){
   const [newWorker,setNewWorker]=useState('')
   const [newHiredAt,setNewHiredAt]=useState(today())
+  const [newEmail,setNewEmail]=useState('')
   const [resigningWorkerId,setResigningWorkerId]=useState(null)
   const [resignDate,setResignDate]=useState(today())
   const [editingWorkerId,setEditingWorkerId]=useState(null)
   const [editHiredAt,setEditHiredAt]=useState('')
   const [editResignedAt,setEditResignedAt]=useState('')
+  const [editEmail,setEditEmail]=useState('')
   const [newJira,setNewJira]=useState('')
   const [newJiraParent,setNewJiraParent]=useState('')
   const jiraParents=Object.keys(jiraTree)
@@ -945,26 +947,31 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree
     setEditingWorkerId(w.id)
     setEditHiredAt(w.hired_at||'')
     setEditResignedAt(w.resigned_at||'')
+    setEditEmail(w.email||'')
     setResigningWorkerId(null)
   }
 
+  // 날짜와 메일 주소는 저장 API 가 따로다. 한 번에 눌러도 되도록 여기서 묶어 부른다.
   async function confirmEdit() {
     const label=nameOf(editingWorkerId)
+    const target=workers.find(w=>w.id===editingWorkerId)
     try {
       await updateWorkerDates(editingWorkerId, editHiredAt||null, editResignedAt||null)
+      // 메일 주소는 바뀌었을 때만 보낸다. 형식이 틀리면 서버가 막으므로 그 문구를 그대로 띄운다.
+      if ((target?.email||'') !== editEmail) await updateWorkerEmail(editingWorkerId, editEmail)
       setWorkers(workers.map(w => w.id===editingWorkerId
-        ? {...w, hired_at:editHiredAt||null, resigned_at:editResignedAt||null}
+        ? {...w, hired_at:editHiredAt||null, resigned_at:editResignedAt||null, email:editEmail||null}
         : w))
-      showToast(label+' 날짜 수정 완료')
+      showToast(label+' 정보 수정 완료')
       setEditingWorkerId(null)
-    } catch(e) { showToast('수정 실패') }
+    } catch(e) { showToast('수정 실패: '+e.message) }
   }
 
   async function handleAddWorker(){
     if(!newWorker.trim())return
     try{
-      const w=await addWorker(newWorker.trim(),newHiredAt)
-      setWorkers([...workers,w]);setNewWorker('');setNewHiredAt(today())
+      const w=await addWorker(newWorker.trim(),newHiredAt,newEmail.trim()||null)
+      setWorkers([...workers,w]);setNewWorker('');setNewHiredAt(today());setNewEmail('')
       showToast(w.name+' 입사 등록 ('+newHiredAt+')')
     }catch(e){showToast('추가 실패: '+e.message)}
   }
@@ -1022,12 +1029,16 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree
         <Card title="직원 관리" style={{flex:1,minWidth:300}}>
           <div style={{display:'flex',gap:8,marginBottom:6,flexWrap:'wrap'}}>
             <input value={newWorker} onChange={e=>setNewWorker(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleAddWorker()} placeholder="직원명"
-              style={{flex:1,minWidth:100,padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
+              style={{flex:'1 1 100px',minWidth:100,padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
             <input type="date" value={newHiredAt} onChange={e=>setNewHiredAt(e.target.value)}
               style={{padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
+            <input type="email" value={newEmail} onChange={e=>setNewEmail(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleAddWorker()} placeholder="회사 메일 주소"
+              style={{flex:'1 1 180px',minWidth:160,padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
             <button onClick={handleAddWorker} style={{padding:'7px 14px',borderRadius:7,border:'none',background:'#1a56db',color:'#fff',cursor:'pointer',fontWeight:600}}>추가</button>
           </div>
-          <div style={{fontSize:11,color:'#6b7280',marginBottom:12}}>직원명 + 입사일 입력 후 추가</div>
+          <div style={{fontSize:11,color:'#6b7280',marginBottom:12}}>
+            직원명 + 입사일 + 메일 주소 입력 후 추가 — 메일 주소는 KPI 추적 시스템의 로그인 아이디로 쓰입니다
+          </div>
 
           {workers.map(w=>(
             <div key={w.id} style={{border:'1px solid #e5e7eb',borderRadius:8,marginBottom:6,overflow:'hidden'}}>
@@ -1050,13 +1061,16 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree
                   <div style={{fontSize:11,color:'#9ca3af',marginTop:3}}>
                     입사: {w.hired_at||'-'}
                     {w.resigned_at&&<span style={{color:'#b91c1c',marginLeft:8}}>퇴사: {w.resigned_at}</span>}
+                    <span style={{marginLeft:8,color:w.email?'#6b7280':'#d1d5db'}}>
+                      ✉ {w.email||'메일 주소 없음'}
+                    </span>
                   </div>
                 </div>
                 <div style={{display:'flex',gap:8,alignItems:'center'}}>
                   <button onClick={()=>editingWorkerId===w.id?setEditingWorkerId(null):startEdit(w)}
                     style={{padding:'4px 10px',borderRadius:6,border:'1px solid #e5e7eb',
                       background:editingWorkerId===w.id?'#f1f5f9':'#fff',cursor:'pointer',fontSize:11,color:'#6b7280'}}>
-                    ✏️ 날짜수정
+                    ✏️ 정보수정
                   </button>
                   <label style={{display:'flex',alignItems:'center',gap:4,cursor:'pointer',fontSize:12}}>
                     <input type="checkbox" checked={w.active} onChange={e=>handleToggle(w.id,e.target.checked)}/>재직
@@ -1068,7 +1082,7 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree
               {/* 날짜 수정 패널 */}
               {editingWorkerId===w.id&&(
                 <div style={{background:'#f0f9ff',borderTop:'1px solid #bae6fd',padding:'12px 14px'}}>
-                  <div style={{fontSize:11,fontWeight:700,color:'#0369a1',marginBottom:8}}>날짜 수정</div>
+                  <div style={{fontSize:11,fontWeight:700,color:'#0369a1',marginBottom:8}}>정보 수정</div>
                   <div style={{display:'flex',gap:12,flexWrap:'wrap',alignItems:'flex-end'}}>
                     <div>
                       <div style={{fontSize:11,color:'#6b7280',marginBottom:4}}>입사일</div>
@@ -1079,6 +1093,12 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree
                       <div style={{fontSize:11,color:'#6b7280',marginBottom:4}}>퇴사일 (없으면 비워두세요)</div>
                       <input type="date" value={editResignedAt} onChange={e=>setEditResignedAt(e.target.value)}
                         style={{padding:'6px 10px',border:'1px solid #fca5a5',borderRadius:6,fontSize:13}}/>
+                    </div>
+                    <div style={{flex:'1 1 200px',minWidth:180}}>
+                      <div style={{fontSize:11,color:'#6b7280',marginBottom:4}}>회사 메일 주소 (KPI 로그인 아이디)</div>
+                      <input type="email" value={editEmail} onChange={e=>setEditEmail(e.target.value)}
+                        placeholder="예: hong@vi-tron.com"
+                        style={{width:'100%',boxSizing:'border-box',padding:'6px 10px',border:'1px solid #7dd3fc',borderRadius:6,fontSize:13}}/>
                     </div>
                     <div style={{display:'flex',gap:6}}>
                       <button onClick={confirmEdit}
