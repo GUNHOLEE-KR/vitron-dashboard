@@ -275,15 +275,16 @@ function ProjectAnalysis({rows,allHistory}){
       </div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,minWidth:260,maxWidth:'100%',boxSizing:'border-box',overflowX:'auto'}}>
         <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>프로젝트 기간 비중 상세</div>
-        {/* 숫자 칸은 값이 짧아 넓을 필요가 없다. 고정 폭으로 좁히고
-            남는 공간을 프로젝트명·참여자에 몰아줘 잘리지 않게 한다. */}
+        {/* 폭은 고정 px 이 아니라 비율로 나눈다.
+            프로젝트에 px 를 몰아주면 화면이 넓을 때 가운데가 텅 비고
+            나머지 칸이 오른쪽에 몰려 답답해진다. */}
         <table style={{width:'100%',borderCollapse:'collapse',tableLayout:'fixed'}}>
           <colgroup>
-            <col/>
-            <col style={{width:190}}/>
-            <col style={{width:66}}/>
-            <col style={{width:66}}/>
-            <col style={{width:118}}/>
+            <col style={{width:'34%'}}/>
+            <col style={{width:'24%'}}/>
+            <col style={{width:'10%'}}/>
+            <col style={{width:'10%'}}/>
+            <col style={{width:'22%'}}/>
           </colgroup>
           <thead><tr>
             <th style={{...thS,textAlign:'left'}}>프로젝트</th>
@@ -297,16 +298,21 @@ function ProjectAnalysis({rows,allHistory}){
                 {/* 이름은 줄바꿈을 허용해 전체를 보여준다 (차트 축 라벨과 달리 축약하지 않는다) */}
                 <td style={{...tdS,textAlign:'left',whiteSpace:'normal',wordBreak:'break-word',lineHeight:1.45}}>{r.fullName}</td>
                 <td style={tdS}>
-                  {/* 여러 명이 함께한 업무도 있으므로 인원 수와 이름을 함께 보여준다 */}
-                  <div style={{display:'flex',alignItems:'flex-start',gap:6,justifyContent:'center'}}>
+                  {/* 여러 명이 함께한 업무도 있다. 인원 수를 배지로 보여주고 이름을 잇는다.
+                      4명 이상이면 「외 N명」으로 접어 행 높이가 들쭉날쭉해지지 않게 한다. */}
+                  <div style={{display:'flex',alignItems:'center',gap:7,justifyContent:'center'}} title={r.참여자.join(', ')}>
                     <span style={{background:'#f0fdf4',color:'#0d7a4e',border:'1px solid #bbf7d0',
-                      padding:'2px 7px',borderRadius:12,fontWeight:700,fontSize:11,whiteSpace:'nowrap'}}>{r.인원}명</span>
-                    <span style={{fontSize:11,color:'#6b7280',whiteSpace:'normal',wordBreak:'keep-all',
-                      textAlign:'left',lineHeight:1.45}}>{r.참여자.join(', ')}</span>
+                      padding:'2px 8px',borderRadius:12,fontWeight:700,fontSize:11,whiteSpace:'nowrap',flexShrink:0}}>{r.인원}명</span>
+                    <span style={{fontSize:11,color:'#6b7280',overflow:'hidden',textOverflow:'ellipsis',
+                      whiteSpace:'nowrap',textAlign:'left'}}>
+                      {r.참여자.length<=3
+                        ? r.참여자.join(', ')
+                        : `${r.참여자.slice(0,2).join(', ')} 외 ${r.참여자.length-2}명`}
+                    </span>
                   </div>
                 </td>
-                <td style={{...tdS,whiteSpace:'nowrap'}}><span style={{background:'#eff6ff',color:'#1a56db',padding:'2px 7px',borderRadius:12,fontWeight:700,fontSize:12}}>{r.기간}h</span></td>
-                <td style={{...tdS,whiteSpace:'nowrap'}}><span style={{background:'#f9fafb',color:'#6b7280',padding:'2px 7px',borderRadius:12,fontSize:12}}>{r.누적}h</span></td>
+                <td style={{...tdS,whiteSpace:'nowrap'}}><span style={{color:'#1a56db',fontWeight:700,fontSize:12}}>{r.기간}h</span></td>
+                <td style={{...tdS,whiteSpace:'nowrap'}}><span style={{color:'#9ca3af',fontSize:12}}>{r.누적}h</span></td>
                 <td style={tdS}>
                   <div style={{display:'flex',alignItems:'center',gap:5}}>
                     <div style={{flex:1,height:7,background:'#e5e7eb',borderRadius:4,minWidth:40}}>
