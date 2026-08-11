@@ -17,7 +17,11 @@
 - **Backend**: Node.js + Express (`server/index.js`)
 - **DB**: 사내 PostgreSQL (`vitron-nas:5432`, DB `vitron_dashboard`)
 - **배포**: 사내 NAS Docker (`http://vitron-nas:8082`) — 아래 배포 절차 참고
-- **GitHub**: https://github.com/GUNHOLEE-KR/vitron-dashboard
+- **저장소**: 사내 Gitea 주 저장소 + GitHub 백업 (`git push` 한 번에 양쪽 전송)
+  - 주: `http://vitron-nas:8084/GunhoLee/vitron-dashboard` (origin)
+  - 백업: `https://github.com/GUNHOLEE-KR/vitron-dashboard` (origin push 대상에 포함, 별칭 `github`)
+  - ⚠️ Git 저장소는 **배포 경로에 없다.** `push-to-nas.ps1` 이 로컬 커밋을 직접
+    tar 로 묶어 NAS 에 보내므로, push 하지 않아도 배포되고 저장소를 옮겨도 배포는 영향 없다
 
 > Supabase·Vercel 은 2026-06-02 에 걷어냈다. `supabase/`·`api/` 폴더는 잔재이며 사용하지 않는다.
 
