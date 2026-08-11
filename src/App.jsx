@@ -538,7 +538,7 @@ function MixTrend({data,tasks}){
   )
 }
 
-// ── 직원 역량 비교 레이더 (프로토타입) ──────────────────────
+// ── 직원별 업무 분포 레이더 ──────────────────────
 function RadarAnalysis({rows,workers}){
   if(!rows.length)return null
   const wNames=workers.map(w=>w.name).filter(n=>rows.some(r=>r.worker_name===n))
@@ -977,7 +977,7 @@ function TabWeekly({history,workers,viewDate,setViewDate,jiraTree}){
       <ParetoAnalysis rows={rows}/>
       <SectionTitle>업무 계층 비중 (트리맵)</SectionTitle>
       <TreemapAnalysis data={tmData}/>
-      <SectionTitle>직원 역량 비교 (레이더)</SectionTitle>
+      <SectionTitle>직원별 업무 분포 (레이더)</SectionTitle>
       <RadarAnalysis rows={rows} workers={periodWorkers}/>
       <SectionTitle>업무 구성 비율 추이 (100%)</SectionTitle>
       <MixTrend data={mix.data} tasks={mix.topTasks}/>
@@ -1054,7 +1054,7 @@ function TabMonthly({history,workers,viewMonth,setViewMonth,jiraTree}){
       <ParetoAnalysis rows={rows}/>
       <SectionTitle>업무 계층 비중 (트리맵)</SectionTitle>
       <TreemapAnalysis data={tmData}/>
-      <SectionTitle>직원 역량 비교 (레이더)</SectionTitle>
+      <SectionTitle>직원별 업무 분포 (레이더)</SectionTitle>
       <RadarAnalysis rows={rows} workers={periodWorkers}/>
       <SectionTitle>업무 구성 비율 추이 (100%)</SectionTitle>
       <MixTrend data={mix.data} tasks={mix.topTasks}/>
@@ -1130,7 +1130,7 @@ function TabYearly({history,workers,viewYear,setViewYear,jiraTree}){
       <ParetoAnalysis rows={rows}/>
       <SectionTitle>업무 계층 비중 (트리맵)</SectionTitle>
       <TreemapAnalysis data={tmData}/>
-      <SectionTitle>직원 역량 비교 (레이더)</SectionTitle>
+      <SectionTitle>직원별 업무 분포 (레이더)</SectionTitle>
       <RadarAnalysis rows={rows} workers={periodWorkers}/>
       <SectionTitle>업무 구성 비율 추이 (100%)</SectionTitle>
       <MixTrend data={mix.data} tasks={mix.topTasks}/>
