@@ -57,6 +57,14 @@ function withDisplayNames(history, workers) {
   })
 }
 
+// 평균 시간은 소수 첫째 자리까지 보여준다.
+// 정수로 반올림하면 5명이 12h 일 때 2.4 → 2 가 되어 오차가 크다.
+function avgHours(total, count){
+  if(!count) return '0'
+  const v=total/count
+  return Number.isInteger(v) ? String(v) : v.toFixed(1)
+}
+
 // 기간별 직원 필터 헬퍼
 function workersForPeriod(workers, periodStart, periodEnd) {
   return workers.filter(w => {
@@ -671,11 +679,16 @@ function Card({title,children,style={}}){
   return<div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,marginBottom:16,...style}}>
     {title&&<div style={{fontSize:14,fontWeight:700,marginBottom:14}}>{title}</div>}{children}</div>
 }
+// 지표 카드. unit 은 숫자 뒤에 작게 붙는다 —
+// 값만 보면 시간인지 사람 수인지 구분할 수 없어 단위를 반드시 표시한다.
 function Metrics({items}){
   return<div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(130px,1fr))',gap:10,marginBottom:16}}>
-    {items.map(({label,value,color})=>(
+    {items.map(({label,value,unit,color})=>(
       <div key={label} style={{background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,padding:'14px 16px',textAlign:'center'}}>
-        <div style={{fontSize:26,fontWeight:700,color:color||'#1a56db'}}>{value}</div>
+        <div style={{fontSize:26,fontWeight:700,color:color||'#1a56db'}}>
+          {value}
+          {unit&&<span style={{fontSize:14,fontWeight:600,marginLeft:2,opacity:.75}}>{unit}</span>}
+        </div>
         <div style={{fontSize:11,color:'#6b7280',marginTop:3}}>{label}</div>
       </div>
     ))}
@@ -701,9 +714,10 @@ function TabDaily({history,workers,viewDate,setViewDate}){
         <input type="date" value={viewDate} onChange={e=>setViewDate(e.target.value)} style={{padding:'6px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
       </div>
       <Metrics items={[
-        {label:'총 업무 기록',value:total,color:'#1a56db'},{label:'활동 직원',value:Object.keys(agg).length,color:'#0d7a4e'},
-        {label:'업무 종류',value:Object.keys(aggByWork(rows)).length,color:'#b45309'},
-        {label:'1인 평균',value:Object.keys(agg).length>0?Math.round(total/Object.keys(agg).length):0,color:'#6d28d9'}
+        {label:'총 업무 기록',value:total,unit:'h',color:'#1a56db'},
+        {label:'활동 직원',value:Object.keys(agg).length,unit:'명',color:'#0d7a4e'},
+        {label:'업무 종류',value:Object.keys(aggByWork(rows)).length,unit:'종',color:'#b45309'},
+        {label:'1인 평균',value:avgHours(total,Object.keys(agg).length),unit:'h',color:'#6d28d9'}
       ]}/>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <Card title="직원별 업무량 · 단위: 시간(h)" style={{flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
@@ -754,9 +768,10 @@ function TabWeekly({history,workers,viewDate,setViewDate,jiraTree}){
         <span style={{fontSize:12,background:'#ede9fe',color:'#6d28d9',padding:'2px 10px',borderRadius:12,fontWeight:700}}>{ym.slice(5)}월 {wk}주차</span>
       </div>
       <Metrics items={[
-        {label:'총 업무 기록',value:total,color:'#1a56db'},{label:'근무일수',value:days.length,color:'#0d7a4e'},
-        {label:'일평균',value:days.length>0?Math.round(total/days.length):0,color:'#b45309'},
-        {label:'1인 합계',value:wNames.length>0?Math.round(total/wNames.length):0,color:'#6d28d9'}
+        {label:'총 업무 기록',value:total,unit:'h',color:'#1a56db'},
+        {label:'근무일수',value:days.length,unit:'일',color:'#0d7a4e'},
+        {label:'일평균',value:avgHours(total,days.length),unit:'h',color:'#b45309'},
+        {label:'1인 합계',value:avgHours(total,wNames.length),unit:'h',color:'#6d28d9'}
       ]}/>
       <Card title="일별 분포 (누적 영역) · 단위: 시간(h)">
         <ResponsiveContainer width="100%" height={260}>
@@ -808,9 +823,10 @@ function TabMonthly({history,workers,viewMonth,setViewMonth,jiraTree}){
         <input type="month" value={viewMonth} onChange={e=>setViewMonth(e.target.value)} style={{padding:'6px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
       </div>
       <Metrics items={[
-        {label:'총 업무 기록',value:total,color:'#1a56db'},{label:'근무일수',value:days.length,color:'#0d7a4e'},
-        {label:'업무 종류',value:Object.keys(aggByWork(rows)).length,color:'#b45309'},
-        {label:'1인 총 업무',value:wNames.length>0?Math.round(total/wNames.length):0,color:'#6d28d9'}
+        {label:'총 업무 기록',value:total,unit:'h',color:'#1a56db'},
+        {label:'근무일수',value:days.length,unit:'일',color:'#0d7a4e'},
+        {label:'업무 종류',value:Object.keys(aggByWork(rows)).length,unit:'종',color:'#b45309'},
+        {label:'1인 총 업무',value:avgHours(total,wNames.length),unit:'h',color:'#6d28d9'}
       ]}/>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <Card title="주차별 분포 (누적 영역) · 단위: 시간(h)" style={{flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
@@ -872,9 +888,10 @@ function TabYearly({history,workers,viewYear,setViewYear,jiraTree}){
         <input type="number" value={viewYear} min="2020" max="2099" onChange={e=>setViewYear(parseInt(e.target.value))} style={{width:90,padding:'6px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
       </div>
       <Metrics items={[
-        {label:'총 업무 기록',value:total.toLocaleString(),color:'#1a56db'},{label:'연간 근무일',value:days.length,color:'#0d7a4e'},
-        {label:'업무 종류',value:Object.keys(aggByWork(rows)).length,color:'#b45309'},
-        {label:'1인 연간 합계',value:wNames.length>0?Math.round(total/wNames.length):0,color:'#6d28d9'}
+        {label:'총 업무 기록',value:total.toLocaleString(),unit:'h',color:'#1a56db'},
+        {label:'연간 근무일',value:days.length,unit:'일',color:'#0d7a4e'},
+        {label:'업무 종류',value:Object.keys(aggByWork(rows)).length,unit:'종',color:'#b45309'},
+        {label:'1인 연간 합계',value:avgHours(total,wNames.length),unit:'h',color:'#6d28d9'}
       ]}/>
       <Card title="월별 업무량 추이 · 단위: 시간(h)">
         <ResponsiveContainer width="100%" height={260}>
