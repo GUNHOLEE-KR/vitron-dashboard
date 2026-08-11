@@ -233,10 +233,19 @@ function WorkerAnalysis({rows,workers}){
 function ProjectAnalysis({rows,allHistory}){
   if(!rows.length)return null
   const periodAgg=aggByWork(rows),totalAgg=aggByWork(allHistory)
+  // 업무별 참여자. 한 사람이 여러 시간 기록해도 1명으로 세도록 Set 을 쓴다.
+  // 같은 업무를 여러 명이 함께 한 경우도 그대로 모인다.
+  const membersByTask={}
+  rows.forEach(r=>{
+    if(!membersByTask[r.work_text])membersByTask[r.work_text]=new Set()
+    membersByTask[r.work_text].add(r.worker_name)
+  })
   const data=Object.entries(periodAgg).sort((a,b)=>b[1]-a[1]).slice(0,10)
     .map(([name,ph])=>{
       const th=totalAgg[name]||ph,nm=cleanName(name)
-      return{name:nm.length>16?nm.slice(0,16)+'…':nm,fullName:nm,기간:ph,누적:th,기간비중:Math.round(ph/th*100)}
+      const members=[...(membersByTask[name]||[])].sort()
+      return{name:nm.length>16?nm.slice(0,16)+'…':nm,fullName:nm,기간:ph,누적:th,
+        기간비중:Math.round(ph/th*100),인원:members.length,참여자:members}
     })
   return(
     <div style={{display:'flex',flexDirection:'column',gap:16,marginBottom:16}}>
@@ -266,24 +275,44 @@ function ProjectAnalysis({rows,allHistory}){
       </div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,minWidth:260,maxWidth:'100%',boxSizing:'border-box',overflowX:'auto'}}>
         <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>프로젝트 기간 비중 상세</div>
-        <table style={{width:'100%',borderCollapse:'collapse'}}>
+        {/* 숫자 칸은 값이 짧아 넓을 필요가 없다. 고정 폭으로 좁히고
+            남는 공간을 프로젝트명·참여자에 몰아줘 잘리지 않게 한다. */}
+        <table style={{width:'100%',borderCollapse:'collapse',tableLayout:'fixed'}}>
+          <colgroup>
+            <col/>
+            <col style={{width:190}}/>
+            <col style={{width:66}}/>
+            <col style={{width:66}}/>
+            <col style={{width:118}}/>
+          </colgroup>
           <thead><tr>
             <th style={{...thS,textAlign:'left'}}>프로젝트</th>
+            <th style={thS}>작업 인원</th>
             <th style={thS}>기간(h)</th><th style={thS}>누적(h)</th>
-            <th style={{...thS,minWidth:120}}>기간 비중</th>
+            <th style={thS}>기간 비중</th>
           </tr></thead>
           <tbody>
             {data.map((r,i)=>(
               <tr key={i} style={{background:i%2===0?'#f9fafb':'#fff'}}>
-                <td style={{...tdS,textAlign:'left',maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={r.fullName}>{r.name}</td>
-                <td style={tdS}><span style={{background:'#eff6ff',color:'#1a56db',padding:'2px 8px',borderRadius:12,fontWeight:700}}>{r.기간}h</span></td>
-                <td style={tdS}><span style={{background:'#f9fafb',color:'#6b7280',padding:'2px 8px',borderRadius:12}}>{r.누적}h</span></td>
+                {/* 이름은 줄바꿈을 허용해 전체를 보여준다 (차트 축 라벨과 달리 축약하지 않는다) */}
+                <td style={{...tdS,textAlign:'left',whiteSpace:'normal',wordBreak:'break-word',lineHeight:1.45}}>{r.fullName}</td>
+                <td style={tdS}>
+                  {/* 여러 명이 함께한 업무도 있으므로 인원 수와 이름을 함께 보여준다 */}
+                  <div style={{display:'flex',alignItems:'flex-start',gap:6,justifyContent:'center'}}>
+                    <span style={{background:'#f0fdf4',color:'#0d7a4e',border:'1px solid #bbf7d0',
+                      padding:'2px 7px',borderRadius:12,fontWeight:700,fontSize:11,whiteSpace:'nowrap'}}>{r.인원}명</span>
+                    <span style={{fontSize:11,color:'#6b7280',whiteSpace:'normal',wordBreak:'keep-all',
+                      textAlign:'left',lineHeight:1.45}}>{r.참여자.join(', ')}</span>
+                  </div>
+                </td>
+                <td style={{...tdS,whiteSpace:'nowrap'}}><span style={{background:'#eff6ff',color:'#1a56db',padding:'2px 7px',borderRadius:12,fontWeight:700,fontSize:12}}>{r.기간}h</span></td>
+                <td style={{...tdS,whiteSpace:'nowrap'}}><span style={{background:'#f9fafb',color:'#6b7280',padding:'2px 7px',borderRadius:12,fontSize:12}}>{r.누적}h</span></td>
                 <td style={tdS}>
                   <div style={{display:'flex',alignItems:'center',gap:5}}>
-                    <div style={{flex:1,height:7,background:'#e5e7eb',borderRadius:4}}>
+                    <div style={{flex:1,height:7,background:'#e5e7eb',borderRadius:4,minWidth:40}}>
                       <div style={{width:r.기간비중+'%',height:'100%',background:'#f59e0b',borderRadius:4}}/>
                     </div>
-                    <span style={{fontSize:11,minWidth:34,fontWeight:700,color:'#b45309'}}>{r.기간비중}%</span>
+                    <span style={{fontSize:11,minWidth:30,fontWeight:700,color:'#b45309',whiteSpace:'nowrap'}}>{r.기간비중}%</span>
                   </div>
                 </td>
               </tr>
