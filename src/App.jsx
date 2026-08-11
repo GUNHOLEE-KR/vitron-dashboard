@@ -917,21 +917,33 @@ function TabWeekly({history,workers,viewDate,setViewDate,jiraTree}){
   const barData=days.map(d=>{const o={name:d.slice(5)+'('+dayName(d)+')'};wNames.forEach(n=>{o[n]=dm[d][n]||0});return o})
   const tmData=buildTreemapData(rows,jiraTree)
   const mix=buildTaskMix(rows,r=>({k:r.work_date,label:r.work_date.slice(5)+'('+dayName(r.work_date)+')'}))
+  // 연도 선택지 — 기록이 있는 해와 올해를 합쳐 최근순으로
+  const yearOptions=[...new Set([...history.map(r=>r.work_date.slice(0,4)),today().slice(0,4)])].sort((a,b)=>b-a)
+  const selS={padding:'6px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,fontWeight:700,cursor:'pointer',background:'#fff'}
+  // 연·월을 바꿀 때 지금 보던 주차가 그 달에 없을 수 있다 (5주차 → 2월)
+  // 그럴 땐 마지막 주차로 맞춘다.
+  const moveTo=newYm=>setViewDate(weekFirstDate(newYm,Math.min(wk,weeksInMonth(newYm))))
   return(
     <div>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 18px',marginBottom:16,display:'flex',gap:10,alignItems:'center'}}>
-        <strong>주간 리포트</strong>
-        <input type="date" value={viewDate} onChange={e=>setViewDate(e.target.value)} style={{padding:'6px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
-        {/* 주차를 직접 고를 수 있게. 날짜를 짚어야 주가 바뀌던 것보다 편하다.
-            선택지 개수는 그 달 일수로 계산한다 (31일=5주차, 28일=4주차) */}
-        <select value={wk} onChange={e=>setViewDate(weekFirstDate(ym,+e.target.value))}
-          style={{padding:'6px 10px',border:'1px solid #ddd6fe',borderRadius:7,fontSize:13,
-            background:'#ede9fe',color:'#6d28d9',fontWeight:700,cursor:'pointer'}}>
-          {Array.from({length:weeksInMonth(ym)},(_,i)=>i+1).map(n=>(
-            <option key={n} value={n}>{ym.slice(5)}월 {n}주차</option>
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 18px',marginBottom:16,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+        <strong style={{marginRight:2}}>주간 리포트</strong>
+        {/* 연 · 월 · 주차를 각각 골라 이동한다. 날짜를 짚는 방식보다 빠르다. */}
+        <select value={ym.slice(0,4)} onChange={e=>moveTo(e.target.value+'-'+ym.slice(5))} style={selS}>
+          {yearOptions.map(y=><option key={y} value={y}>{y}년</option>)}
+        </select>
+        <select value={ym.slice(5)} onChange={e=>moveTo(ym.slice(0,4)+'-'+e.target.value)} style={selS}>
+          {Array.from({length:12},(_,i)=>String(i+1).padStart(2,'0')).map(m=>(
+            <option key={m} value={m}>{+m}월</option>
           ))}
         </select>
-        <span style={{fontSize:12,color:'#6b7280'}}>{wS.slice(5)} ~ {wE.slice(5)}</span>
+        {/* 주차 선택지 개수는 그 달 일수로 계산한다 (31일=5주차, 28일=4주차) */}
+        <select value={wk} onChange={e=>setViewDate(weekFirstDate(ym,+e.target.value))}
+          style={{...selS,border:'1px solid #ddd6fe',background:'#ede9fe',color:'#6d28d9'}}>
+          {Array.from({length:weeksInMonth(ym)},(_,i)=>i+1).map(n=>(
+            <option key={n} value={n}>{n}주차</option>
+          ))}
+        </select>
+        <span style={{fontSize:12,color:'#6b7280'}}>{wS} ~ {wE.slice(5)}</span>
       </div>
       <Metrics items={[
         {label:'총 업무 기록',value:total,unit:'h',color:'#1a56db'},
