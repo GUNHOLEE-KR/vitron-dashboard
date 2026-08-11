@@ -157,13 +157,18 @@ function WorkerAnalysis({rows,workers}){
     topTasks.forEach(t=>{obj[t]=wRows.filter(r=>r.work_text===t).length})
     return obj
   })
+  // 직원명은 rowSpan 으로 한 칸에 묶어 표시한다.
+  // 줄마다 이름이 반복되면 어디서 사람이 바뀌는지 알아보기 어렵다.
+  // first=그 직원의 첫 줄인가, span=묶을 줄 수
   const tableRows=[]
   wNames.forEach(w=>{
     const wRows=rows.filter(r=>r.worker_name===w)
     const total=wRows.length;if(!total)return
     const tg={}; wRows.forEach(r=>{tg[r.work_text]=(tg[r.work_text]||0)+1})
-    Object.entries(tg).sort((a,b)=>b[1]-a[1]).forEach(([task,hours])=>{
-      tableRows.push({worker:w,task,hours,ratio:Math.round(hours/total*100),wi:wNames.indexOf(w)})
+    const tasks=Object.entries(tg).sort((a,b)=>b[1]-a[1])
+    tasks.forEach(([task,hours],ti)=>{
+      tableRows.push({worker:w,task,hours,ratio:Math.round(hours/total*100),
+        wi:wNames.indexOf(w),first:ti===0,span:tasks.length,workerTotal:total})
     })
   })
   return(
@@ -191,12 +196,23 @@ function WorkerAnalysis({rows,workers}){
             <th style={thS}>시간</th><th style={{...thS,minWidth:120}}>비율</th>
           </tr></thead>
           <tbody>
-            {tableRows.map((r,i)=>(
-              <tr key={i} style={{background:i%2===0?'#f9fafb':'#fff'}}>
-                <td style={{...tdS,fontWeight:600,color:COLORS[r.wi%COLORS.length]}}>{r.worker}</td>
-                <td style={{...tdS,textAlign:'left',maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={cleanName(r.task)}>{cleanName(r.task)}</td>
-                <td style={tdS}><span style={{background:'#eff6ff',color:'#1a56db',padding:'2px 8px',borderRadius:12,fontWeight:700}}>{r.hours}h</span></td>
-                <td style={tdS}>
+            {tableRows.map((r,i)=>{
+              // 배경은 줄 번호가 아니라 직원 순서로 번갈아 칠한다 —
+              // 줄 기준이면 한 사람의 여러 줄이 서로 다른 색이 되어 구분이 안 된다.
+              const bg=r.wi%2===0?'#fff':'#eff6ff'
+              const topBorder=r.first&&i>0?'2px solid #cbd5e1':undefined
+              return(
+              <tr key={i} style={{background:bg}}>
+                {r.first&&(
+                  <td rowSpan={r.span} style={{...tdS,fontWeight:700,color:COLORS[r.wi%COLORS.length],
+                    verticalAlign:'middle',borderTop:topBorder,whiteSpace:'nowrap'}}>
+                    {r.worker}
+                    <div style={{fontSize:10,fontWeight:600,color:'#9ca3af',marginTop:2}}>{r.workerTotal}h</div>
+                  </td>
+                )}
+                <td style={{...tdS,textAlign:'left',maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',borderTop:topBorder}} title={cleanName(r.task)}>{cleanName(r.task)}</td>
+                <td style={{...tdS,borderTop:topBorder}}><span style={{background:'#fff',color:'#1a56db',border:'1px solid #bfdbfe',padding:'2px 8px',borderRadius:12,fontWeight:700}}>{r.hours}h</span></td>
+                <td style={{...tdS,borderTop:topBorder}}>
                   <div style={{display:'flex',alignItems:'center',gap:5}}>
                     <div style={{flex:1,height:7,background:'#e5e7eb',borderRadius:4}}>
                       <div style={{width:r.ratio+'%',height:'100%',background:COLORS[r.wi%COLORS.length],borderRadius:4}}/>
@@ -205,7 +221,7 @@ function WorkerAnalysis({rows,workers}){
                   </div>
                 </td>
               </tr>
-            ))}
+            )})}
           </tbody>
         </table>
       </div>
@@ -213,42 +229,48 @@ function WorkerAnalysis({rows,workers}){
   )
 }
 
-// ── 프로젝트 집중도 분석 ──────────────────────────────
+// ── 프로젝트 기간 비중 분석 ──────────────────────────────
 function ProjectAnalysis({rows,allHistory}){
   if(!rows.length)return null
   const periodAgg=aggByWork(rows),totalAgg=aggByWork(allHistory)
   const data=Object.entries(periodAgg).sort((a,b)=>b[1]-a[1]).slice(0,10)
     .map(([name,ph])=>{
       const th=totalAgg[name]||ph,nm=cleanName(name)
-      return{name:nm.length>16?nm.slice(0,16)+'…':nm,fullName:nm,기간:ph,누적:th,집중도:Math.round(ph/th*100)}
+      return{name:nm.length>16?nm.slice(0,16)+'…':nm,fullName:nm,기간:ph,누적:th,기간비중:Math.round(ph/th*100)}
     })
   return(
     <div style={{display:'flex',flexDirection:'column',gap:16,marginBottom:16}}>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
-        <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>프로젝트 기간/누적 비교 · 단위: 시간(h), 집중도(%)</div>
+        <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>프로젝트 기간/누적 비교 · 단위: 시간(h), 기간 비중(%)</div>
         <ResponsiveContainer width="100%" height={280}>
           <ComposedChart data={data}>
             <XAxis dataKey="name" tick={{fontSize:10}} interval={0} angle={-20} textAnchor="end" height={55}/>
             <YAxis yAxisId="left" orientation="left" unit="h" tick={{fontSize:11}}/>
             <YAxis yAxisId="right" orientation="right" unit="%" domain={[0,100]} tick={{fontSize:11}}/>
-            <Tooltip formatter={(v,n)=>n==='집중도'?`${v??0}%`:`${v??0}h`}/><Legend wrapperStyle={{fontSize:11}}/>
-            <Bar yAxisId="left" dataKey="기간" fill="#3b82f6" barSize={18} radius={[4,4,0,0]}>
+            <Tooltip formatter={(v,n)=>n==='기간 비중'?`${v??0}%`:`${v??0}h`}/><Legend wrapperStyle={{fontSize:11}}/>
+            <Bar yAxisId="left" dataKey="기간" name="이 기간" fill="#3b82f6" barSize={18} radius={[4,4,0,0]}>
               <LabelList dataKey="기간" position="top" fontSize={9} fill="#374151" formatter={numLabel}/>
             </Bar>
-            <Bar yAxisId="left" dataKey="누적" fill="#e5e7eb" barSize={18} radius={[4,4,0,0]}/>
-            <Line yAxisId="right" type="monotone" dataKey="집중도" stroke="#f59e0b" strokeWidth={2} dot={{r:4}}>
-              <LabelList dataKey="집중도" position="top" fontSize={9} fill="#b45309" formatter={(v)=>v?`${v}%`:''}/>
+            <Bar yAxisId="left" dataKey="누적" name="전체 누적" fill="#e5e7eb" barSize={18} radius={[4,4,0,0]}/>
+            <Line yAxisId="right" type="monotone" dataKey="기간비중" name="기간 비중" stroke="#f59e0b" strokeWidth={2} dot={{r:4}}>
+              <LabelList dataKey="기간비중" position="top" fontSize={9} fill="#b45309" formatter={(v)=>v?`${v}%`:''}/>
             </Line>
           </ComposedChart>
         </ResponsiveContainer>
+        <div style={{fontSize:11,color:'#6b7280',marginTop:8,lineHeight:1.6,background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,padding:'8px 12px'}}>
+          💡 <b>읽는 법</b> — 파란 막대는 <b>이 기간에 쓴 시간</b>, 회색 막대는 그 업무의 <b>전체 누적 시간</b>입니다.
+          주황 선은 <b>기간 비중</b> = 전체 누적 중 이 기간이 차지하는 몫(이 기간 ÷ 전체 누적).
+          <b>100%에 가까우면</b> 이 기간에 시작해 이 기간에 거의 다 한 업무이고,
+          <b>낮으면</b> 여러 기간에 걸쳐 길게 진행 중인 업무입니다.
+        </div>
       </div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,minWidth:260,maxWidth:'100%',boxSizing:'border-box',overflowX:'auto'}}>
-        <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>프로젝트 집중도 상세</div>
+        <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>프로젝트 기간 비중 상세</div>
         <table style={{width:'100%',borderCollapse:'collapse'}}>
           <thead><tr>
             <th style={{...thS,textAlign:'left'}}>프로젝트</th>
             <th style={thS}>기간(h)</th><th style={thS}>누적(h)</th>
-            <th style={{...thS,minWidth:120}}>집중도</th>
+            <th style={{...thS,minWidth:120}}>기간 비중</th>
           </tr></thead>
           <tbody>
             {data.map((r,i)=>(
@@ -259,9 +281,9 @@ function ProjectAnalysis({rows,allHistory}){
                 <td style={tdS}>
                   <div style={{display:'flex',alignItems:'center',gap:5}}>
                     <div style={{flex:1,height:7,background:'#e5e7eb',borderRadius:4}}>
-                      <div style={{width:r.집중도+'%',height:'100%',background:'#f59e0b',borderRadius:4}}/>
+                      <div style={{width:r.기간비중+'%',height:'100%',background:'#f59e0b',borderRadius:4}}/>
                     </div>
-                    <span style={{fontSize:11,minWidth:34,fontWeight:700,color:'#b45309'}}>{r.집중도}%</span>
+                    <span style={{fontSize:11,minWidth:34,fontWeight:700,color:'#b45309'}}>{r.기간비중}%</span>
                   </div>
                 </td>
               </tr>
@@ -769,7 +791,7 @@ function TabDaily({history,workers,viewDate,setViewDate}){
       </div>
       <SectionTitle>직원별 업무 분석</SectionTitle>
       <WorkerAnalysis rows={rows} workers={periodWorkers}/>
-      <SectionTitle>프로젝트 집중도 분석</SectionTitle>
+      <SectionTitle>프로젝트 기간 비중 분석</SectionTitle>
       <ProjectAnalysis rows={rows} allHistory={history}/>
     </div>
   )
@@ -825,7 +847,7 @@ function TabWeekly({history,workers,viewDate,setViewDate,jiraTree}){
       <MixTrend data={mix.data} tasks={mix.topTasks}/>
       <SectionTitle>직원별 업무 분석</SectionTitle>
       <WorkerAnalysis rows={rows} workers={periodWorkers}/>
-      <SectionTitle>프로젝트 집중도 분석</SectionTitle>
+      <SectionTitle>프로젝트 기간 비중 분석</SectionTitle>
       <ProjectAnalysis rows={rows} allHistory={history}/>
     </div>
   )
@@ -889,7 +911,7 @@ function TabMonthly({history,workers,viewMonth,setViewMonth,jiraTree}){
       <MixTrend data={mix.data} tasks={mix.topTasks}/>
       <SectionTitle>직원별 업무 분석</SectionTitle>
       <WorkerAnalysis rows={rows} workers={periodWorkers}/>
-      <SectionTitle>프로젝트 집중도 분석</SectionTitle>
+      <SectionTitle>프로젝트 기간 비중 분석</SectionTitle>
       <ProjectAnalysis rows={rows} allHistory={history}/>
     </div>
   )
@@ -965,7 +987,7 @@ function TabYearly({history,workers,viewYear,setViewYear,jiraTree}){
       <MixTrend data={mix.data} tasks={mix.topTasks}/>
       <SectionTitle>직원별 업무 분석</SectionTitle>
       <WorkerAnalysis rows={rows} workers={periodWorkers}/>
-      <SectionTitle>프로젝트 집중도 분석</SectionTitle>
+      <SectionTitle>프로젝트 기간 비중 분석</SectionTitle>
       <ProjectAnalysis rows={rows} allHistory={history}/>
     </div>
   )
