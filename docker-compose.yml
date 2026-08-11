@@ -17,5 +17,10 @@ services:
       dockerfile: Dockerfile.backend
     image: vitron-backend:latest
     env_file: .env
+    # ⚠️ 시간대를 지정하지 않으면 컨테이너가 UTC 로 동작한다.
+    # 그러면 서버가 만드는 「오늘」이 한국 시간과 9시간 어긋나
+    # 직원 추가·퇴사 처리의 기본 날짜가 전날로 기록된다.
+    environment:
+      TZ: Asia/Seoul
     restart: unless-stopped
     # 포트는 외부 노출 불필요 — nginx가 내부에서 직접 접근

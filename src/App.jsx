@@ -60,7 +60,14 @@ function NonZeroTooltip({active,payload,label,unit='h',percent=false}){
   )
 }
 
-function today(){return new Date().toISOString().slice(0,10)}
+// ⚠️ 날짜를 YYYY-MM-DD 로 만들 때 toISOString() 을 쓰면 안 된다.
+// toISOString() 은 UTC 기준이라 한국(UTC+9)에서는 오전 9시 이전에 전날이 된다.
+// 실제로 오전에 업무를 저장하면 전날 날짜로 기록되는 버그가 있었다.
+// 로컬 연·월·일을 그대로 조립해야 시간대 영향을 받지 않는다.
+function ymd(d){
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
+}
+function today(){return ymd(new Date())}
 function toMonth(d){return d.slice(0,7)}
 function toYear(d){return parseInt(d.slice(0,4))}
 function weekNum(d){return Math.ceil(new Date(d).getDate()/7)}
@@ -112,8 +119,10 @@ function workersForPeriod(workers, periodStart, periodEnd) {
   })
 }
 function monthEnd(ym) {
+  // toISOString() 을 쓰면 UTC 변환 탓에 하루 빨라진다 (8월 → 08-30).
+  // 말일에 입사한 직원이 그 달 통계에서 빠지던 원인이었다.
   const [y,m]=ym.split('-').map(Number)
-  return new Date(y,m,0).toISOString().slice(0,10)
+  return ym+'-'+String(new Date(y,m,0).getDate()).padStart(2,'0')
 }
 function weekStart(d) {
   const wn=weekNum(d), sd=((wn-1)*7+1)
@@ -994,11 +1003,24 @@ function TabMonthly({history,workers,viewMonth,setViewMonth,jiraTree}){
   const t8=top8(rows)
   const tmData=buildTreemapData(rows,jiraTree)
   const mix=buildTaskMix(rows,r=>({k:String(weekNum(r.work_date)),label:weekNum(r.work_date)+'주'}))
+  // 연도 선택지 — 기록이 있는 해와 올해를 합쳐 최근순 (주간 탭과 동일)
+  const yearOptions=[...new Set([...history.map(r=>r.work_date.slice(0,4)),today().slice(0,4)])].sort((a,b)=>b-a)
+  const selS={padding:'6px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,fontWeight:700,cursor:'pointer',background:'#fff'}
   return(
     <div>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 18px',marginBottom:16,display:'flex',gap:10,alignItems:'center'}}>
-        <strong>월간 분석</strong>
-        <input type="month" value={viewMonth} onChange={e=>setViewMonth(e.target.value)} style={{padding:'6px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 18px',marginBottom:16,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+        <strong style={{marginRight:2}}>월간 분석</strong>
+        {/* 연 · 월을 콤보로 고른다 (주간 탭과 같은 방식) */}
+        <select value={viewMonth.slice(0,4)} onChange={e=>setViewMonth(e.target.value+'-'+viewMonth.slice(5))} style={selS}>
+          {yearOptions.map(y=><option key={y} value={y}>{y}년</option>)}
+        </select>
+        <select value={viewMonth.slice(5)} onChange={e=>setViewMonth(viewMonth.slice(0,4)+'-'+e.target.value)}
+          style={{...selS,border:'1px solid #ddd6fe',background:'#ede9fe',color:'#6d28d9'}}>
+          {Array.from({length:12},(_,i)=>String(i+1).padStart(2,'0')).map(m=>(
+            <option key={m} value={m}>{+m}월</option>
+          ))}
+        </select>
+        <span style={{fontSize:12,color:'#6b7280'}}>{mS} ~ {mE.slice(5)}</span>
       </div>
       <Metrics items={[
         {label:'총 업무 기록',value:total,unit:'h',color:'#1a56db'},

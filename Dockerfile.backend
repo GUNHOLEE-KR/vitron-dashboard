@@ -1,4 +1,11 @@
 FROM node:20-alpine
+# alpine 에는 시간대 데이터가 없어 TZ 를 지정해도 UTC 로 동작한다.
+# tzdata 를 넣고 기본 시간대를 서울로 박아 둔다 —
+# 없으면 서버가 만드는 「오늘」이 한국 시간과 9시간 어긋난다.
+RUN apk add --no-cache tzdata && \
+    cp /usr/share/zoneinfo/Asia/Seoul /etc/localtime && \
+    echo "Asia/Seoul" > /etc/timezone
+ENV TZ=Asia/Seoul
 WORKDIR /app
 COPY server/package*.json ./
 RUN npm ci --omit=dev

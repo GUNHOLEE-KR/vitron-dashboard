@@ -8,6 +8,14 @@ const cors = require('cors')
 const { types } = require('pg')
 types.setTypeParser(1082, val => val)
 
+// ⚠️ 오늘 날짜를 만들 때 toISOString() 을 쓰면 안 된다.
+// toISOString() 은 UTC 기준이라 한국(UTC+9)에서는 오전 9시 이전에 전날이 된다.
+// 컨테이너 시간대가 UTC 면 하루 종일 어긋날 수도 있다.
+function todayLocal() {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 const app = express()
 app.use(cors())
 app.use(express.json())
@@ -38,7 +46,7 @@ app.post('/api/workers', async (req, res) => {
   try {
     const { rows } = await pool.query(
       'INSERT INTO workers (name, active, hired_at, email) VALUES ($1, true, $2, $3) RETURNING *',
-      [name, hired_at || new Date().toISOString().slice(0, 10), email || null]
+      [name, hired_at || todayLocal(), email || null]
     )
     res.json(rows[0])
   } catch (e) {
@@ -72,7 +80,7 @@ app.patch('/api/workers/:id/status', async (req, res) => {
   try {
     const { rowCount } = await pool.query(
       'UPDATE workers SET active = $1, resigned_at = $2 WHERE id = $3',
-      [active, active ? null : (resigned_at || new Date().toISOString().slice(0, 10)), id]
+      [active, active ? null : (resigned_at || todayLocal()), id]
     )
     if (rowCount === 0) return res.status(404).json({ error: '해당 직원을 찾을 수 없습니다.' })
     res.json({ ok: true })
@@ -404,10 +412,11 @@ app.get('/api/jira/token-status', (req, res) => {
     return res.json({ configured: false })
   }
 
-  // 날짜만 비교한다 (시간대 차이로 하루가 밀리지 않도록 UTC 자정 기준)
-  const todayUtc = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00Z')
-  const expiryUtc = new Date(expiresAt + 'T00:00:00Z')
-  const daysLeft = Math.round((expiryUtc - todayUtc) / 86400000)
+  // 날짜만 비교한다. 양쪽을 같은 기준(UTC 자정)으로 맞춰 시각 차이를 없애고,
+  // 오늘 날짜는 로컬 기준으로 잡는다 (UTC 로 잡으면 오전에 하루 밀린다)
+  const todayAtMidnight = new Date(todayLocal() + 'T00:00:00Z')
+  const expiryAtMidnight = new Date(expiresAt + 'T00:00:00Z')
+  const daysLeft = Math.round((expiryAtMidnight - todayAtMidnight) / 86400000)
 
   const level = daysLeft < 0 ? 'expired'
     : daysLeft <= TOKEN_WARN_DAYS ? 'warn'
