@@ -28,3 +28,6 @@ vitron-src.tar.gz
 *.njsproj
 *.sln
 *.sw?
+
+# 매뉴얼 캡처는 용량이 커서 저장소에 넣지 않는다 (생성기와 목록만 관리)
+docs/manual/captures/*.png
