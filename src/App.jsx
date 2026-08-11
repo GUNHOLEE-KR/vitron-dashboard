@@ -247,9 +247,24 @@ function ProjectAnalysis({rows,allHistory}){
     .map(([name,ph])=>{
       const th=totalAgg[name]||ph,nm=cleanName(name)
       const members=[...(membersByTask[name]||[])].sort()
+      // 참여자별 내역. 기간=이 기간에 그 사람이 쓴 시간,
+      // 누적=그 사람이 이 업무에 쓴 전체 시간, 몫=이 프로젝트에서 차지한 비율
+      const 멤버내역=members.map(m=>{
+        const mp=rows.filter(r=>r.work_text===name&&r.worker_name===m).length
+        const mt=allHistory.filter(r=>r.work_text===name&&r.worker_name===m).length||mp
+        return{이름:m,기간:mp,누적:mt,몫:Math.round(mp/ph*100),기간비중:Math.round(mp/mt*100)}
+      }).sort((a,b)=>b.기간-a.기간)
       return{name:nm.length>16?nm.slice(0,16)+'…':nm,fullName:nm,기간:ph,누적:th,
-        기간비중:Math.round(ph/th*100),인원:members.length,참여자:members}
+        기간비중:Math.round(ph/th*100),인원:members.length,참여자:members,멤버내역}
     })
+  // 표에 뿌릴 줄 목록. 참여자가 2명 이상이면 프로젝트 합계 1줄 + 개인별 줄을 잇는다.
+  // 1명이면 개인 줄이 합계와 같아지므로 합계 1줄만 둔다.
+  const tableRows=[]
+  data.forEach((d,pi)=>{
+    const 개인줄=d.멤버내역.length>1?d.멤버내역:[]
+    tableRows.push({kind:'total',d,pi,span:1+개인줄.length})
+    개인줄.forEach(m=>tableRows.push({kind:'member',d,pi,m}))
+  })
   return(
     <div style={{display:'flex',flexDirection:'column',gap:16,marginBottom:16}}>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
@@ -296,36 +311,54 @@ function ProjectAnalysis({rows,allHistory}){
             <th style={thS}>기간 비중</th>
           </tr></thead>
           <tbody>
-            {data.map((r,i)=>(
-              <tr key={i} style={{background:i%2===0?'#fff':'#f5f8fc'}}>
-                {/* 이름은 줄바꿈을 허용해 전체를 보여준다 (차트 축 라벨과 달리 축약하지 않는다) */}
-                <td style={{...tdS,textAlign:'left',whiteSpace:'normal',wordBreak:'break-word',lineHeight:1.45}}>{r.fullName}</td>
-                <td style={tdS}>
-                  {/* 여러 명이 함께한 업무도 있다. 인원 수를 배지로 보여주고 이름을 잇는다.
-                      4명 이상이면 「외 N명」으로 접어 행 높이가 들쭉날쭉해지지 않게 한다. */}
-                  <div style={{display:'flex',alignItems:'center',gap:7,justifyContent:'center'}} title={r.참여자.join(', ')}>
-                    <span style={{background:'#f0fdf4',color:'#0d7a4e',border:'1px solid #bbf7d0',
-                      padding:'2px 8px',borderRadius:12,fontWeight:700,fontSize:11,whiteSpace:'nowrap',flexShrink:0}}>{r.인원}명</span>
-                    <span style={{fontSize:11,color:'#6b7280',overflow:'hidden',textOverflow:'ellipsis',
-                      whiteSpace:'nowrap',textAlign:'left'}}>
-                      {r.참여자.length<=3
-                        ? r.참여자.join(', ')
-                        : `${r.참여자.slice(0,2).join(', ')} 외 ${r.참여자.length-2}명`}
-                    </span>
-                  </div>
-                </td>
-                <td style={{...tdS,whiteSpace:'nowrap'}}><span style={{color:'#1a56db',fontWeight:700,fontSize:12}}>{r.기간}h</span></td>
-                <td style={{...tdS,whiteSpace:'nowrap'}}><span style={{color:'#9ca3af',fontSize:12}}>{r.누적}h</span></td>
-                <td style={tdS}>
-                  <div style={{display:'flex',alignItems:'center',gap:5}}>
-                    <div style={{flex:1,height:7,background:'#e5e7eb',borderRadius:4,minWidth:40}}>
-                      <div style={{width:r.기간비중+'%',height:'100%',background:'#f59e0b',borderRadius:4}}/>
+            {tableRows.map((row,i)=>{
+              const {kind,d,pi,m}=row
+              // 배경은 프로젝트 단위로 번갈아 칠한다 — 한 프로젝트의 여러 줄이 한 덩어리로 보이게
+              const bg=pi%2===0?'#fff':'#f5f8fc'
+              const topBorder=kind==='total'&&i>0?'2px solid #cbd5e1':undefined
+              const 시간=kind==='total'?d.기간:m.기간
+              const 누적=kind==='total'?d.누적:m.누적
+              const 비중=kind==='total'?d.기간비중:m.기간비중
+              return(
+              <tr key={i} style={{background:bg}}>
+                {/* 프로젝트명은 rowSpan 으로 묶어 세로 가운데 정렬 (참여자 여러 명이면 그 줄 수만큼) */}
+                {kind==='total'&&(
+                  <td rowSpan={row.span} style={{...tdS,textAlign:'left',whiteSpace:'normal',
+                    wordBreak:'break-word',lineHeight:1.45,verticalAlign:'middle',borderTop:topBorder}}>{d.fullName}</td>
+                )}
+                <td style={{...tdS,borderTop:topBorder}}>
+                  {kind==='total'?(
+                    <div style={{display:'flex',alignItems:'center',gap:7,justifyContent:'center'}} title={d.참여자.join(', ')}>
+                      <span style={{background:'#f0fdf4',color:'#0d7a4e',border:'1px solid #bbf7d0',
+                        padding:'2px 8px',borderRadius:12,fontWeight:700,fontSize:11,whiteSpace:'nowrap',flexShrink:0}}>{d.인원}명</span>
+                      <span style={{fontSize:11,color:'#6b7280',fontWeight:700,whiteSpace:'nowrap'}}>전체</span>
                     </div>
-                    <span style={{fontSize:11,minWidth:30,fontWeight:700,color:'#b45309',whiteSpace:'nowrap'}}>{r.기간비중}%</span>
+                  ):(
+                    // 개인 줄 — 이름과 함께 이 프로젝트에서 그 사람이 차지한 몫(%)
+                    <div style={{display:'flex',alignItems:'center',gap:6,justifyContent:'center'}}>
+                      <span style={{fontSize:11,color:'#9ca3af',flexShrink:0}}>↳</span>
+                      <span style={{fontSize:12,color:'#374151',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{m.이름}</span>
+                      <span title="이 프로젝트에서 이 사람이 차지한 몫" style={{background:'#eff6ff',color:'#1a56db',
+                        padding:'1px 6px',borderRadius:10,fontSize:10,fontWeight:700,whiteSpace:'nowrap',flexShrink:0}}>{m.몫}%</span>
+                    </div>
+                  )}
+                </td>
+                <td style={{...tdS,whiteSpace:'nowrap',borderTop:topBorder}}>
+                  <span style={{color:'#1a56db',fontWeight:kind==='total'?700:500,fontSize:12}}>{시간}h</span>
+                </td>
+                <td style={{...tdS,whiteSpace:'nowrap',borderTop:topBorder}}>
+                  <span style={{color:'#9ca3af',fontSize:12}}>{누적}h</span>
+                </td>
+                <td style={{...tdS,borderTop:topBorder}}>
+                  <div style={{display:'flex',alignItems:'center',gap:5}}>
+                    <div style={{flex:1,height:kind==='total'?7:5,background:'#e5e7eb',borderRadius:4,minWidth:40}}>
+                      <div style={{width:비중+'%',height:'100%',background:kind==='total'?'#f59e0b':'#fcd34d',borderRadius:4}}/>
+                    </div>
+                    <span style={{fontSize:11,minWidth:30,fontWeight:kind==='total'?700:500,color:'#b45309',whiteSpace:'nowrap'}}>{비중}%</span>
                   </div>
                 </td>
               </tr>
-            ))}
+            )})}
           </tbody>
         </table>
       </div>
