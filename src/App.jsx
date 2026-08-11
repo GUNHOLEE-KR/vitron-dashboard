@@ -22,6 +22,35 @@ const hourTip=(v)=>`${v??0}h`                       // 툴팁 값에 h 부착
 // 업무명 표시 정리: "[VITRON-167] …" 또는 "VITRON-166 …" 같은 지라번호 prefix 제거 → 순수 이름만 (저장값엔 영향 없음)
 const cleanName=(s)=>String(s||'').replace(/^\s*\[[^\]]*\]\s*/,'').replace(/^\s*[A-Z][A-Z0-9]*-\d+\s*/,'')
 
+// ── 여러 계열이 겹친 차트용 툴팁 ────────────────────────
+// 누적/다계열 차트는 모든 계열을 같은 데이터 객체에 담기 때문에,
+// 해당 항목을 하지 않은 계열도 0 으로 채워져 툴팁에 전부 나온다.
+// (직원 7명 중 1명만 일한 날도 7줄이 떠서 읽기 어려웠다)
+// 값이 있는 계열만 남기고 큰 순서로 정렬한다.
+// percent=true 면 시간과 함께 그 기간 내 비중도 보여준다 (100% 누적 차트용)
+function NonZeroTooltip({active,payload,label,unit='h',percent=false}){
+  if(!active||!payload)return null
+  const rows=payload
+    .filter(p=>Number(p.value)>0)
+    .sort((a,b)=>Number(b.value)-Number(a.value))
+  if(!rows.length)return null      // 전부 0 이면 툴팁을 띄우지 않는다
+  const sum=percent?rows.reduce((s,p)=>s+Number(p.value),0):0
+  return(
+    <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:7,
+      padding:'8px 11px',fontSize:12,boxShadow:'0 2px 8px rgba(0,0,0,.08)',maxWidth:280}}>
+      {label!==undefined&&<div style={{fontWeight:700,marginBottom:5,color:'#374151'}}>{label}</div>}
+      {rows.map(p=>(
+        <div key={p.dataKey ?? p.name} style={{display:'flex',justifyContent:'space-between',gap:12,lineHeight:1.7}}>
+          <span style={{color:p.color||p.stroke||'#6b7280',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.name}</span>
+          <span style={{fontWeight:700,color:'#374151',whiteSpace:'nowrap'}}>
+            {p.value}{unit}{percent&&sum>0&&` (${Math.round(p.value/sum*100)}%)`}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function today(){return new Date().toISOString().slice(0,10)}
 function toMonth(d){return d.slice(0,7)}
 function toYear(d){return parseInt(d.slice(0,4))}
@@ -145,7 +174,7 @@ function WorkerAnalysis({rows,workers}){
           <BarChart data={barData} layout="vertical">
             <XAxis type="number" unit="h" tick={{fontSize:11}}/>
             <YAxis type="category" dataKey="name" tick={{fontSize:12}} width={55}/>
-            <Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:10}}/>
+            <Tooltip content={<NonZeroTooltip/>}/><Legend wrapperStyle={{fontSize:10}}/>
             {topTasks.map((t,i)=>(
               <Bar key={t} dataKey={t} name={taskName(t)} stackId="a" fill={COLORS[i%COLORS.length]} radius={i===topTasks.length-1?[0,4,4,0]:[0,0,0,0]}>
                 <LabelList dataKey={t} position="center" fontSize={9} fill="#fff" formatter={numLabel}/>
@@ -365,7 +394,7 @@ function MixTrend({data,tasks}){
         <AreaChart data={data} stackOffset="expand" margin={{top:10,right:12,left:0,bottom:0}}>
           <XAxis dataKey="name" tick={{fontSize:11}}/>
           <YAxis tickFormatter={v=>Math.round(v*100)+'%'} tick={{fontSize:11}}/>
-          <Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:10}}/>
+          <Tooltip content={<NonZeroTooltip percent/>}/><Legend wrapperStyle={{fontSize:10}}/>
           {tasks.map((t,i)=>{const nm=cleanName(t);return <Area key={t} type="monotone" dataKey={t} name={nm.length>14?nm.slice(0,14)+'…':nm} stackId="m" stroke={COLORS[i%COLORS.length]} fill={COLORS[i%COLORS.length]} fillOpacity={0.6}/>})}
         </AreaChart>
       </ResponsiveContainer>
@@ -396,7 +425,7 @@ function RadarAnalysis({rows,workers}){
           <PolarGrid/>
           <PolarAngleAxis dataKey="task" tick={{fontSize:10}}/>
           <PolarRadiusAxis tick={{fontSize:9}}/>
-          <Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:11}}/>
+          <Tooltip content={<NonZeroTooltip/>}/><Legend wrapperStyle={{fontSize:11}}/>
           {wNames.map((w,i)=><Radar key={w} name={w} dataKey={w} stroke={COLORS[i%COLORS.length]} fill={COLORS[i%COLORS.length]} fillOpacity={0.15}/>)}
         </RadarChart>
       </ResponsiveContainer>
@@ -775,7 +804,7 @@ function TabWeekly({history,workers,viewDate,setViewDate,jiraTree}){
       ]}/>
       <Card title="일별 분포 (누적 영역) · 단위: 시간(h)">
         <ResponsiveContainer width="100%" height={260}>
-          <AreaChart data={barData} margin={{top:16,right:12,left:0,bottom:0}}><XAxis dataKey="name" tick={{fontSize:11}}/><YAxis unit="h"/><Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:11}}/>
+          <AreaChart data={barData} margin={{top:16,right:12,left:0,bottom:0}}><XAxis dataKey="name" tick={{fontSize:11}}/><YAxis unit="h"/><Tooltip content={<NonZeroTooltip/>}/><Legend wrapperStyle={{fontSize:11}}/>
             {wNames.map((n,i)=>(
               <Area key={n} type="monotone" dataKey={n} stackId="a" stroke={COLORS[i%COLORS.length]} fill={COLORS[i%COLORS.length]} fillOpacity={0.5}>
                 <LabelList dataKey={n} position="top" fontSize={9} fill="#374151" formatter={numLabel}/>
@@ -831,7 +860,7 @@ function TabMonthly({history,workers,viewMonth,setViewMonth,jiraTree}){
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <Card title="주차별 분포 (누적 영역) · 단위: 시간(h)" style={{flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
           <ResponsiveContainer width="100%" height={250}>
-            <AreaChart data={wData} margin={{top:16,right:12,left:0,bottom:0}}><XAxis dataKey="name" tick={{fontSize:12}}/><YAxis unit="h"/><Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:11}}/>
+            <AreaChart data={wData} margin={{top:16,right:12,left:0,bottom:0}}><XAxis dataKey="name" tick={{fontSize:12}}/><YAxis unit="h"/><Tooltip content={<NonZeroTooltip/>}/><Legend wrapperStyle={{fontSize:11}}/>
               {wNames.map((n,i)=>(
                 <Area key={n} type="monotone" dataKey={n} stackId="a" stroke={COLORS[i%COLORS.length]} fill={COLORS[i%COLORS.length]} fillOpacity={0.5}>
                   <LabelList dataKey={n} position="top" fontSize={9} fill="#374151" formatter={numLabel}/>
@@ -895,7 +924,7 @@ function TabYearly({history,workers,viewYear,setViewYear,jiraTree}){
       ]}/>
       <Card title="월별 업무량 추이 · 단위: 시간(h)">
         <ResponsiveContainer width="100%" height={260}>
-          <LineChart data={mData} margin={{top:14,right:30,left:0,bottom:0}}><XAxis dataKey="name" tick={{fontSize:11}}/><YAxis unit="h"/><Tooltip formatter={hourTip}/><Legend wrapperStyle={{fontSize:11}}/>
+          <LineChart data={mData} margin={{top:14,right:30,left:0,bottom:0}}><XAxis dataKey="name" tick={{fontSize:11}}/><YAxis unit="h"/><Tooltip content={<NonZeroTooltip/>}/><Legend wrapperStyle={{fontSize:11}}/>
             {wNames.map((n,i)=>(
               <Line key={n} type="monotone" dataKey={n} stroke={COLORS[i%COLORS.length]} strokeWidth={2} dot={{r:3}}>
                 <LabelList dataKey={n} position="top" fontSize={9} fill="#374151" formatter={numLabel}/>
