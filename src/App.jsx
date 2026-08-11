@@ -13,7 +13,10 @@ const isBusinessHour=h=>h>=BUSINESS_START_HOUR&&h<=BUSINESS_END_HOUR
 const COLORS=['#3b82f6','#10b981','#f59e0b','#8b5cf6','#06b6d4','#ec4899','#84cc16','#f97316']
 const TABS=['today','daily','weekly','monthly','yearly','settings']
 const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'월간',yearly:'연간',settings:'설정'}
-const thS={background:'#f9fafb',padding:'8px 10px',textAlign:'center',fontWeight:700,border:'1px solid #e5e7eb',fontSize:11,color:'#6b7280',whiteSpace:'nowrap'}
+// 표 머리글은 데이터 행과 확실히 구분되는 진한 남색으로.
+// 연한 회색(#f9fafb)이던 때는 첫 데이터 행과 같은 색이라 머리글이 붙어 보였다.
+// 오늘 업무 입력표 머리글과 같은 색이라 화면 전체가 일관된다.
+const thS={background:'#1e3a5f',padding:'8px 10px',textAlign:'center',fontWeight:700,border:'1px solid #e5e7eb',fontSize:11,color:'#fff',whiteSpace:'nowrap'}
 const tdS={padding:'6px 10px',border:'1px solid #e5e7eb',textAlign:'center',verticalAlign:'middle',fontSize:12}
 
 // 차트 공통 헬퍼 — 단위는 모두 "시간(h)"
@@ -294,7 +297,7 @@ function ProjectAnalysis({rows,allHistory}){
           </tr></thead>
           <tbody>
             {data.map((r,i)=>(
-              <tr key={i} style={{background:i%2===0?'#f9fafb':'#fff'}}>
+              <tr key={i} style={{background:i%2===0?'#fff':'#f5f8fc'}}>
                 {/* 이름은 줄바꿈을 허용해 전체를 보여준다 (차트 축 라벨과 달리 축약하지 않는다) */}
                 <td style={{...tdS,textAlign:'left',whiteSpace:'normal',wordBreak:'break-word',lineHeight:1.45}}>{r.fullName}</td>
                 <td style={tdS}>
