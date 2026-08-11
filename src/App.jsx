@@ -38,13 +38,19 @@ function NonZeroTooltip({active,payload,label,unit='h',percent=false}){
     .sort((a,b)=>Number(b.value)-Number(a.value))
   if(!rows.length)return null      // 전부 0 이면 툴팁을 띄우지 않는다
   const sum=percent?rows.reduce((s,p)=>s+Number(p.value),0):0
+  // 업무명이 길어 잘리면 어떤 업무인지 알 수 없다. 폭을 넓게 두고
+  // 긴 이름은 줄바꿈해서 제목이 전부 보이게 한다.
   return(
     <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:7,
-      padding:'8px 11px',fontSize:12,boxShadow:'0 2px 8px rgba(0,0,0,.08)',maxWidth:280}}>
+      padding:'9px 12px',fontSize:12,boxShadow:'0 2px 10px rgba(0,0,0,.1)',maxWidth:460}}>
       {label!==undefined&&<div style={{fontWeight:700,marginBottom:5,color:'#374151'}}>{label}</div>}
       {rows.map(p=>(
-        <div key={p.dataKey ?? p.name} style={{display:'flex',justifyContent:'space-between',gap:12,lineHeight:1.7}}>
-          <span style={{color:p.color||p.stroke||'#6b7280',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.name}</span>
+        <div key={p.dataKey ?? p.name} style={{display:'flex',justifyContent:'space-between',gap:14,lineHeight:1.6,alignItems:'flex-start'}}>
+          {/* 범례용 name 은 좁은 공간 탓에 14~16자로 잘려 있다.
+              툴팁에서는 원본 dataKey 를 정리해 전체 제목을 보여준다. */}
+          <span style={{color:p.color||p.stroke||'#6b7280',whiteSpace:'normal',wordBreak:'break-word'}}>
+            {p.dataKey!=null?cleanName(String(p.dataKey)):p.name}
+          </span>
           <span style={{fontWeight:700,color:'#374151',whiteSpace:'nowrap'}}>
             {p.value}{unit}{percent&&sum>0&&` (${Math.round(p.value/sum*100)}%)`}
           </span>
@@ -118,6 +124,16 @@ function weekEnd(d) {
   const [y,m]=d.slice(0,7).split('-').map(Number)
   const last=new Date(y,m,0).getDate()
   return d.slice(0,7)+'-'+String(Math.min(ed,last)).padStart(2,'0')
+}
+// 그 달에 주차가 몇 개인지 (1~7일=1주차, 8~14일=2주차 … 방식)
+// 31일인 달은 5주차(29~31일)까지, 28일인 달은 4주차까지 나온다.
+function weeksInMonth(ym){
+  const [y,m]=ym.split('-').map(Number)
+  return Math.ceil(new Date(y,m,0).getDate()/7)
+}
+// 그 달 N주차의 첫날 (주차를 골랐을 때 이동할 날짜)
+function weekFirstDate(ym,wk){
+  return ym+'-'+String((wk-1)*7+1).padStart(2,'0')
 }
 
 function aggByWorker(rows){
@@ -449,7 +465,10 @@ function ParetoAnalysis({rows}){
   const agg=Object.entries(aggByWork(rows)).sort((a,b)=>b[1]-a[1])
   const total=agg.reduce((s,[,v])=>s+v,0)||1
   let cum=0
-  const data=agg.slice(0,12).map(([name,v])=>{cum+=v;const nm=cleanName(name);return{name:nm.length>14?nm.slice(0,14)+'…':nm,시간:v,누적:Math.round(cum/total*100)}})
+  // X축은 좁아 이름을 줄이지만, full 에 전체 제목을 남겨 툴팁에서 쓴다
+  const data=agg.slice(0,12).map(([name,v])=>{cum+=v;const nm=cleanName(name)
+    return{name:nm.length>14?nm.slice(0,14)+'…':nm,full:nm,시간:v,누적:Math.round(cum/total*100)}})
+  const 목표도달=data.findIndex(d=>d.누적>=80)+1   // 80% 에 닿기까지 필요한 업무 개수
   return(
     <Card title="업무 편중 (파레토) · 막대=시간(h), 선=누적 비중(%)">
       <ResponsiveContainer width="100%" height={300}>
@@ -457,7 +476,10 @@ function ParetoAnalysis({rows}){
           <XAxis dataKey="name" tick={{fontSize:10}} interval={0} angle={-30} textAnchor="end" height={80}/>
           <YAxis yAxisId="left" unit="h" tick={{fontSize:11}}/>
           <YAxis yAxisId="right" orientation="right" unit="%" domain={[0,100]} tick={{fontSize:11}}/>
-          <Tooltip formatter={(v,n)=>n==='누적'?`${v}%`:`${v}h`}/><Legend wrapperStyle={{fontSize:11}}/>
+          {/* 제목은 축약된 X축 라벨 대신 전체 업무명을 보여준다 */}
+          <Tooltip formatter={(v,n)=>n==='누적'?`${v}%`:`${v}h`}
+            labelFormatter={(l,p)=>p&&p[0]&&p[0].payload?p[0].payload.full:l}
+            contentStyle={{maxWidth:460,whiteSpace:'normal'}}/><Legend wrapperStyle={{fontSize:11}}/>
           <ReferenceLine yAxisId="right" y={80} stroke="#ef4444" strokeDasharray="4 3" label={{value:'80%',fontSize:10,fill:'#ef4444',position:'insideTopRight'}}/>
           <Bar yAxisId="left" dataKey="시간" fill="#3b82f6" radius={[4,4,0,0]}>
             <LabelList dataKey="시간" position="top" fontSize={9} fill="#374151" formatter={numLabel}/>
@@ -467,6 +489,13 @@ function ParetoAnalysis({rows}){
           </Line>
         </ComposedChart>
       </ResponsiveContainer>
+      <div style={{fontSize:11,color:'#6b7280',marginTop:8,lineHeight:1.6,background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,padding:'8px 12px'}}>
+        💡 <b>읽는 법</b> — 업무를 <b>시간이 많은 순서로</b> 왼쪽부터 세우고(막대),
+        왼쪽부터 더해 간 비중을 선으로 잇습니다. <b>빨간 80% 선과 만나는 지점</b>이 핵심입니다.
+        {목표도달>0&&<> 지금은 <b>상위 {목표도달}개 업무가 전체 시간의 80%</b>를 차지합니다.</>}
+        <b> 적은 개수에서 80%에 닿으면</b> 소수 프로젝트에 집중된 상태이고,
+        <b>많은 개수가 필요하면</b> 여러 일에 나뉘어 있다는 뜻입니다.
+      </div>
     </Card>
   )
 }
@@ -512,7 +541,7 @@ function RadarAnalysis({rows,workers}){
     return o
   })
   return(
-    <Card title="직원 역량 비교 (레이더) · 상위 6개 업무유형별 시간(h)">
+    <Card title="직원별 업무 분포 (레이더) · 상위 6개 업무유형별 시간(h)">
       <ResponsiveContainer width="100%" height={380}>
         <RadarChart data={data} outerRadius="72%">
           <PolarGrid/>
@@ -522,6 +551,12 @@ function RadarAnalysis({rows,workers}){
           {wNames.map((w,i)=><Radar key={w} name={w} dataKey={w} stroke={COLORS[i%COLORS.length]} fill={COLORS[i%COLORS.length]} fillOpacity={0.15}/>)}
         </RadarChart>
       </ResponsiveContainer>
+      <div style={{fontSize:11,color:'#6b7280',marginTop:8,lineHeight:1.6,background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,padding:'8px 12px'}}>
+        💡 <b>읽는 법</b> — 꼭지점 6개는 <b>이 기간에 시간이 가장 많이 들어간 업무유형</b>이고,
+        중심에서 멀수록 그 업무에 <b>많은 시간</b>을 썼다는 뜻입니다. 사람마다 색이 다른 도형으로 겹쳐 그립니다.
+        <b>한쪽으로 뾰족하면</b> 특정 업무에 집중한 사람, <b>고르게 퍼지면</b> 여러 업무를 두루 맡은 사람입니다.
+        (능력 평가가 아니라 <b>시간을 어디에 썼는지</b>를 보는 그림입니다. 맡은 일이 다르므로 모양이 다른 것이 정상입니다.)
+      </div>
     </Card>
   )
 }
@@ -887,7 +922,16 @@ function TabWeekly({history,workers,viewDate,setViewDate,jiraTree}){
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 18px',marginBottom:16,display:'flex',gap:10,alignItems:'center'}}>
         <strong>주간 리포트</strong>
         <input type="date" value={viewDate} onChange={e=>setViewDate(e.target.value)} style={{padding:'6px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
-        <span style={{fontSize:12,background:'#ede9fe',color:'#6d28d9',padding:'2px 10px',borderRadius:12,fontWeight:700}}>{ym.slice(5)}월 {wk}주차</span>
+        {/* 주차를 직접 고를 수 있게. 날짜를 짚어야 주가 바뀌던 것보다 편하다.
+            선택지 개수는 그 달 일수로 계산한다 (31일=5주차, 28일=4주차) */}
+        <select value={wk} onChange={e=>setViewDate(weekFirstDate(ym,+e.target.value))}
+          style={{padding:'6px 10px',border:'1px solid #ddd6fe',borderRadius:7,fontSize:13,
+            background:'#ede9fe',color:'#6d28d9',fontWeight:700,cursor:'pointer'}}>
+          {Array.from({length:weeksInMonth(ym)},(_,i)=>i+1).map(n=>(
+            <option key={n} value={n}>{ym.slice(5)}월 {n}주차</option>
+          ))}
+        </select>
+        <span style={{fontSize:12,color:'#6b7280'}}>{wS.slice(5)} ~ {wE.slice(5)}</span>
       </div>
       <Metrics items={[
         {label:'총 업무 기록',value:total,unit:'h',color:'#1a56db'},
