@@ -29,6 +29,7 @@ CAP = os.path.join(ROOT, "docs", "manual", "captures")
 OUT = os.path.join(ROOT, "docs", "manual", "업무현황_대시보드_사용자매뉴얼.docx")
 
 _missing = []
+_placed = []   # 실제로 문서에 들어간 캡처 (개수를 손으로 적어 두면 어긋난다)
 
 
 def fig(d, filename, caption, width_cm=None):
@@ -50,6 +51,7 @@ def fig(d, filename, caption, width_cm=None):
                 d.figure(path, caption)
             else:
                 d.figure(path, caption, width_cm=width_cm)
+            _placed.append(os.path.basename(path))
             return
     _missing.append(filename)
     d.note("화면 캡처 예정", f"{caption}  ({filename})", warn=True)
@@ -193,6 +195,9 @@ def build():
     d.p("세 번째 칸은 **노란 점선 테두리**로 되어 있고 「③ 직접 입력」이라고 흐리게 적혀 "
         "있습니다. 콤보 상자가 아니라 **글자를 적는 칸**이며, 여기 적은 내용이 그대로 "
         "업무명이 됩니다.")
+    fig(d, "07b_업무선택_직접입력.png",
+        "그림 2-4  세 칸이 위아래로 놓입니다. ②는 상위업무를 고르기 전이라 회색으로 "
+        "잠겨 있고, ③만 점선입니다")
     d.p("쓰는 상황은 이렇습니다.")
     d.bullet("아직 Jira에 등록되지 않은 새 업무를 급히 기록해야 할 때")
     d.bullet("교육·회의·출장처럼 프로젝트에 속하지 않는 일")
@@ -227,12 +232,12 @@ def build():
         "체크된 행 **어느 칸에서든** 업무를 고르면 체크한 모든 시간에 함께 들어갑니다.",
         "머리글의 체크박스를 누르면 24시간 전체를 한 번에 선택·해제할 수 있습니다.",
     ])
-    fig(d, "08_다중시간선택.png", "그림 2-4  선택된 시간은 하늘색으로 표시되고 안내 줄이 나옵니다")
+    fig(d, "08_다중시간선택.png", "그림 2-5  선택된 시간은 하늘색으로 표시되고 안내 줄이 나옵니다")
 
     d.h2("2.4 저장하기")
     d.p("입력을 마치면 오른쪽 위 **「○○○ 저장」** 버튼을 누릅니다. 저장하지 않고 화면을 "
            "떠나면 입력한 내용이 사라집니다.")
-    fig(d, "09_저장완료.png", "그림 2-5  저장이 끝나면 화면 아래에 알림이 나옵니다")
+    fig(d, "09_저장완료.png", "그림 2-6  저장이 끝나면 화면 아래에 알림이 나옵니다")
     d.note("저장은 «덮어쓰기» 입니다",
            "저장하면 그 사람·그 날짜의 기존 기록을 지우고 화면에 있는 내용으로 "
                 "새로 넣습니다. 그래서 «칸을 모두 비우고 저장하면 그 날 기록이 삭제»됩니다. "
@@ -246,13 +251,13 @@ def build():
         "내용을 고치고 **저장**합니다. 고른 날짜로 저장됩니다.",
         "오늘로 되돌아오려면 **「오늘」** 버튼을 누릅니다 (날짜 이동과 조회를 한 번에 합니다).",
     ])
-    fig(d, "10_날짜조회.png", "그림 2-6  날짜 칸과 「오늘」·「조회」 버튼")
+    fig(d, "10_날짜조회.png", "그림 2-7  날짜 칸과 「오늘」·「조회」 버튼")
 
     d.h2("2.6 근무시간 강조의 의미")
     d.p("시간표에서 **09:00부터 17:00까지 아홉 칸이 노란색**입니다. 정규 근무시간을 "
            "표시해 어디에 입력하면 되는지 알려주는 것입니다. 18시에 퇴근하므로 17시 칸까지 "
            "포함됩니다.")
-    fig(d, "05_입력표_전체.png", "그림 2-7  노란 구간이 정규 근무시간입니다")
+    fig(d, "05_입력표_전체.png", "그림 2-8  노란 구간이 정규 근무시간입니다")
     d.p("노란 칸에만 입력해야 하는 것은 아닙니다. 야근이나 새벽 작업은 해당 시간 칸에 "
            "그대로 넣으시면 됩니다. 색은 안내일 뿐 입력을 막지 않습니다.")
 
@@ -777,9 +782,14 @@ def build():
 if __name__ == "__main__":
     out = build()
     print(f"생성 완료: {out}")
+    print(f"\n캡처 {len(_placed)}장 반영")
     if _missing:
-        print(f"\n캡처 미포함 {len(_missing)}장 (자리 표시로 대체됨):")
+        print(f"⚠ 미포함 {len(_missing)}장 (자리 표시로 대체됨):")
         for m in _missing:
             print(f"  - {m}")
-    else:
-        print("\n캡처 39장 전부 반영됨")
+    # 폴더에 있으나 문서에 쓰이지 않은 캡처를 알려 준다(찍어 두고 잊은 것 찾기).
+    have = {f for f in os.listdir(CAP) if f.lower().endswith(".png") and "_masked" not in f}
+    used = {f.replace("_masked", "") for f in _placed}
+    unused = sorted(have - used)
+    if unused:
+        print(f"미사용 캡처 {len(unused)}장: " + ", ".join(unused))
