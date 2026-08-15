@@ -5,14 +5,30 @@ import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, L
 import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates, updateWorkerEmail } from './repositories/workerRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
 import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
+import { getPlaces, addPlace, getVehicles, getPlans, addPlan, removePlan,
+         getActuals, addActual } from './repositories/scheduleRepo'
 
 const WORK_HOURS=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
 // 정규 근무시간 (09:00 시작 ~ 18:00 종료 → 17:00 행까지 포함) — 입력표에서 노랗게 강조
 const BUSINESS_START_HOUR=9, BUSINESS_END_HOUR=17
 const isBusinessHour=h=>h>=BUSINESS_START_HOUR&&h<=BUSINESS_END_HOUR
 const COLORS=['#3b82f6','#10b981','#f59e0b','#8b5cf6','#06b6d4','#ec4899','#84cc16','#f97316']
-const TABS=['today','daily','weekly','monthly','yearly','settings']
-const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'월간',yearly:'연간',settings:'설정'}
+const TABS=['today','daily','weekly','monthly','yearly','schedule','settings']
+const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'월간',yearly:'연간',schedule:'스케줄',settings:'설정'}
+
+// ── 스케줄 상수 ──────────────────────────────────────────
+// 이동 수단. 사무실 근무는 차량·거리 입력이 필요 없다.
+const TRANSPORTS=[
+  {v:'office',      label:'사무실', icon:'🏢', needsVehicle:false},
+  {v:'company_car', label:'법인차량', icon:'🚗', needsVehicle:true},
+  {v:'own_car',     label:'자차',   icon:'🚙', needsVehicle:true},
+  {v:'transit',     label:'대중교통', icon:'🚌', needsVehicle:false},
+]
+const TRANSPORT_MAP=Object.fromEntries(TRANSPORTS.map(t=>[t.v,t]))
+const SLOTS=[{v:'allday',label:'종일'},{v:'am',label:'오전'},{v:'pm',label:'오후'},{v:'time',label:'시각 지정'}]
+const SLOT_MAP=Object.fromEntries(SLOTS.map(s=>[s.v,s.label]))
+const SCHEDULE_VIEWS=[{v:'month',label:'월'},{v:'week',label:'주'},{v:'day',label:'일'},{v:'year',label:'연'}]
+const PLACE_CATEGORIES=['사무실','고객사','현장','기타']
 // 표 머리글은 데이터 행과 확실히 구분되는 진한 남색으로.
 // 연한 회색(#f9fafb)이던 때는 첫 데이터 행과 같은 색이라 머리글이 붙어 보였다.
 // 오늘 업무 입력표 머리글과 같은 색이라 화면 전체가 일관된다.
@@ -24,6 +40,13 @@ const numLabel=(v)=>(v?String(v):'')              // 0/빈값은 라벨 숨김
 const hourTip=(v)=>`${v??0}h`                       // 툴팁 값에 h 부착
 // 업무명 표시 정리: "[VITRON-167] …" 또는 "VITRON-166 …" 같은 지라번호 prefix 제거 → 순수 이름만 (저장값엔 영향 없음)
 const cleanName=(s)=>String(s||'').replace(/^\s*\[[^\]]*\]\s*/,'').replace(/^\s*[A-Z][A-Z0-9]*-\d+\s*/,'')
+
+// 집계 키를 만들 때 쓰는 정규화. 앞뒤 공백을 떼고 사이 공백을 한 칸으로 눌러 준다.
+// 같은 업무가 공백 차이로 두 줄이 되는 실데이터가 있다 — '[VITRON-231] 설계 화면 구현' 이
+// 공백 두 칸짜리와 따로 쌓여 파레토·트리맵에 37h / 16h 로 갈라져 보였다.
+// ⚠ 집계·표시에만 쓴다. 입력표 복원(cellKey→work_text)과 저장 payload 는
+//    사용자가 적은 원본 그대로여야 한다 (KPI 총괄 분석도 SQL 에서 같은 규칙으로 누른다).
+const normText=(s)=>String(s??'').trim().replace(/\s+/g,' ')
 
 // ── 여러 계열이 겹친 차트용 툴팁 ────────────────────────
 // 누적/다계열 차트는 모든 계열을 같은 데이터 객체에 담기 때문에,
@@ -145,16 +168,48 @@ function weekFirstDate(ym,wk){
   return ym+'-'+String((wk-1)*7+1).padStart(2,'0')
 }
 
+// ── 스케줄 달력용 날짜 계산 ───────────────────────────────
+// 리포트 탭의 주차는 «1~7일 = 1주차» 방식이지만, 스케줄 달력은 사람이 보는
+// 달력과 같아야 하므로 «월요일 시작» 실제 주를 쓴다.
+// ⚠ 날짜 계산에 toISOString() 을 쓰지 않는다 (UTC 라 오전에 하루 밀린다)
+function addDays(dateStr,n){
+  const [y,m,d]=dateStr.split('-').map(Number)
+  return ymd(new Date(y,m-1,d+n))
+}
+function calWeekStart(dateStr){          // 그 날짜가 속한 주의 월요일
+  const [y,m,d]=dateStr.split('-').map(Number)
+  const dow=new Date(y,m-1,d).getDay()   // 0=일 … 6=토
+  return addDays(dateStr,dow===0?-6:1-dow)
+}
+function calWeekDays(dateStr){           // 월~일 7일
+  const s=calWeekStart(dateStr)
+  return Array.from({length:7},(_,i)=>addDays(s,i))
+}
+// 월 달력 격자 — 1일이 속한 주의 월요일부터 6주(42칸)를 채운다.
+// 42칸 고정이면 달을 옮겨도 격자 높이가 흔들리지 않는다.
+function monthGridDays(ym){
+  const start=calWeekStart(ym+'-01')
+  return Array.from({length:42},(_,i)=>addDays(start,i))
+}
+function isSameMonth(dateStr,ym){ return dateStr.slice(0,7)===ym }
+function shiftMonth(ym,n){
+  const [y,m]=ym.split('-').map(Number)
+  const d=new Date(y,m-1+n,1)
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`
+}
+function mdLabel(dateStr){ return `${Number(dateStr.slice(5,7))}/${Number(dateStr.slice(8,10))}` }
+
 function aggByWorker(rows){
   const m={}
   rows.forEach(r=>{
     if(!m[r.worker_name])m[r.worker_name]={total:0,works:{}}
     m[r.worker_name].total++
-    m[r.worker_name].works[r.work_text]=(m[r.worker_name].works[r.work_text]||0)+1
+    const t=normText(r.work_text)
+    m[r.worker_name].works[t]=(m[r.worker_name].works[t]||0)+1
   })
   return m
 }
-function aggByWork(rows){const m={};rows.forEach(r=>{m[r.work_text]=(m[r.work_text]||0)+1});return m}
+function aggByWork(rows){const m={};rows.forEach(r=>{const t=normText(r.work_text);m[t]=(m[t]||0)+1});return m}
 function top8(rows){
   return Object.entries(aggByWork(rows)).sort((a,b)=>b[1]-a[1]).slice(0,8)
     .map(([name,value])=>{const nm=cleanName(name);return{name:nm.length>15?nm.slice(0,15)+'…':nm,value}})
@@ -182,7 +237,7 @@ function WorkerAnalysis({rows,workers}){
   const barData=wNames.map(w=>{
     const wRows=rows.filter(r=>r.worker_name===w)
     const obj={name:w,total:wRows.length}
-    topTasks.forEach(t=>{obj[t]=wRows.filter(r=>r.work_text===t).length})
+    topTasks.forEach(t=>{obj[t]=wRows.filter(r=>normText(r.work_text)===t).length})
     return obj
   })
   // 직원명은 rowSpan 으로 한 칸에 묶어 표시한다.
@@ -192,7 +247,7 @@ function WorkerAnalysis({rows,workers}){
   wNames.forEach(w=>{
     const wRows=rows.filter(r=>r.worker_name===w)
     const total=wRows.length;if(!total)return
-    const tg={}; wRows.forEach(r=>{tg[r.work_text]=(tg[r.work_text]||0)+1})
+    const tg={}; wRows.forEach(r=>{const t=normText(r.work_text);tg[t]=(tg[t]||0)+1})
     const tasks=Object.entries(tg).sort((a,b)=>b[1]-a[1])
     tasks.forEach(([task,hours],ti)=>{
       tableRows.push({worker:w,task,hours,ratio:Math.round(hours/total*100),
@@ -265,8 +320,9 @@ function ProjectAnalysis({rows,allHistory}){
   // 같은 업무를 여러 명이 함께 한 경우도 그대로 모인다.
   const membersByTask={}
   rows.forEach(r=>{
-    if(!membersByTask[r.work_text])membersByTask[r.work_text]=new Set()
-    membersByTask[r.work_text].add(r.worker_name)
+    const t=normText(r.work_text)
+    if(!membersByTask[t])membersByTask[t]=new Set()
+    membersByTask[t].add(r.worker_name)
   })
   const data=Object.entries(periodAgg).sort((a,b)=>b[1]-a[1]).slice(0,10)
     .map(([name,ph])=>{
@@ -275,8 +331,8 @@ function ProjectAnalysis({rows,allHistory}){
       // 참여자별 내역. 기간=이 기간에 그 사람이 쓴 시간,
       // 누적=그 사람이 이 업무에 쓴 전체 시간, 몫=이 프로젝트에서 차지한 비율
       const 멤버내역=members.map(m=>{
-        const mp=rows.filter(r=>r.work_text===name&&r.worker_name===m).length
-        const mt=allHistory.filter(r=>r.work_text===name&&r.worker_name===m).length||mp
+        const mp=rows.filter(r=>normText(r.work_text)===name&&r.worker_name===m).length
+        const mt=allHistory.filter(r=>normText(r.work_text)===name&&r.worker_name===m).length||mp
         return{이름:m,기간:mp,누적:mt,몫:Math.round(mp/ph*100),기간비중:Math.round(mp/mt*100)}
       }).sort((a,b)=>b.기간-a.기간)
       return{name:nm.length>16?nm.slice(0,16)+'…':nm,fullName:nm,기간:ph,누적:th,
@@ -440,7 +496,7 @@ function WorkHeatmap({rows}){
 function buildTreemapData(rows,jiraTree){
   const parentOf=t=>{if(jiraTree&&jiraTree[t]!==undefined)return t;if(jiraTree){for(const[p,subs]of Object.entries(jiraTree)){if(subs.includes(t))return p}}return '기타'}
   const tmMap={}
-  rows.forEach(r=>{const p=cleanName(parentOf(r.work_text)),c=cleanName(r.work_text);if(!tmMap[p])tmMap[p]={};tmMap[p][c]=(tmMap[p][c]||0)+1})
+  rows.forEach(r=>{const p=cleanName(normText(parentOf(r.work_text))),c=cleanName(normText(r.work_text));if(!tmMap[p])tmMap[p]={};tmMap[p][c]=(tmMap[p][c]||0)+1})
   return Object.entries(tmMap).map(([p,kids])=>({name:p,children:Object.entries(kids).map(([c,v])=>({name:c,size:v}))}))
 }
 function TreemapCell(props){
@@ -513,7 +569,7 @@ function ParetoAnalysis({rows}){
 function buildTaskMix(rows,keyOf){
   const topTasks=Object.entries(aggByWork(rows)).sort((a,b)=>b[1]-a[1]).slice(0,6).map(e=>e[0])
   const set=new Set(topTasks),buckets={}
-  rows.forEach(r=>{if(!set.has(r.work_text))return;const {k,label}=keyOf(r);if(!buckets[k])buckets[k]={label,o:{}};buckets[k].o[r.work_text]=(buckets[k].o[r.work_text]||0)+1})
+  rows.forEach(r=>{const t=normText(r.work_text);if(!set.has(t))return;const {k,label}=keyOf(r);if(!buckets[k])buckets[k]={label,o:{}};buckets[k].o[t]=(buckets[k].o[t]||0)+1})
   const data=Object.keys(buckets).sort().map(k=>{const o={name:buckets[k].label};topTasks.forEach(t=>{o[t]=buckets[k].o[t]||0});return o})
   return {topTasks,data}
 }
@@ -546,7 +602,7 @@ function RadarAnalysis({rows,workers}){
   if(!topTasks.length||!wNames.length)return null
   const data=topTasks.map(t=>{
     const nm=cleanName(t),o={task:nm.length>10?nm.slice(0,10)+'…':nm}
-    wNames.forEach(w=>{o[w]=rows.filter(r=>r.worker_name===w&&r.work_text===t).length})
+    wNames.forEach(w=>{o[w]=rows.filter(r=>r.worker_name===w&&normText(r.work_text)===t).length})
     return o
   })
   return(
@@ -605,6 +661,12 @@ export default function App(){
   const [toast,setToast]=useState('')
   const [tokenStatus,setTokenStatus]=useState({configured:false})
   const toastTimerRef=useRef(null)
+  // 스케줄 — 탭을 처음 열 때만 불러온다(달력은 기간이 바뀔 때마다 다시 조회)
+  const [places,setPlaces]=useState([])
+  const [vehicles,setVehicles]=useState([])
+  const [plans,setPlans]=useState([])
+  const [schedLoading,setSchedLoading]=useState(false)
+  const [planDialog,setPlanDialog]=useState(null)   // {editing} | {date} | null
 
   // 오늘 기준 재직 중인 직원만 (입사일 이후 + 퇴사 전)
   const td=today()
@@ -655,6 +717,25 @@ export default function App(){
     }catch(e){showToast('저장 실패: '+e.message)}
   }
 
+  // 스케줄 데이터 — 넉넉히 «작년~내년» 을 한 번에 받아 두고 화면에서 걸러 쓴다.
+  // 달력은 뷰를 자주 옮기므로 이동마다 조회하면 깜빡임이 생긴다. 건수가 적어 부담이 없다.
+  async function loadSchedule(){
+    setSchedLoading(true)
+    try{
+      const y=toYear(today())
+      const [pl,vh,pn]=await Promise.all([
+        getPlaces(), getVehicles(), getPlans(`${y-1}-01-01`,`${y+1}-12-31`)
+      ])
+      setPlaces(pl); setVehicles(vh); setPlans(pn)
+    }catch(e){ showToast('스케줄 조회 실패: '+e.message) }
+    finally{ setSchedLoading(false) }
+  }
+
+  useEffect(()=>{
+    if(tab==='schedule'&&places.length===0&&vehicles.length===0) loadSchedule()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[tab])
+
   async function handleLoadDate(date){
     try{
       showToast('조회 중...')
@@ -703,9 +784,21 @@ export default function App(){
         {tab==='weekly'  &&<TabWeekly  history={history} workers={workersLabeled} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
         {tab==='monthly' &&<TabMonthly history={history} workers={workersLabeled} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
         {tab==='yearly'  &&<TabYearly  history={history} workers={workersLabeled} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
+        {tab==='schedule'&&<TabSchedule workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
+          places={places} vehicles={vehicles} plans={plans} loading={schedLoading}
+          onReload={loadSchedule} showToast={showToast}
+          onOpenNew={()=>setPlanDialog({editing:null,date:today()})}
+          onOpenPlan={p=>setPlanDialog({editing:p})}/>}
         {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers} dupNames={dupNames}
           jiraTree={jiraTree} setJiraTree={setJiraTree} showToast={showToast} tokenStatus={tokenStatus}/>}
       </main>
+      {planDialog&&(
+        <PlanDialog editing={planDialog.editing} defaultDate={planDialog.date}
+          workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
+          places={places} vehicles={vehicles} showToast={showToast}
+          onClose={()=>setPlanDialog(null)}
+          onSaved={async()=>{ await loadSchedule() }}/>
+      )}
       {toast&&(
         <div style={{position:'fixed',bottom:24,left:'50%',transform:'translateX(-50%)',
           background:'#111827',color:'#fff',padding:'10px 22px',borderRadius:24,
@@ -1138,6 +1231,701 @@ function TabYearly({history,workers,viewYear,setViewYear,jiraTree}){
       <WorkerAnalysis rows={rows} workers={periodWorkers}/>
       <SectionTitle>프로젝트 기간 비중 분석</SectionTitle>
       <ProjectAnalysis rows={rows} allHistory={history}/>
+    </div>
+  )
+}
+
+// ── 스케줄 탭 ─────────────────────────────────────────────
+// 「어느 날 어디에서 무엇을 할 계획인가」를 달력으로 본다.
+// 업무 내용을 적는 「오늘 업무」와 달리 장소와 이동 수단이 중심이다.
+// 설계서: docs/design/스케줄표_설계.md
+
+// 사람마다 색을 고정한다. 색이 매번 바뀌면 달력에서 누구인지 알 수 없다.
+function workerColor(workerId,workers){
+  const i=workers.findIndex(w=>w.id===workerId)
+  return COLORS[(i<0?0:i)%COLORS.length]
+}
+// 배지에 넣을 짧은 장소 이름. 달력 칸이 좁아 긴 이름은 잘라야 한다.
+function shortPlace(plan){
+  if(plan.use_type==='personal') return '개인 사용'
+  const nm=plan.place_name||plan.place_text||''
+  return nm.length>9?nm.slice(0,9)+'…':nm
+}
+// 계획 한 건이 어떤 상태인지 — 달력 표시와 「확인 필요」 판단에 쓴다
+function planState(plan,todayStr){
+  if(plan.status==='canceled') return 'canceled'
+  if(plan.actual_id) return plan.as_planned===false?'changed':'done'
+  return plan.plan_date<todayStr?'needCheck':'planned'
+}
+const PLAN_STATE_MARK={done:'',changed:'↺',needCheck:'●',planned:'',canceled:'✕'}
+
+// 달력 배지 하나
+function PlanBadge({plan,workers,onClick,todayStr,compact=false}){
+  const color=workerColor(plan.worker_id,workers)
+  const st=planState(plan,todayStr)
+  const tp=TRANSPORT_MAP[plan.transport]||TRANSPORT_MAP.office
+  const personal=plan.use_type==='personal'
+  return(
+    <div onClick={onClick} title={`${plan.worker_name} · ${SLOT_MAP[plan.slot]} · ${personal?'개인 사용':(plan.place_name||plan.place_text||'장소 미정')}${plan.purpose?' · '+plan.purpose:''}${plan.vehicle_name?' · '+plan.vehicle_name:''}`}
+      style={{display:'flex',alignItems:'center',gap:3,cursor:'pointer',
+        background:st==='planned'||st==='needCheck'?color+'22':color+'dd',
+        color:st==='planned'||st==='needCheck'?'#111827':'#fff',
+        border:`1px solid ${color}`,borderStyle:personal?'dashed':'solid',
+        borderRadius:4,padding:compact?'1px 4px':'2px 5px',fontSize:compact?10:11,
+        marginBottom:2,whiteSpace:'nowrap',overflow:'hidden',
+        opacity:st==='canceled'?.45:1,
+        textDecoration:st==='canceled'?'line-through':'none'}}>
+      <span>{tp.icon}</span>
+      <strong style={{fontSize:compact?10:11}}>{plan.worker_name}</strong>
+      {!compact&&<span style={{opacity:.9,overflow:'hidden',textOverflow:'ellipsis'}}>{shortPlace(plan)}</span>}
+      {st==='needCheck'&&<span style={{color:'#c2410c',fontWeight:700}}>{PLAN_STATE_MARK.needCheck}</span>}
+      {st==='changed'&&<span>{PLAN_STATE_MARK.changed}</span>}
+    </div>
+  )
+}
+
+function TabSchedule({workers,places,vehicles,plans,loading,onReload,onOpenNew,onOpenPlan,showToast}){
+  const [view,setView]=useState('week')
+  const [anchor,setAnchor]=useState(today())      // 기준 날짜 (주·일 뷰)
+  const [ym,setYm]=useState(toMonth(today()))     // 기준 월 (월 뷰)
+  const [year,setYear]=useState(toYear(today()))
+  const [filterWorker,setFilterWorker]=useState('')
+  const [filterVehicle,setFilterVehicle]=useState('')
+  const todayStr=today()
+
+  const shown=plans.filter(p=>
+    (!filterWorker||String(p.worker_id)===filterWorker)&&
+    (!filterVehicle||String(p.vehicle_id)===filterVehicle))
+  const byDate=(d)=>shown.filter(p=>p.plan_date===d)
+
+  const selS={padding:'6px 8px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:12,background:'#fff'}
+  const navBtn={padding:'6px 12px',border:'1px solid #e5e7eb',borderRadius:7,background:'#fff',
+    cursor:'pointer',fontSize:13,fontWeight:600}
+
+  function move(n){
+    if(view==='month') setYm(shiftMonth(ym,n))
+    else if(view==='week') setAnchor(addDays(anchor,n*7))
+    else if(view==='day') setAnchor(addDays(anchor,n))
+    else setYear(year+n)
+  }
+  function goToday(){
+    setAnchor(todayStr); setYm(toMonth(todayStr)); setYear(toYear(todayStr))
+  }
+
+  const periodLabel=view==='month'?`${ym.slice(0,4)}년 ${Number(ym.slice(5,7))}월`
+    :view==='week'?`${mdLabel(calWeekDays(anchor)[0])} ~ ${mdLabel(calWeekDays(anchor)[6])}`
+    :view==='day'?`${anchor} (${dayName(anchor)})`
+    :`${year}년`
+
+  // 차량이 같은 날 겹친 건 — 달력 위에 먼저 알려 준다
+  const vehicleConflicts=(()=>{
+    const m={}
+    shown.filter(p=>p.vehicle_id&&p.status!=='canceled').forEach(p=>{
+      const k=`${p.plan_date}_${p.vehicle_id}`
+      ;(m[k]=m[k]||[]).push(p)
+    })
+    return Object.entries(m).filter(([,v])=>v.length>1)
+      .map(([k,v])=>({date:k.split('_')[0],vehicle:v[0].vehicle_name,plate:v[0].vehicle_plate,
+                      names:v.map(p=>p.worker_name)}))
+  })()
+
+  return(
+    <div>
+      {/* 조작 줄 */}
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'12px 16px',
+        marginBottom:16,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+        <div style={{display:'flex',border:'1px solid #e5e7eb',borderRadius:7,overflow:'hidden'}}>
+          {SCHEDULE_VIEWS.map(v=>(
+            <button key={v.v} onClick={()=>setView(v.v)}
+              style={{padding:'6px 14px',border:'none',cursor:'pointer',fontSize:13,
+                fontWeight:view===v.v?700:500,
+                background:view===v.v?'#1a56db':'#fff',color:view===v.v?'#fff':'#6b7280'}}>{v.label}</button>
+          ))}
+        </div>
+        <button onClick={()=>move(-1)} style={navBtn}>◀</button>
+        <strong style={{fontSize:15,minWidth:150,textAlign:'center'}}>{periodLabel}</strong>
+        <button onClick={()=>move(1)} style={navBtn}>▶</button>
+        <button onClick={goToday} style={{...navBtn,color:'#1a56db',borderColor:'#1a56db'}}>오늘</button>
+        <div style={{flex:1}}/>
+        <select value={filterWorker} onChange={e=>setFilterWorker(e.target.value)} style={selS}>
+          <option value="">전 직원</option>
+          {workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
+        </select>
+        <select value={filterVehicle} onChange={e=>setFilterVehicle(e.target.value)} style={selS}>
+          <option value="">전 차량</option>
+          {vehicles.filter(v=>v.kind==='company').map(v=>
+            <option key={v.id} value={v.id}>{v.name} {v.plate}</option>)}
+        </select>
+        <button onClick={onOpenNew}
+          style={{padding:'7px 16px',border:'none',borderRadius:7,background:'#1a56db',color:'#fff',
+            cursor:'pointer',fontSize:13,fontWeight:700}}>+ 계획 추가</button>
+      </div>
+
+      {/* 안내 — 처음 쓸 때 장소가 없으면 알려 준다 */}
+      {places.length===0&&(
+        <div style={{background:'#fffbeb',border:'1px solid #fcd34d',borderRadius:8,padding:'10px 14px',
+          marginBottom:14,fontSize:12,color:'#92400e'}}>
+          등록된 장소가 없습니다. 계획을 추가할 때 「새 장소」로 넣으면 거리·시간을 한 번만 입력하고
+          다음부터는 자동으로 채워집니다.
+        </div>
+      )}
+
+      {/* 차량 겹침 경고 */}
+      {vehicleConflicts.length>0&&(
+        <div style={{background:'#fef2f2',border:'1px solid #fca5a5',borderRadius:8,padding:'10px 14px',
+          marginBottom:14,fontSize:12,color:'#991b1b'}}>
+          <strong>⚠ 차량 예약이 겹칩니다</strong>
+          {vehicleConflicts.map((c,i)=>(
+            <div key={i} style={{marginTop:4}}>
+              {c.date} · {c.vehicle} {c.plate} — {c.names.join(' · ')}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {loading&&<div style={{fontSize:12,color:'#6b7280',marginBottom:10}}>불러오는 중…</div>}
+
+      {view==='month'&&<ScheduleMonth ym={ym} byDate={byDate} workers={workers} todayStr={todayStr}
+        onOpenPlan={onOpenPlan} onPickDate={d=>{setAnchor(d);setView('day')}}/>}
+      {view==='week'&&<ScheduleWeek anchor={anchor} shown={shown} workers={workers} todayStr={todayStr}
+        onOpenPlan={onOpenPlan}/>}
+      {view==='day'&&<ScheduleDay date={anchor} byDate={byDate} workers={workers} vehicles={vehicles}
+        todayStr={todayStr} onOpenPlan={onOpenPlan}/>}
+      {view==='year'&&<ScheduleYear year={year} plans={shown} workers={workers}
+        onPickMonth={m=>{setYm(m);setView('month')}}/>}
+
+      <div style={{marginTop:14,fontSize:11,color:'#6b7280',display:'flex',gap:14,flexWrap:'wrap'}}>
+        <span>🏢 사무실</span><span>🚗 법인차량</span><span>🚙 자차</span><span>🚌 대중교통</span>
+        <span style={{color:'#c2410c'}}>● 확인 필요(지난 날짜인데 실적 없음)</span>
+        <span>↺ 계획과 달랐음</span>
+        <span style={{borderBottom:'1px dashed #6b7280'}}>점선 = 개인 사용</span>
+      </div>
+    </div>
+  )
+}
+
+// 월 뷰 — 날짜 격자에 배지를 얹는다
+function ScheduleMonth({ym,byDate,workers,todayStr,onOpenPlan,onPickDate}){
+  const days=monthGridDays(ym)
+  return(
+    <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,overflow:'hidden'}}>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)'}}>
+        {['월','화','수','목','금','토','일'].map((d,i)=>(
+          <div key={d} style={{...thS,borderRadius:0,padding:'7px 0',
+            color:i===5?'#93c5fd':i===6?'#fca5a5':'#fff'}}>{d}</div>
+        ))}
+      </div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)'}}>
+        {days.map(d=>{
+          const list=byDate(d)
+          const out=!isSameMonth(d,ym)
+          const isToday=d===todayStr
+          return(
+            <div key={d} onDoubleClick={()=>onPickDate(d)}
+              style={{minHeight:96,borderRight:'1px solid #f1f5f9',borderBottom:'1px solid #f1f5f9',
+                padding:'4px 5px',background:out?'#fafafa':isToday?'#eff6ff':'#fff',
+                opacity:out?.5:1,overflow:'hidden'}}>
+              <div style={{fontSize:11,fontWeight:isToday?700:500,marginBottom:3,
+                color:isToday?'#1a56db':'#6b7280'}}>
+                {Number(d.slice(8,10))}
+              </div>
+              {list.slice(0,4).map(p=>(
+                <PlanBadge key={p.id} plan={p} workers={workers} todayStr={todayStr}
+                  onClick={()=>onOpenPlan(p)} compact/>
+              ))}
+              {list.length>4&&(
+                <div onClick={()=>onPickDate(d)}
+                  style={{fontSize:10,color:'#1a56db',cursor:'pointer',fontWeight:600}}>
+                  +{list.length-4}건 더
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// 주 뷰 — «사람 × 날짜» 격자. 누가 어디 있는지 한눈에 보는 것이 목적이다.
+function ScheduleWeek({anchor,shown,workers,todayStr,onOpenPlan}){
+  const days=calWeekDays(anchor)
+  return(
+    <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,overflowX:'auto'}}>
+      <table style={{width:'100%',borderCollapse:'collapse',minWidth:820}}>
+        <thead>
+          <tr>
+            <th style={{...thS,width:110,position:'sticky',left:0,zIndex:2}}>직원</th>
+            {days.map((d,i)=>(
+              <th key={d} style={{...thS,background:d===todayStr?'#1a56db':'#1e3a5f'}}>
+                <div style={{color:i===5?'#93c5fd':i===6?'#fca5a5':'#fff'}}>
+                  {mdLabel(d)} ({dayName(d)})
+                </div>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {workers.map((w,wi)=>(
+            <tr key={w.id} style={{background:wi%2===0?'#fff':'#f8fbff'}}>
+              <td style={{...tdS,textAlign:'left',fontWeight:700,position:'sticky',left:0,
+                background:wi%2===0?'#fff':'#f8fbff',zIndex:1}}>
+                <span style={{display:'inline-block',width:8,height:8,borderRadius:2,marginRight:6,
+                  background:workerColor(w.id,workers)}}/>
+                {w.name}
+              </td>
+              {days.map(d=>{
+                const list=shown.filter(p=>p.plan_date===d&&p.worker_id===w.id)
+                return(
+                  <td key={d} style={{...tdS,verticalAlign:'top',minWidth:96,
+                    background:d===todayStr?'#eff6ff':'transparent'}}>
+                    {list.length===0
+                      ?<span style={{color:'#e2e8f0',fontSize:11}}>-</span>
+                      :list.map(p=>(
+                        <PlanBadge key={p.id} plan={p} workers={workers} todayStr={todayStr}
+                          onClick={()=>onOpenPlan(p)}/>
+                      ))}
+                  </td>
+                )
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// 일 뷰 — 그날 전원 + 차량 배정
+function ScheduleDay({date,byDate,workers,vehicles,todayStr,onOpenPlan}){
+  const list=byDate(date)
+  const noPlan=workers.filter(w=>!list.some(p=>p.worker_id===w.id))
+  const carRows=vehicles.filter(v=>v.kind==='company').map(v=>({
+    v, users:list.filter(p=>p.vehicle_id===v.id&&p.status!=='canceled')
+  }))
+  return(
+    <div style={{display:'grid',gridTemplateColumns:'minmax(0,1.4fr) minmax(0,1fr)',gap:16}}>
+      <Card title={`${date} (${dayName(date)}) 일정 ${list.length}건`}>
+        {list.length===0
+          ?<div style={{fontSize:12,color:'#6b7280'}}>등록된 일정이 없습니다.</div>
+          :<table style={{width:'100%',borderCollapse:'collapse'}}>
+            <thead><tr>
+              <th style={thS}>직원</th><th style={thS}>시간대</th><th style={thS}>장소</th>
+              <th style={thS}>업무</th><th style={thS}>이동</th><th style={thS}>거리</th>
+            </tr></thead>
+            <tbody>
+              {list.map(p=>{
+                const tp=TRANSPORT_MAP[p.transport]||TRANSPORT_MAP.office
+                const personal=p.use_type==='personal'
+                const dist=p.est_distance_km!=null
+                  ?(p.round_trip?p.est_distance_km*2:p.est_distance_km):null
+                return(
+                  <tr key={p.id} onClick={()=>onOpenPlan(p)} style={{cursor:'pointer'}}>
+                    <td style={{...tdS,fontWeight:700,textAlign:'left'}}>
+                      <span style={{display:'inline-block',width:8,height:8,borderRadius:2,marginRight:6,
+                        background:workerColor(p.worker_id,workers)}}/>
+                      {p.worker_name}
+                    </td>
+                    <td style={tdS}>{SLOT_MAP[p.slot]}</td>
+                    <td style={{...tdS,textAlign:'left'}}>
+                      {personal
+                        ?<em style={{color:'#6b7280'}}>개인 사용</em>
+                        :(p.place_name||p.place_text||'-')}
+                    </td>
+                    <td style={{...tdS,textAlign:'left'}}>{personal?'-':(p.purpose||'-')}</td>
+                    <td style={tdS}>{tp.icon} {p.vehicle_name||tp.label}</td>
+                    <td style={tdS}>{dist!=null?`${dist}km`:'-'}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>}
+      </Card>
+      <div>
+        <Card title="차량 배정">
+          <table style={{width:'100%',borderCollapse:'collapse'}}>
+            <thead><tr><th style={thS}>차량</th><th style={thS}>사용자</th></tr></thead>
+            <tbody>
+              {carRows.map(({v,users})=>(
+                <tr key={v.id} style={{background:users.length>1?'#fef2f2':'transparent'}}>
+                  <td style={{...tdS,textAlign:'left',fontWeight:600}}>
+                    {v.name}<div style={{fontSize:10,color:'#6b7280'}}>{v.plate}</div>
+                  </td>
+                  <td style={tdS}>
+                    {users.length===0
+                      ?<span style={{color:'#9ca3af',fontSize:11}}>비어 있음</span>
+                      :users.map(u=>(
+                        <div key={u.id} style={{fontSize:11}}>
+                          {u.worker_name} <span style={{color:'#6b7280'}}>({SLOT_MAP[u.slot]})</span>
+                        </div>
+                      ))}
+                    {users.length>1&&<div style={{fontSize:10,color:'#991b1b',fontWeight:700}}>겹침</div>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+        {date>=todayStr&&noPlan.length>0&&(
+          <Card title="계획 미입력">
+            <div style={{fontSize:12,color:'#6b7280',lineHeight:1.7}}>
+              {noPlan.map(w=>w.name).join(' · ')}
+            </div>
+          </Card>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// 연 뷰 — 월별 요약. 외근이 어느 달에 몰렸는지 본다.
+function ScheduleYear({year,plans,workers,onPickMonth}){
+  const months=Array.from({length:12},(_,i)=>`${year}-${String(i+1).padStart(2,'0')}`)
+  const stat=months.map(m=>{
+    const rows=plans.filter(p=>p.plan_date.slice(0,7)===m)
+    const out=rows.filter(p=>p.transport!=='office')
+    return {m, total:rows.length, out:out.length,
+            people:new Set(rows.map(p=>p.worker_id)).size,
+            car:rows.filter(p=>p.vehicle_id).length}
+  })
+  const max=Math.max(1,...stat.map(s=>s.out))
+  return(
+    <Card title={`${year}년 월별 요약`}>
+      <table style={{width:'100%',borderCollapse:'collapse'}}>
+        <thead><tr>
+          <th style={thS}>월</th><th style={thS}>일정</th><th style={thS}>외근</th>
+          <th style={thS}>차량 사용</th><th style={thS}>인원</th><th style={{...thS,width:'34%'}}>외근 분포</th>
+        </tr></thead>
+        <tbody>
+          {stat.map(s=>(
+            <tr key={s.m} onClick={()=>onPickMonth(s.m)} style={{cursor:'pointer'}}>
+              <td style={{...tdS,fontWeight:700}}>{Number(s.m.slice(5,7))}월</td>
+              <td style={tdS}>{s.total?`${s.total}건`:'-'}</td>
+              <td style={tdS}>{s.out?`${s.out}건`:'-'}</td>
+              <td style={tdS}>{s.car?`${s.car}건`:'-'}</td>
+              <td style={tdS}>{s.people?`${s.people}명`:'-'}</td>
+              <td style={{...tdS,padding:'6px 10px'}}>
+                <div style={{background:'#f1f5f9',borderRadius:4,height:12,overflow:'hidden'}}>
+                  <div style={{width:`${s.out/max*100}%`,height:'100%',background:'#3b82f6'}}/>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div style={{marginTop:10,fontSize:11,color:'#6b7280'}}>
+        💡 읽는 법 — 「외근」은 사무실이 아닌 일정입니다. 월을 누르면 그 달 달력으로 갑니다.
+      </div>
+    </Card>
+  )
+}
+
+// 계획 입력·확인 창.
+// 새 계획이면 editing=null, 기존 계획을 누르면 그 계획이 들어온다.
+function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved,showToast}){
+  const isNew=!editing
+  const [workerId,setWorkerId]=useState(editing?.worker_id||workers[0]?.id||'')
+  const [date,setDate]=useState(editing?.plan_date||defaultDate||today())
+  const [slot,setSlot]=useState(editing?.slot||'allday')
+  const [useType,setUseType]=useState(editing?.use_type||'business')
+  const [placeId,setPlaceId]=useState(editing?.place_id||'')
+  const [purpose,setPurpose]=useState(editing?.purpose||'')
+  const [transport,setTransport]=useState(editing?.transport||'office')
+  const [vehicleId,setVehicleId]=useState(editing?.vehicle_id||'')
+  const [roundTrip,setRoundTrip]=useState(editing?editing.round_trip:true)
+  const [busy,setBusy]=useState(false)
+  // 새 장소 등록
+  const [newPlace,setNewPlace]=useState(null)   // {name,address,distance_km,travel_min,category}
+
+  const personal=useType==='personal'
+  const tp=TRANSPORT_MAP[transport]||TRANSPORT_MAP.office
+  const place=places.find(p=>String(p.id)===String(placeId))
+  // 장소를 고르면 거리·시간이 자동으로 들어온다 (한 번 입력해 두면 계속 재사용)
+  const estKm=place?.distance_km??null
+  const estMin=place?.travel_min??null
+  const showKm=estKm!=null?(roundTrip?estKm*2:estKm):null
+  const showMin=estMin!=null?(roundTrip?estMin*2:estMin):null
+
+  const inputS={padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,width:'100%'}
+  const labelS={fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:4,display:'block'}
+  const rowS={marginBottom:12}
+
+  async function saveNewPlace(){
+    const np=newPlace
+    if(!np?.name?.trim()){showToast('장소 이름을 입력해 주세요');return}
+    try{
+      setBusy(true)
+      const created=await addPlace({...np,name:np.name.trim(),created_by:workerId||null})
+      showToast(`장소 「${created.name}」 등록`)
+      setNewPlace(null)
+      await onSaved({placeAdded:created})
+      setPlaceId(created.id)
+    }catch(e){
+      // 비슷한 이름이 있으면 서버가 409 + 후보를 준다. 사용자에게 물어본다.
+      if(e.status===409&&e.similar?.length){
+        const names=e.similar.map(s=>`· ${s.name}${s.distance_km!=null?` (${s.distance_km}km)`:''}`).join('\n')
+        if(confirm(`비슷한 이름의 장소가 이미 있습니다.\n\n${names}\n\n같은 곳이면 취소하고 위 장소를 골라 주세요.\n다른 곳이면 그대로 등록할까요?`)){
+          try{
+            const created=await addPlace({...np,name:np.name.trim(),force:true,created_by:workerId||null})
+            setNewPlace(null); await onSaved({placeAdded:created}); setPlaceId(created.id)
+          }catch(e2){showToast('장소 등록 실패: '+e2.message)}
+        }
+      }else showToast('장소 등록 실패: '+e.message)
+    }finally{setBusy(false)}
+  }
+
+  async function submit(force=false){
+    if(!workerId){showToast('이름을 선택해 주세요');return}
+    if(!personal&&!placeId&&!newPlace){showToast('장소를 선택해 주세요');return}
+    if(tp.needsVehicle&&!vehicleId){showToast('차량을 선택해 주세요');return}
+    const body={
+      worker_id:Number(workerId), plan_date:date, slot, use_type:useType,
+      place_id:personal?null:(placeId?Number(placeId):null),
+      purpose:personal?null:purpose,
+      transport, vehicle_id:tp.needsVehicle?Number(vehicleId):null,
+      est_distance_km:personal?null:estKm, est_travel_min:personal?null:estMin,
+      round_trip:roundTrip, force,
+    }
+    try{
+      setBusy(true)
+      await addPlan(body)
+      showToast('계획을 등록했습니다')
+      await onSaved({})
+      onClose()
+    }catch(e){
+      // 차량이 겹치면 409. 먼저 등록한 사람이 우선이고, 그래도 넣을지 물어본다.
+      if(e.status===409&&e.conflicts?.length&&!force){
+        const who=e.conflicts.map(c=>`· ${c.worker_name} (${SLOT_MAP[c.slot]||c.slot})`).join('\n')
+        if(confirm(`이 차량은 그 날 이미 예약돼 있습니다.\n\n${who}\n\n그래도 등록할까요?`)){
+          await submit(true)
+          return
+        }
+      }else showToast('등록 실패: '+e.message)
+    }finally{setBusy(false)}
+  }
+
+  async function handleDelete(){
+    if(!confirm('이 계획을 삭제할까요?'))return
+    try{
+      setBusy(true)
+      await removePlan(editing.id)
+      showToast('삭제했습니다')
+      await onSaved({}); onClose()
+    }catch(e){showToast('삭제 실패: '+e.message)}
+    finally{setBusy(false)}
+  }
+
+  // 「계획대로」 — 계획 내용을 그대로 실적으로 만든다
+  async function handleAsPlanned(){
+    try{
+      setBusy(true)
+      await addActual({plan_id:editing.id,as_planned:true})
+      showToast('계획대로 완료 처리했습니다')
+      await onSaved({}); onClose()
+    }catch(e){showToast('처리 실패: '+e.message)}
+    finally{setBusy(false)}
+  }
+
+  return(
+    <div onClick={onClose}
+      style={{position:'fixed',inset:0,background:'rgba(17,24,39,.45)',zIndex:9000,
+        display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'40px 16px',overflowY:'auto'}}>
+      <div onClick={e=>e.stopPropagation()}
+        style={{background:'#fff',borderRadius:12,width:'100%',maxWidth:520,padding:22,
+          boxShadow:'0 20px 50px rgba(0,0,0,.25)'}}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:16}}>
+          <strong style={{fontSize:16}}>{isNew?'계획 추가':'계획 상세'}</strong>
+          <button onClick={onClose} style={{border:'none',background:'none',fontSize:20,cursor:'pointer',color:'#6b7280'}}>×</button>
+        </div>
+
+        {!isNew&&editing.actual_id&&(
+          <div style={{background:'#ecfdf5',border:'1px solid #6ee7b7',borderRadius:8,padding:'8px 12px',
+            marginBottom:14,fontSize:12,color:'#065f46'}}>
+            실적이 등록된 계획입니다{editing.as_planned===false?' (계획과 달랐음)':''}.
+            {editing.actual_distance_km!=null&&` 주행 ${editing.actual_distance_km}km`}
+          </div>
+        )}
+
+        <div style={rowS}>
+          <label style={labelS}>이름</label>
+          <select value={workerId} onChange={e=>setWorkerId(e.target.value)} disabled={!isNew} style={inputS}>
+            <option value="">선택</option>
+            {workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
+          </select>
+        </div>
+
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,...rowS}}>
+          <div>
+            <label style={labelS}>날짜</label>
+            <input type="date" value={date} onChange={e=>setDate(e.target.value)} disabled={!isNew} style={inputS}/>
+          </div>
+          <div>
+            <label style={labelS}>시간대</label>
+            <select value={slot} onChange={e=>setSlot(e.target.value)} disabled={!isNew} style={inputS}>
+              {SLOTS.map(s=><option key={s.v} value={s.v}>{s.label}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div style={rowS}>
+          <label style={labelS}>구분</label>
+          <div style={{display:'flex',gap:8}}>
+            {[{v:'business',label:'업무'},{v:'personal',label:'개인 사용'}].map(o=>(
+              <button key={o.v} onClick={()=>isNew&&setUseType(o.v)} disabled={!isNew}
+                style={{flex:1,padding:'8px',borderRadius:7,cursor:isNew?'pointer':'default',fontSize:13,
+                  fontWeight:useType===o.v?700:500,
+                  border:`1px solid ${useType===o.v?'#1a56db':'#e5e7eb'}`,
+                  background:useType===o.v?'#eff6ff':'#fff',
+                  color:useType===o.v?'#1a56db':'#6b7280'}}>{o.label}</button>
+            ))}
+          </div>
+          {personal&&(
+            <div style={{fontSize:11,color:'#92400e',marginTop:6}}>
+              개인 사용은 장소·업무를 적지 않습니다. 정산에 쓰이는 차량과 거리만 기록합니다.
+            </div>
+          )}
+        </div>
+
+        {!personal&&(
+          <>
+            <div style={rowS}>
+              <label style={labelS}>장소</label>
+              {newPlace
+                ?<div style={{border:'1px dashed #93c5fd',borderRadius:8,padding:12,background:'#f8fbff'}}>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+                    <input placeholder="장소 이름" value={newPlace.name}
+                      onChange={e=>setNewPlace({...newPlace,name:e.target.value})} style={inputS}/>
+                    <select value={newPlace.category||''}
+                      onChange={e=>setNewPlace({...newPlace,category:e.target.value})} style={inputS}>
+                      <option value="">분류 선택</option>
+                      {PLACE_CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
+                    </select>
+                    <input placeholder="주소 (선택)" value={newPlace.address||''}
+                      onChange={e=>setNewPlace({...newPlace,address:e.target.value})}
+                      style={{...inputS,gridColumn:'1 / -1'}}/>
+                    <input type="number" step="0.1" placeholder="편도 거리(km)" value={newPlace.distance_km||''}
+                      onChange={e=>setNewPlace({...newPlace,distance_km:e.target.value})} style={inputS}/>
+                    <input type="number" placeholder="편도 시간(분)" value={newPlace.travel_min||''}
+                      onChange={e=>setNewPlace({...newPlace,travel_min:e.target.value})} style={inputS}/>
+                  </div>
+                  <div style={{fontSize:11,color:'#6b7280',margin:'8px 0'}}>
+                    거리·시간은 한 번만 넣으면 다음부터 자동으로 채워집니다.
+                  </div>
+                  <div style={{display:'flex',gap:8}}>
+                    <button onClick={saveNewPlace} disabled={busy}
+                      style={{flex:1,padding:'7px',borderRadius:7,border:'none',background:'#1a56db',
+                        color:'#fff',cursor:'pointer',fontSize:12,fontWeight:700}}>장소 등록</button>
+                    <button onClick={()=>setNewPlace(null)}
+                      style={{padding:'7px 14px',borderRadius:7,border:'1px solid #e5e7eb',
+                        background:'#fff',cursor:'pointer',fontSize:12}}>취소</button>
+                  </div>
+                </div>
+                :<div style={{display:'flex',gap:8}}>
+                  <select value={placeId} onChange={e=>setPlaceId(e.target.value)} disabled={!isNew} style={inputS}>
+                    <option value="">선택</option>
+                    {places.map(p=>(
+                      <option key={p.id} value={p.id}>
+                        {p.name}{p.distance_km!=null?` (${p.distance_km}km)`:''}
+                      </option>
+                    ))}
+                  </select>
+                  {isNew&&(
+                    <button onClick={()=>setNewPlace({name:'',category:'현장'})}
+                      style={{padding:'7px 12px',borderRadius:7,border:'1px solid #1a56db',
+                        background:'#eff6ff',color:'#1a56db',cursor:'pointer',fontSize:12,
+                        fontWeight:600,whiteSpace:'nowrap'}}>새 장소</button>
+                  )}
+                </div>}
+            </div>
+
+            <div style={rowS}>
+              <label style={labelS}>업무</label>
+              <input value={purpose} onChange={e=>setPurpose(e.target.value)} disabled={!isNew}
+                placeholder="무엇을 할 계획인지 한 줄로" style={inputS}/>
+            </div>
+          </>
+        )}
+
+        <div style={rowS}>
+          <label style={labelS}>이동 수단</label>
+          <div style={{display:'flex',gap:6}}>
+            {TRANSPORTS.map(t=>(
+              <button key={t.v} onClick={()=>{if(isNew){setTransport(t.v);if(!t.needsVehicle)setVehicleId('')}}}
+                disabled={!isNew}
+                style={{flex:1,padding:'8px 4px',borderRadius:7,cursor:isNew?'pointer':'default',fontSize:12,
+                  fontWeight:transport===t.v?700:500,
+                  border:`1px solid ${transport===t.v?'#1a56db':'#e5e7eb'}`,
+                  background:transport===t.v?'#eff6ff':'#fff',
+                  color:transport===t.v?'#1a56db':'#6b7280'}}>
+                {t.icon} {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {tp.needsVehicle&&(
+          <div style={rowS}>
+            <label style={labelS}>차량</label>
+            <select value={vehicleId} onChange={e=>setVehicleId(e.target.value)} disabled={!isNew} style={inputS}>
+              <option value="">선택</option>
+              {vehicles
+                .filter(v=>transport==='company_car'?v.kind==='company':v.kind==='own')
+                .map(v=>(
+                  <option key={v.id} value={v.id}>
+                    {v.name}{v.plate?` ${v.plate}`:''}{v.owner_name?` (${v.owner_name})`:''}
+                  </option>
+                ))}
+            </select>
+            {transport==='own_car'&&vehicles.filter(v=>v.kind==='own').length===0&&(
+              <div style={{fontSize:11,color:'#92400e',marginTop:5}}>
+                등록된 자차가 없습니다. 설정에서 자차를 먼저 등록해 주세요.
+              </div>
+            )}
+          </div>
+        )}
+
+        {!personal&&(
+          <div style={{...rowS,background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,padding:'10px 12px'}}>
+            <label style={{display:'flex',alignItems:'center',gap:7,fontSize:12,cursor:isNew?'pointer':'default'}}>
+              <input type="checkbox" checked={!!roundTrip} disabled={!isNew}
+                onChange={e=>setRoundTrip(e.target.checked)}/>
+              왕복
+            </label>
+            <div style={{fontSize:12,color:'#374151',marginTop:6}}>
+              {showKm!=null||showMin!=null
+                ?<>예상 {showKm!=null&&<strong>{showKm}km</strong>}
+                   {showMin!=null&&<> · 이동 <strong>{showMin}분</strong></>}
+                   <span style={{color:'#6b7280'}}> (장소에 등록된 값)</span></>
+                :<span style={{color:'#6b7280'}}>장소를 고르면 거리·시간이 표시됩니다.</span>}
+            </div>
+          </div>
+        )}
+
+        <div style={{display:'flex',gap:8,marginTop:18}}>
+          {isNew
+            ?<>
+              <button onClick={()=>submit(false)} disabled={busy}
+                style={{flex:1,padding:'11px',borderRadius:8,border:'none',background:'#1a56db',
+                  color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
+                {busy?'처리 중…':'계획 등록'}
+              </button>
+              <button onClick={onClose} style={{padding:'11px 18px',borderRadius:8,
+                border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:14}}>취소</button>
+            </>
+            :<>
+              {!editing.actual_id&&editing.plan_date<=today()&&(
+                <button onClick={handleAsPlanned} disabled={busy}
+                  style={{flex:1,padding:'11px',borderRadius:8,border:'none',background:'#059669',
+                    color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>계획대로 완료</button>
+              )}
+              <button onClick={handleDelete} disabled={busy}
+                style={{padding:'11px 18px',borderRadius:8,border:'1px solid #fca5a5',
+                  background:'#fff',color:'#dc2626',cursor:'pointer',fontSize:14}}>삭제</button>
+              <button onClick={onClose} style={{padding:'11px 18px',borderRadius:8,
+                border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:14}}>닫기</button>
+            </>}
+        </div>
+      </div>
     </div>
   )
 }
