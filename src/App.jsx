@@ -5,8 +5,8 @@ import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, L
 import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates, updateWorkerEmail } from './repositories/workerRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
 import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
-import { getPlaces, addPlace, updatePlace, hidePlace, getVehicles, getPlans, addPlan, updatePlan,
-         removePlan, getActuals, addActual } from './repositories/scheduleRepo'
+import { getPlaces, addPlace, updatePlace, hidePlace, getVehicles, addVehicle, updateVehicle,
+         getPlans, addPlan, updatePlan, removePlan, getActuals, addActual } from './repositories/scheduleRepo'
 
 const WORK_HOURS=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
 // 정규 근무시간 (09:00 시작 ~ 18:00 종료 → 17:00 행까지 포함) — 입력표에서 노랗게 강조
@@ -756,8 +756,9 @@ export default function App(){
     finally{ setSchedLoading(false) }
   }
 
+  // 스케줄 탭과 설정 탭(차량 관리)이 같은 데이터를 쓴다
   useEffect(()=>{
-    if(tab==='schedule'&&places.length===0&&vehicles.length===0) loadSchedule()
+    if((tab==='schedule'||tab==='settings')&&places.length===0&&vehicles.length===0) loadSchedule()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   },[tab])
 
@@ -854,7 +855,8 @@ export default function App(){
           onOpenCell={(d)=>setPlanDialog({editing:null,...d})}
           clipboard={clipboard} onPaste={handlePaste} onCancelCopy={()=>setClipboard(null)}/>}
         {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers} dupNames={dupNames}
-          jiraTree={jiraTree} setJiraTree={setJiraTree} showToast={showToast} tokenStatus={tokenStatus}/>}
+          jiraTree={jiraTree} setJiraTree={setJiraTree} showToast={showToast} tokenStatus={tokenStatus}
+          vehicles={vehicles} onVehiclesChanged={loadSchedule}/>}
       </main>
       {planDialog&&(
         <PlanDialog editing={planDialog.editing} defaultDate={planDialog.date}
@@ -2615,10 +2617,187 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   )
 }
 
+// ── 차량 관리 (설정 탭) ───────────────────────────────────
+// 법인차는 목록만 보여 준다. 개인사용 정산 단가를 고치는 것은 금액에 직접
+// 영향을 주므로 정산 화면에서 대표이사만 하도록 남겨 둔다(설계서 4.2절).
+// 자차는 본인이 등록한다 — 등록해 두지 않으면 계획에서 「자차」를 골라도 고를 차가 없다.
+const FUEL_TYPES=['가솔린','디젤','LPG','전기','하이브리드']
+
+function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
+  const [adding,setAdding]=useState(false)
+  const [form,setForm]=useState({owner_worker_id:'',name:'',plate:'',fuel_type:'가솔린',km_per_liter:''})
+  const [editingId,setEditingId]=useState(null)
+  const [edit,setEdit]=useState({})
+  const [busy,setBusy]=useState(false)
+
+  const company=vehicles.filter(v=>v.kind==='company')
+  const own=vehicles.filter(v=>v.kind==='own')
+  const inputS={padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,width:'100%'}
+  const smallBtn={padding:'4px 9px',borderRadius:6,fontSize:11,cursor:'pointer',fontWeight:600}
+  const nameOf=id=>{const w=workers.find(x=>x.id===id);return w?workerLabel(w,dupNames):'-'}
+
+  async function add(){
+    if(!form.owner_worker_id){showToast('차량 소유 직원을 골라 주세요');return}
+    if(!form.name.trim()){showToast('차종을 입력해 주세요');return}
+    try{
+      setBusy(true)
+      await addVehicle({...form,kind:'own',name:form.name.trim(),
+        owner_worker_id:Number(form.owner_worker_id),
+        km_per_liter:form.km_per_liter===''?null:form.km_per_liter})
+      showToast('자차를 등록했습니다')
+      setForm({owner_worker_id:'',name:'',plate:'',fuel_type:'가솔린',km_per_liter:''})
+      setAdding(false); await onChanged()
+    }catch(e){showToast('등록 실패: '+e.message)}
+    finally{setBusy(false)}
+  }
+
+  async function saveEdit(){
+    try{
+      setBusy(true)
+      await updateVehicle(editingId,{
+        name:edit.name?.trim()||null, plate:edit.plate||null, fuel_type:edit.fuel_type||null,
+        km_per_liter:edit.km_per_liter===''?null:edit.km_per_liter,
+      })
+      showToast('차량 정보를 수정했습니다')
+      setEditingId(null); await onChanged()
+    }catch(e){showToast('수정 실패: '+e.message)}
+    finally{setBusy(false)}
+  }
+
+  async function hide(v){
+    if(!confirm(`「${v.name}」을 목록에서 숨길까요?\n\n지난 계획·실적은 그대로 남습니다.`))return
+    try{ setBusy(true); await updateVehicle(v.id,{active:false}); showToast('숨겼습니다'); await onChanged() }
+    catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
+  return(
+    <Card title="차량 관리" style={{flex:1,minWidth:320}}>
+      <div style={{fontSize:12,fontWeight:700,color:'#374151',marginBottom:6}}>법인차량 {company.length}대</div>
+      <table style={{width:'100%',borderCollapse:'collapse',marginBottom:16}}>
+        <thead><tr>
+          <th style={{...thS,textAlign:'left'}}>차량</th>
+          <th style={{...thS,width:70}}>연료</th>
+          <th style={{...thS,width:96}}>개인사용 단가</th>
+        </tr></thead>
+        <tbody>
+          {company.map(v=>(
+            <tr key={v.id}>
+              <td style={{...tdS,textAlign:'left'}}>
+                <strong style={{fontSize:12}}>{v.name}</strong>
+                <div style={{fontSize:10,color:'#6b7280'}}>{v.plate}</div>
+              </td>
+              <td style={tdS}>{v.fuel_type||'-'}</td>
+              <td style={tdS}>{v.rate_per_km!=null?`${v.rate_per_km}원/km`:'-'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div style={{fontSize:11,color:'#6b7280',marginBottom:16}}>
+        법인차량 단가는 정산 금액에 직접 영향을 주므로 <strong>정산 화면에서 대표이사만</strong> 고칠 수 있습니다.
+      </div>
+
+      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
+        <div style={{fontSize:12,fontWeight:700,color:'#374151'}}>자차 {own.length}대</div>
+        <button onClick={()=>setAdding(!adding)}
+          style={{...smallBtn,border:'1px solid #1a56db',background:'#eff6ff',color:'#1a56db'}}>
+          {adding?'취소':'+ 내 차 등록'}
+        </button>
+      </div>
+
+      {adding&&(
+        <div style={{border:'1px dashed #93c5fd',borderRadius:8,padding:12,marginBottom:12,background:'#f8fbff'}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+            <select value={form.owner_worker_id} onChange={e=>setForm({...form,owner_worker_id:e.target.value})} style={inputS}>
+              <option value="">소유 직원 선택</option>
+              {workers.filter(w=>w.active).map(w=>(
+                <option key={w.id} value={w.id}>{workerLabel(w,dupNames)}</option>
+              ))}
+            </select>
+            <input placeholder="차종 (예: 쏘렌토)" value={form.name}
+              onChange={e=>setForm({...form,name:e.target.value})} style={inputS}/>
+            <input placeholder="번호판 (선택)" value={form.plate}
+              onChange={e=>setForm({...form,plate:e.target.value})} style={inputS}/>
+            <select value={form.fuel_type} onChange={e=>setForm({...form,fuel_type:e.target.value})} style={inputS}>
+              {FUEL_TYPES.map(f=><option key={f} value={f}>{f}</option>)}
+            </select>
+            <input type="number" step="0.1" placeholder="연비 (km/L)" value={form.km_per_liter}
+              onChange={e=>setForm({...form,km_per_liter:e.target.value})}
+              style={{...inputS,gridColumn:'1 / -1'}}/>
+          </div>
+          <div style={{fontSize:11,color:'#92400e',margin:'8px 0'}}>
+            연비는 <strong>주유 환급량</strong>을 계산하는 값입니다 (업무 주행거리 ÷ 연비 = 환급 리터).
+            등록 후 정산 화면에서 대표이사가 확인·조정합니다.
+          </div>
+          <button onClick={add} disabled={busy}
+            style={{width:'100%',...smallBtn,padding:'8px',border:'none',background:'#1a56db',color:'#fff',fontSize:12}}>
+            등록
+          </button>
+        </div>
+      )}
+
+      {own.length===0
+        ?<div style={{fontSize:12,color:'#6b7280',padding:'10px 0'}}>
+          등록된 자차가 없습니다. 자차로 외근하려면 먼저 등록해 주십시오.
+        </div>
+        :<table style={{width:'100%',borderCollapse:'collapse'}}>
+          <thead><tr>
+            <th style={{...thS,textAlign:'left'}}>소유·차종</th>
+            <th style={{...thS,width:64}}>연료</th>
+            <th style={{...thS,width:70}}>연비</th>
+            <th style={{...thS,width:104}}>관리</th>
+          </tr></thead>
+          <tbody>
+            {own.map(v=>(
+              editingId===v.id
+                ?<tr key={v.id}><td colSpan={4} style={{padding:10,background:'#f8fbff'}}>
+                  <div style={{display:'grid',gridTemplateColumns:'2fr 1fr 1fr',gap:6,marginBottom:8}}>
+                    <input value={edit.name||''} onChange={e=>setEdit({...edit,name:e.target.value})}
+                      placeholder="차종" style={inputS}/>
+                    <input value={edit.plate||''} onChange={e=>setEdit({...edit,plate:e.target.value})}
+                      placeholder="번호판" style={inputS}/>
+                    <input type="number" step="0.1" value={edit.km_per_liter??''}
+                      onChange={e=>setEdit({...edit,km_per_liter:e.target.value})}
+                      placeholder="연비" style={inputS}/>
+                  </div>
+                  <div style={{display:'flex',gap:6}}>
+                    <button onClick={saveEdit} disabled={busy}
+                      style={{...smallBtn,border:'none',background:'#1a56db',color:'#fff'}}>저장</button>
+                    <button onClick={()=>setEditingId(null)}
+                      style={{...smallBtn,border:'1px solid #e5e7eb',background:'#fff',color:'#6b7280'}}>취소</button>
+                  </div>
+                </td></tr>
+                :<tr key={v.id}>
+                  <td style={{...tdS,textAlign:'left'}}>
+                    <strong style={{fontSize:12}}>{nameOf(v.owner_worker_id)}</strong>
+                    <span style={{fontSize:12,marginLeft:6}}>{v.name}</span>
+                    {v.plate&&<div style={{fontSize:10,color:'#6b7280'}}>{v.plate}</div>}
+                  </td>
+                  <td style={tdS}>{v.fuel_type||'-'}</td>
+                  <td style={tdS}>
+                    {v.km_per_liter!=null
+                      ?`${v.km_per_liter}km/L`
+                      :<span style={{color:'#c2410c',fontWeight:700}}>미입력</span>}
+                  </td>
+                  <td style={{...tdS,whiteSpace:'nowrap'}}>
+                    <button onClick={()=>{setEditingId(v.id);setEdit({...v})}}
+                      style={{...smallBtn,border:'1px solid #e5e7eb',background:'#fff',color:'#374151',marginRight:4}}>수정</button>
+                    <button onClick={()=>hide(v)}
+                      style={{...smallBtn,border:'1px solid #fca5a5',background:'#fff',color:'#dc2626'}}>숨김</button>
+                  </td>
+                </tr>
+            ))}
+          </tbody>
+        </table>}
+    </Card>
+  )
+}
+
 // ── 설정 탭 ───────────────────────────────────────────────
 // 직원 수정·삭제는 모두 id 로 대상을 지정한다 (동명이인 구분).
 // editingWorkerId / resigningWorkerId 도 이름이 아니라 id 를 담는다.
-function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree,showToast,tokenStatus={configured:false}}){
+function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree,showToast,
+                      tokenStatus={configured:false},vehicles=[],onVehiclesChanged}){
   const [newWorker,setNewWorker]=useState('')
   const [newHiredAt,setNewHiredAt]=useState(today())
   const [newEmail,setNewEmail]=useState('')
@@ -2715,6 +2894,10 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree
 
   return(
     <div>
+      <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
+        <VehicleManager vehicles={vehicles} workers={workers} dupNames={dupNames}
+          onChanged={onVehiclesChanged} showToast={showToast}/>
+      </div>
       <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
         <Card title="직원 관리" style={{flex:1,minWidth:300}}>
           <div style={{display:'flex',gap:8,marginBottom:6,flexWrap:'wrap'}}>
