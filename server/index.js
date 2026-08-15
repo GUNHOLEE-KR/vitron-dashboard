@@ -1112,8 +1112,29 @@ async function buildSettlement(ym) {
     charge_total: w.personal_amount + w.toll_amount,
   })).sort((a, b) => String(a.worker_name).localeCompare(String(b.worker_name), 'ko'))
 
+  // 계획 대비 실적 현황 — 화면이 「왜 비어 있는지」를 설명할 수 있게 한다.
+  //   pending  지난 날짜인데 실적이 없는 계획 → 지금 넣을 수 있다
+  //   upcoming 아직 오지 않은 계획 → 다녀온 뒤에 넣는다
+  const { rows: planRows } = await pool.query(
+    `SELECT p.id, p.plan_date, p.use_type, p.transport, p.vehicle_id,
+            w.name AS worker_name, pl.name AS place_name, p.place_text,
+            v.name AS vehicle_name,
+            (a.id IS NOT NULL) AS has_actual
+       FROM schedule_plans p
+       LEFT JOIN workers w            ON w.id  = p.worker_id
+       LEFT JOIN schedule_places pl   ON pl.id = p.place_id
+       LEFT JOIN schedule_vehicles v  ON v.id  = p.vehicle_id
+       LEFT JOIN schedule_actuals a   ON a.plan_id = p.id
+      WHERE p.plan_date >= $1 AND p.plan_date <= $2 AND p.status <> 'canceled'
+      ORDER BY p.plan_date ASC`, [from, to])
+  const td = todayLocal()
+  const missing = planRows.filter(p => !p.has_actual)
+
   return {
     ym, from, to,
+    plan_count: planRows.length,
+    pending: missing.filter(p => p.plan_date <= td),
+    upcoming_count: missing.filter(p => p.plan_date > td).length,
     workers,
     vehicles: [...byVehicle.values()].map(v => ({
       ...v,

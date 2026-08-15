@@ -1682,7 +1682,7 @@ function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,
       {view==='year'&&<ScheduleYear year={year} plans={shown} workers={workers}
         onPickMonth={m=>{setYm(m);setView('month')}}/>}
       {view==='settle'&&<ScheduleSettlement me={me} onNeedLogin={onNeedLogin} onLogout={onLogout}
-        showToast={showToast}/>}
+        onOpenActual={onOpenActual} showToast={showToast}/>}
 
       {!isSettle&&<div style={{marginTop:14,fontSize:11,color:'#6b7280',display:'flex',gap:14,flexWrap:'wrap'}}>
         <span>🏢 사무실</span><span>🚗 법인차량</span><span>🚙 자차</span><span>🚌 대중교통</span><span>🌴 휴가</span>
@@ -2238,7 +2238,7 @@ function LoginDialog({onClose,onLoggedIn,showToast}){
 
 // 정산 화면 — 월별로 «직원이 회사에 낼 돈» 과 «회사가 직원에게 줄 것» 을 모아 본다.
 // 계산은 서버가 한다(현행 정산기준 문서를 그대로 따른다). 화면은 보여 주고 승인만 요청한다.
-function ScheduleSettlement({me,onNeedLogin,onLogout,showToast}){
+function ScheduleSettlement({me,onNeedLogin,onLogout,onOpenActual,showToast}){
   const [ym,setYm]=useState(()=>{
     // 기본은 «지난달» — 익월 초에 정산하는 현행 규칙에 맞춘다
     const d=new Date(); d.setDate(1); d.setMonth(d.getMonth()-1)
@@ -2340,11 +2340,53 @@ function ScheduleSettlement({me,onNeedLogin,onLogout,showToast}){
 
       {loading&&<div style={{fontSize:12,color:'#6b7280',marginBottom:10}}>불러오는 중…</div>}
 
+      {/* 계획 대비 실적 현황 — 「왜 비어 있는지」를 화면이 설명해야 한다.
+          정산은 «실적» 만 집계한다. 계획은 예정이고 금액 근거가 될 수 없다. */}
+      {data&&(
+        <div style={{background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,
+          padding:'10px 14px',marginBottom:14,fontSize:12,lineHeight:1.8}}>
+          <strong>계획 {data.plan_count ?? 0}건 · 실적 {data.actual_count}건</strong>
+          <span style={{color:'#6b7280',marginLeft:8}}>
+            정산은 실적만 집계합니다 (실제 주행거리·비용).
+          </span>
+          {(data.upcoming_count ?? 0)>0&&(
+            <div style={{color:'#6b7280'}}>
+              예정 {data.upcoming_count}건 — 날짜가 지난 뒤에 실적을 넣습니다.
+            </div>
+          )}
+          {(data.pending?.length ?? 0)>0&&(
+            <div style={{marginTop:8,padding:'8px 10px',background:'#fff7ed',
+              border:'1px solid #fdba74',borderRadius:7,color:'#9a3412'}}>
+              <strong>⚠ 실적을 넣지 않은 지난 일정 {data.pending.length}건</strong>
+              <span style={{marginLeft:6,opacity:.85}}>— 지금 넣을 수 있습니다.</span>
+              <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:8}}>
+                {data.pending.slice(0,12).map(p=>(
+                  <button key={p.id} onClick={()=>onOpenActual&&onOpenActual(p)}
+                    style={{padding:'4px 9px',borderRadius:6,border:'1px solid #fdba74',
+                      background:'#fff',color:'#9a3412',cursor:'pointer',fontSize:11,fontWeight:600}}>
+                    {mdLabel(p.plan_date)} {p.worker_name}
+                    {p.vehicle_name?` · ${p.vehicle_name}`:''}
+                  </button>
+                ))}
+                {data.pending.length>12&&(
+                  <span style={{fontSize:11,alignSelf:'center'}}>외 {data.pending.length-12}건</span>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {data&&data.actual_count===0
         ?<Card title={`${ym} 정산`}>
-          <div style={{fontSize:12,color:'#6b7280'}}>
-            이 달에는 실적이 없습니다. 스케줄에서 <strong>실적을 먼저 기록</strong>해 주십시오 —
-            주행거리·하이패스·주유비가 정산의 근거입니다.
+          <div style={{fontSize:12,color:'#6b7280',lineHeight:1.8}}>
+            {(data.plan_count ?? 0)===0
+              ?<>이 달에는 <strong>계획도 실적도 없습니다.</strong> 스케줄에서 일정을 먼저 등록해 주십시오.</>
+              :(data.pending?.length ?? 0)>0
+                ?<>계획은 있지만 <strong>실적이 아직 없습니다.</strong> 위의 미입력 일정을 눌러
+                  주행거리·하이패스·주유비를 넣으면 이 화면에 금액이 나옵니다.</>
+                :<>이 달 계획은 모두 <strong>아직 오지 않은 일정</strong>입니다.
+                  다녀오신 뒤 실적을 넣으면 정산됩니다.</>}
           </div>
         </Card>
         :data&&(
