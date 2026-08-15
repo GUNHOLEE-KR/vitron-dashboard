@@ -7,7 +7,8 @@ import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/
 import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
 import { getPlaces, addPlace, updatePlace, hidePlace, getVehicles, addVehicle, updateVehicle,
          getPlans, addPlan, updatePlan, removePlan, getActuals, addActual, updateActual,
-         removeActual } from './repositories/scheduleRepo'
+         removeActual, login, logout, whoAmI, getSettlement, approveSettlement,
+         reopenSettlement } from './repositories/scheduleRepo'
 
 const WORK_HOURS=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
 // 정규 근무시간 (09:00 시작 ~ 18:00 종료 → 17:00 행까지 포함) — 입력표에서 노랗게 강조
@@ -52,7 +53,8 @@ const VACATION_TYPES=['연차','병가','포상','기타']
 const PLACE_CATEGORIES=['고객사','기타']
 const SLOTS=[{v:'allday',label:'종일'},{v:'am',label:'오전'},{v:'pm',label:'오후'},{v:'time',label:'시각 지정'}]
 const SLOT_MAP=Object.fromEntries(SLOTS.map(s=>[s.v,s.label]))
-const SCHEDULE_VIEWS=[{v:'month',label:'월'},{v:'week',label:'주'},{v:'day',label:'일'},{v:'year',label:'연'}]
+const SCHEDULE_VIEWS=[{v:'month',label:'월'},{v:'week',label:'주'},{v:'day',label:'일'},
+                      {v:'year',label:'연'},{v:'settle',label:'💰 정산'}]
 // 표 머리글은 데이터 행과 확실히 구분되는 진한 남색으로.
 // 연한 회색(#f9fafb)이던 때는 첫 데이터 행과 같은 색이라 머리글이 붙어 보였다.
 // 오늘 업무 입력표 머리글과 같은 색이라 화면 전체가 일관된다.
@@ -695,6 +697,10 @@ export default function App(){
   const [planDialog,setPlanDialog]=useState(null)   // {editing} | {date} | null
   const [schedFocus,setSchedFocus]=useState('')     // 등록 직후 달력을 옮길 날짜
   const [clipboard,setClipboard]=useState(null)     // 복사한 계획 (달력에서 붙여넣기)
+  // 정산 화면 전용 로그인. 계정·세션을 KPI 추적 시스템과 공유하므로
+  // KPI 에서 이미 로그인했다면 이 화면에서도 그대로 통한다.
+  const [me,setMe]=useState(null)
+  const [loginOpen,setLoginOpen]=useState(false)
 
   // 오늘 기준 재직 중인 직원만 (입사일 이후 + 퇴사 전)
   const td=today()
@@ -763,6 +769,11 @@ export default function App(){
   // 스케줄 탭과 설정 탭(차량 관리)이 같은 데이터를 쓴다
   useEffect(()=>{
     if((tab==='schedule'||tab==='settings')&&places.length===0&&vehicles.length===0) loadSchedule()
+    // 정산 화면에 들어가기 전에 «조용히» 로그인 상태를 확인한다.
+    // 로그인 안 했으면 401 이 아니라 {logged_in:false} 가 오므로 화면이 깜빡이지 않는다.
+    if(tab==='schedule'&&me===null){
+      whoAmI().then(r=>{ if(r?.logged_in) setMe(r) }).catch(()=>{})
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   },[tab])
 
@@ -859,6 +870,9 @@ export default function App(){
           onOpenCell={(d)=>setPlanDialog({editing:null,...d})}
           onOpenActual={p=>setActualDialog({plan:p})}
           actuals={actuals}
+          me={me} onNeedLogin={()=>setLoginOpen(true)}
+          onLogout={async()=>{ try{ await logout() }catch{ /* 이미 만료됐을 수 있다 */ }
+            setMe(null); showToast('로그아웃했습니다') }}
           clipboard={clipboard} onPaste={handlePaste} onCancelCopy={()=>setClipboard(null)}/>}
         {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers} dupNames={dupNames}
           jiraTree={jiraTree} setJiraTree={setJiraTree} showToast={showToast} tokenStatus={tokenStatus}
@@ -875,6 +889,11 @@ export default function App(){
           onCopy={p=>{ setClipboard(p); showToast('복사했습니다 — 달력에서 붙일 칸을 골라 주세요',4000) }}
           onOpenActual={p=>setActualDialog({plan:p})}
           onSaved={async(r={})=>{ await loadSchedule(); if(r.focusDate) setSchedFocus(r.focusDate) }}/>
+      )}
+      {loginOpen&&(
+        <LoginDialog showToast={showToast}
+          onClose={()=>setLoginOpen(false)}
+          onLoggedIn={u=>{ setMe(u); setLoginOpen(false) }}/>
       )}
       {actualDialog&&(
         <ActualDialog plan={actualDialog.plan}
@@ -1440,7 +1459,8 @@ function PlanBadge({plan,workers,onClick,todayStr,compact=false,showWorker=true}
 }
 
 function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,onOpenNew,onOpenPlan,
-                      onOpenCell,onOpenActual,showToast,focusDate,clipboard,onPaste,onCancelCopy}){
+                      onOpenCell,onOpenActual,showToast,focusDate,clipboard,onPaste,onCancelCopy,
+                      me,onNeedLogin,onLogout}){
   // 붙여넣기 모드에서 고른 칸들. 「날짜_직원id」 를 키로 담는다
   // (주 뷰는 사람까지 고를 수 있고, 월·일 뷰는 날짜만 고른다)
   const [picked,setPicked]=useState([])
@@ -1508,6 +1528,7 @@ function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,
     setAnchor(todayStr); setYm(toMonth(todayStr)); setYear(toYear(todayStr))
   }
 
+  const isSettle=view==='settle'
   const periodLabel=view==='month'?`${ym.slice(0,4)}년 ${Number(ym.slice(5,7))}월`
     :view==='week'?`${mdLabel(calWeekDays(anchor)[0])} ~ ${mdLabel(calWeekDays(anchor)[6])}`
     :view==='day'?`${anchor} (${dayName(anchor)})`
@@ -1541,12 +1562,15 @@ function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,
                 background:view===v.v?'#1a56db':'#fff',color:view===v.v?'#fff':'#6b7280'}}>{v.label}</button>
           ))}
         </div>
-        <button onClick={()=>move(-1)} style={navBtn}>◀</button>
-        <strong style={{fontSize:15,minWidth:150,textAlign:'center'}}>{periodLabel}</strong>
-        <button onClick={()=>move(1)} style={navBtn}>▶</button>
-        <button onClick={goToday} style={{...navBtn,color:'#1a56db',borderColor:'#1a56db'}}>오늘</button>
+        {!isSettle&&<>
+          <button onClick={()=>move(-1)} style={navBtn}>◀</button>
+          <strong style={{fontSize:15,minWidth:150,textAlign:'center'}}>{periodLabel}</strong>
+          <button onClick={()=>move(1)} style={navBtn}>▶</button>
+          <button onClick={goToday} style={{...navBtn,color:'#1a56db',borderColor:'#1a56db'}}>오늘</button>
+        </>}
 
         {/* 보기 기준 — 주 뷰에서는 격자의 세로축이 바뀐다 */}
+        {!isSettle&&<>
         <span style={{fontSize:11,color:'#6b7280',marginLeft:6}}>기준</span>
         <div style={{display:'flex',border:'1px solid #e5e7eb',borderRadius:7,overflow:'hidden'}}>
           {GROUP_BYS.map(g=>(
@@ -1574,6 +1598,7 @@ function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,
         <button onClick={onOpenNew}
           style={{padding:'7px 16px',border:'none',borderRadius:7,background:'#1a56db',color:'#fff',
             cursor:'pointer',fontSize:13,fontWeight:700}}>+ 계획 추가</button>
+        </>}
       </div>
 
       {/* 붙여넣기 바 — 복사한 계획이 있을 때만 나온다 */}
@@ -1600,7 +1625,7 @@ function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,
       )}
 
       {/* 안내 — 처음 쓸 때 장소가 없으면 알려 준다 */}
-      {places.length===0&&!pasting&&(
+      {!isSettle&&places.length===0&&!pasting&&(
         <div style={{background:'#fffbeb',border:'1px solid #fcd34d',borderRadius:8,padding:'10px 14px',
           marginBottom:14,fontSize:12,color:'#92400e'}}>
           등록된 장소가 없습니다. 계획을 추가할 때 「새 장소」로 넣으면 거리·시간을 한 번만 입력하고
@@ -1609,7 +1634,7 @@ function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,
       )}
 
       {/* 실적 미입력 안내 — 정산 근거가 비어 있는 것들 */}
-      {!pasting&&pending.length>0&&(
+      {!isSettle&&!pasting&&pending.length>0&&(
         <div style={{background:'#fff7ed',border:'1px solid #fdba74',borderRadius:8,padding:'10px 14px',
           marginBottom:14,fontSize:12,color:'#9a3412'}}>
           <strong>● 실적을 넣지 않은 일정이 {pending.length}건 있습니다</strong>
@@ -1629,7 +1654,7 @@ function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,
       )}
 
       {/* 차량 겹침 경고 */}
-      {vehicleConflicts.length>0&&(
+      {!isSettle&&vehicleConflicts.length>0&&(
         <div style={{background:'#fef2f2',border:'1px solid #fca5a5',borderRadius:8,padding:'10px 14px',
           marginBottom:14,fontSize:12,color:'#991b1b'}}>
           <strong>⚠ 차량 예약이 겹칩니다</strong>
@@ -1656,13 +1681,15 @@ function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,
         rows={groupRows} groupBy={groupBy} sortByGroup={sortByGroup}/>}
       {view==='year'&&<ScheduleYear year={year} plans={shown} workers={workers}
         onPickMonth={m=>{setYm(m);setView('month')}}/>}
+      {view==='settle'&&<ScheduleSettlement me={me} onNeedLogin={onNeedLogin} onLogout={onLogout}
+        showToast={showToast}/>}
 
-      <div style={{marginTop:14,fontSize:11,color:'#6b7280',display:'flex',gap:14,flexWrap:'wrap'}}>
+      {!isSettle&&<div style={{marginTop:14,fontSize:11,color:'#6b7280',display:'flex',gap:14,flexWrap:'wrap'}}>
         <span>🏢 사무실</span><span>🚗 법인차량</span><span>🚙 자차</span><span>🚌 대중교통</span><span>🌴 휴가</span>
         <span style={{color:'#c2410c'}}>● 확인 필요(지난 날짜인데 실적 없음)</span>
         <span>↺ 계획과 달랐음</span>
         <span style={{borderBottom:'1px dashed #6b7280'}}>점선 = 개인 사용</span>
-      </div>
+      </div>}
     </div>
   )
 }
@@ -2146,6 +2173,299 @@ function PlacePicker({places,onPick,onClose,onChanged,showToast}){
           줄을 누르면 그 장소가 선택됩니다. 「숨김」은 목록에서만 감추고 지난 기록은 그대로 남습니다.
         </div>
       </div>
+    </div>
+  )
+}
+
+// 로그인 창 — 정산 화면에만 필요하다.
+// 계정·세션을 KPI 추적 시스템과 공유하므로, KPI 에서 이미 로그인했다면 이 창이 뜨지 않는다.
+function LoginDialog({onClose,onLoggedIn,showToast}){
+  const [id,setId]=useState('')
+  const [pw,setPw]=useState('')
+  const [busy,setBusy]=useState(false)
+  const [err,setErr]=useState('')
+  const inputS={padding:'9px 11px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,width:'100%'}
+
+  async function submit(){
+    if(!id.trim()||!pw){setErr('아이디와 비밀번호를 입력해 주세요.');return}
+    try{
+      setBusy(true); setErr('')
+      const me=await login(id.trim(),pw)
+      showToast(`${me.name} 님으로 로그인했습니다`)
+      onLoggedIn(me)
+    }catch(e){ setErr(e.message) }
+    finally{ setBusy(false) }
+  }
+
+  return(
+    <div onClick={onClose}
+      style={{position:'fixed',inset:0,background:'rgba(17,24,39,.5)',zIndex:9600,
+        display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'80px 16px'}}>
+      <div onClick={e=>e.stopPropagation()}
+        style={{background:'#fff',borderRadius:12,width:'100%',maxWidth:380,padding:24,
+          boxShadow:'0 20px 50px rgba(0,0,0,.3)'}}>
+        <strong style={{fontSize:16,display:'block',marginBottom:6}}>정산 화면 로그인</strong>
+        <div style={{fontSize:12,color:'#6b7280',marginBottom:16}}>
+          KPI 추적 시스템과 <strong>같은 계정</strong>을 씁니다 (회사 메일 주소).
+        </div>
+        <div style={{marginBottom:10}}>
+          <input value={id} onChange={e=>setId(e.target.value)} autoFocus
+            onKeyDown={e=>e.key==='Enter'&&submit()}
+            placeholder="회사 메일 주소" style={inputS}/>
+        </div>
+        <div style={{marginBottom:12}}>
+          <input type="password" value={pw} onChange={e=>setPw(e.target.value)}
+            onKeyDown={e=>e.key==='Enter'&&submit()}
+            placeholder="비밀번호" style={inputS}/>
+        </div>
+        {err&&<div style={{fontSize:12,color:'#b91c1c',marginBottom:12}}>{err}</div>}
+        <div style={{display:'flex',gap:8}}>
+          <button onClick={submit} disabled={busy}
+            style={{flex:1,padding:'11px',borderRadius:8,border:'none',background:'#1a56db',
+              color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
+            {busy?'확인 중…':'로그인'}
+          </button>
+          <button onClick={onClose} style={{padding:'11px 16px',borderRadius:8,
+            border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:14}}>취소</button>
+        </div>
+        <div style={{fontSize:11,color:'#9ca3af',marginTop:12}}>
+          달력과 계획 입력에는 로그인이 필요 없습니다. 금액이 보이는 정산 화면만 막습니다.
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// 정산 화면 — 월별로 «직원이 회사에 낼 돈» 과 «회사가 직원에게 줄 것» 을 모아 본다.
+// 계산은 서버가 한다(현행 정산기준 문서를 그대로 따른다). 화면은 보여 주고 승인만 요청한다.
+function ScheduleSettlement({me,onNeedLogin,onLogout,showToast}){
+  const [ym,setYm]=useState(()=>{
+    // 기본은 «지난달» — 익월 초에 정산하는 현행 규칙에 맞춘다
+    const d=new Date(); d.setDate(1); d.setMonth(d.getMonth()-1)
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`
+  })
+  const [data,setData]=useState(null)
+  const [loading,setLoading]=useState(false)
+  const [busy,setBusy]=useState(false)
+
+  const settled=data?.saved?.some(s=>s.status==='settled')
+  const settledBy=data?.saved?.find(s=>s.settled_by_name)?.settled_by_name
+  const settledAt=data?.saved?.find(s=>s.settled_at)?.settled_at
+
+  async function load(target=ym){
+    setLoading(true)
+    try{ setData(await getSettlement(target)) }
+    catch(e){
+      if(e.status===401){ setData(null); onNeedLogin() }
+      else showToast('정산 조회 실패: '+e.message)
+    }
+    finally{ setLoading(false) }
+  }
+
+  useEffect(()=>{ if(me) load(ym) /* eslint-disable-next-line react-hooks/exhaustive-deps */ },[me,ym])
+
+  async function approve(){
+    if(!confirm(`${ym} 정산을 확정할까요?\n\n· 이 달 금액이 승인 시점 값으로 저장됩니다\n· 이 달 실적은 수정할 수 없게 잠깁니다\n\n정정이 필요하면 나중에 잠금을 해제하고 다시 승인할 수 있습니다.`))return
+    try{ setBusy(true); const r=await approveSettlement(ym)
+      showToast(`정산 확정 — ${r.workers}명 · 실적 ${r.locked}건 잠금`); await load(ym)
+    }catch(e){ showToast('승인 실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
+  async function reopen(){
+    if(!confirm(`${ym} 정산 잠금을 해제할까요?\n\n실적을 다시 고칠 수 있게 되며, 정정 후 다시 승인해야 확정됩니다.`))return
+    try{ setBusy(true); const r=await reopenSettlement(ym)
+      showToast(`잠금 해제 — 실적 ${r.unlocked}건`); await load(ym)
+    }catch(e){ showToast('해제 실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
+  // 로그인 전
+  if(!me){
+    return(
+      <Card title="정산">
+        <div style={{textAlign:'center',padding:'30px 10px'}}>
+          <div style={{fontSize:13,color:'#374151',marginBottom:6}}>
+            정산 화면은 <strong>로그인</strong>이 필요합니다.
+          </div>
+          <div style={{fontSize:12,color:'#6b7280',marginBottom:18}}>
+            금액과 개인 사용 내역이 보이기 때문입니다. 달력·계획 입력은 그대로 쓰실 수 있습니다.
+          </div>
+          <button onClick={onNeedLogin}
+            style={{padding:'10px 22px',borderRadius:8,border:'none',background:'#1a56db',
+              color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>로그인</button>
+        </div>
+      </Card>
+    )
+  }
+
+  const won=(n)=>Number(n||0).toLocaleString()
+  const money=(n)=>n?`${won(n)}원`:'-'
+
+  // 월 선택지 — 올해와 지난해
+  const months=[]
+  const now=new Date()
+  for(let y=now.getFullYear();y>=now.getFullYear()-1;y--){
+    for(let m=12;m>=1;m--) months.push(`${y}-${String(m).padStart(2,'0')}`)
+  }
+
+  const chargeTotal=(data?.workers||[]).reduce((s,w)=>s+w.charge_total,0)
+  const literTotal=(data?.workers||[]).reduce((s,w)=>s+w.own_car_liter,0)
+  const transitTotal=(data?.workers||[]).reduce((s,w)=>s+w.transit_amount,0)
+
+  return(
+    <div>
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'12px 16px',
+        marginBottom:16,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+        <select value={ym} onChange={e=>setYm(e.target.value)}
+          style={{padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}>
+          {months.map(m=><option key={m} value={m}>{m.slice(0,4)}년 {Number(m.slice(5,7))}월</option>)}
+        </select>
+        {settled
+          ?<span style={{fontSize:12,fontWeight:700,color:'#065f46',background:'#ecfdf5',
+            border:'1px solid #6ee7b7',borderRadius:20,padding:'4px 12px'}}>
+            정산 완료{settledBy?` · ${settledBy}`:''}
+            {settledAt?` · ${String(settledAt).slice(0,10)}`:''}
+          </span>
+          :<span style={{fontSize:12,fontWeight:700,color:'#9a3412',background:'#fff7ed',
+            border:'1px solid #fdba74',borderRadius:20,padding:'4px 12px'}}>미정산</span>}
+        <div style={{flex:1}}/>
+        <span style={{fontSize:12,color:'#6b7280'}}>
+          {me.name} ({me.role}{me.can_approve?' · 승인 권한':''})
+        </span>
+        <button onClick={onLogout}
+          style={{padding:'6px 12px',borderRadius:7,border:'1px solid #e5e7eb',background:'#fff',
+            color:'#6b7280',cursor:'pointer',fontSize:12}}>로그아웃</button>
+      </div>
+
+      {loading&&<div style={{fontSize:12,color:'#6b7280',marginBottom:10}}>불러오는 중…</div>}
+
+      {data&&data.actual_count===0
+        ?<Card title={`${ym} 정산`}>
+          <div style={{fontSize:12,color:'#6b7280'}}>
+            이 달에는 실적이 없습니다. 스케줄에서 <strong>실적을 먼저 기록</strong>해 주십시오 —
+            주행거리·하이패스·주유비가 정산의 근거입니다.
+          </div>
+        </Card>
+        :data&&(
+        <>
+          <Metrics items={[
+            {label:'회사에 입금 (개인 사용)',value:won(chargeTotal),unit:'원',color:'#b45309'},
+            {label:'주유 환급',value:Math.round(literTotal*100)/100,unit:'L',color:'#047857'},
+            {label:'대중교통 실비',value:won(transitTotal),unit:'원'},
+            {label:'실적',value:data.actual_count,unit:'건'},
+          ]}/>
+
+          <Card title="사람별">
+            <div style={{overflowX:'auto'}}>
+              <table style={{width:'100%',borderCollapse:'collapse',minWidth:760}}>
+                <thead><tr>
+                  <th style={{...thS,textAlign:'left'}}>직원</th>
+                  <th style={thS}>개인 사용</th>
+                  <th style={thS}>단가 적용</th>
+                  <th style={thS}>하이패스</th>
+                  <th style={thS}>입금액</th>
+                  <th style={thS}>자차 업무</th>
+                  <th style={thS}>환급</th>
+                  <th style={thS}>대중교통</th>
+                </tr></thead>
+                <tbody>
+                  {data.workers.map(w=>(
+                    <tr key={w.worker_id}>
+                      <td style={{...tdS,textAlign:'left',fontWeight:700}}>
+                        {w.worker_name}
+                        {w.team&&<div style={{fontSize:10,color:'#6b7280',fontWeight:500}}>{w.team}</div>}
+                      </td>
+                      <td style={tdS}>{w.personal_km?`${w.personal_km}km`:'-'}</td>
+                      <td style={tdS}>{money(w.personal_amount)}</td>
+                      <td style={tdS}>{money(w.toll_amount)}</td>
+                      <td style={{...tdS,fontWeight:700,color:w.charge_total?'#b45309':'#9ca3af'}}>
+                        {money(w.charge_total)}
+                      </td>
+                      <td style={tdS}>{w.own_car_km?`${w.own_car_km}km`:'-'}</td>
+                      <td style={{...tdS,fontWeight:700,color:w.own_car_liter?'#047857':'#9ca3af'}}>
+                        {w.own_car_liter?`${w.own_car_liter}L`:'-'}
+                        {w.own_car_missing_efficiency&&
+                          <div style={{fontSize:10,color:'#c2410c',fontWeight:600}}>연비 미입력</div>}
+                      </td>
+                      <td style={tdS}>{money(w.transit_amount)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{marginTop:10,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
+              💡 <strong>입금액</strong> = 개인 사용 거리 × 차량 단가 + 하이패스 — 직원이 회사 계좌로 입금합니다.<br/>
+              💡 <strong>환급</strong> = 자차 업무 거리 ÷ 그 차의 연비 — 금액이 아니라 <strong>주유 한도(리터)</strong>로 지급합니다.
+            </div>
+          </Card>
+
+          <Card title="차량별">
+            <table style={{width:'100%',borderCollapse:'collapse'}}>
+              <thead><tr>
+                <th style={{...thS,textAlign:'left'}}>차량</th>
+                <th style={thS}>총 주행</th>
+                <th style={thS}>업무</th>
+                <th style={thS}>개인</th>
+                <th style={thS}>하이패스</th>
+                <th style={thS}>주유·충전</th>
+              </tr></thead>
+              <tbody>
+                {data.vehicles.length===0
+                  ?<tr><td colSpan={6} style={{...tdS,color:'#6b7280'}}>차량 사용 기록이 없습니다.</td></tr>
+                  :data.vehicles.map(v=>(
+                    <tr key={v.vehicle_id}>
+                      <td style={{...tdS,textAlign:'left',fontWeight:600}}>
+                        {v.name}
+                        <div style={{fontSize:10,color:'#6b7280'}}>
+                          {v.plate||''} {v.kind==='own'?'· 자차':''}
+                        </div>
+                      </td>
+                      <td style={tdS}>{v.total_km}km</td>
+                      <td style={tdS}>{v.business_km?`${v.business_km}km`:'-'}</td>
+                      <td style={tdS}>{v.personal_km?`${v.personal_km}km`:'-'}</td>
+                      <td style={tdS}>{money(v.toll_amount)}</td>
+                      <td style={tdS}>{money(v.fuel_amount)}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </Card>
+
+          <Card title="정산 확정">
+            {data.can_approve
+              ?<div>
+                <div style={{fontSize:12,color:'#374151',marginBottom:12,lineHeight:1.7}}>
+                  확정하면 이 달 금액이 <strong>승인 시점 값으로 저장</strong>되고 실적이 잠깁니다.
+                  나중에 단가나 연비가 바뀌어도 지난 정산액은 흔들리지 않습니다.
+                </div>
+                <div style={{display:'flex',gap:8}}>
+                  {!settled
+                    ?<button onClick={approve} disabled={busy}
+                      style={{padding:'11px 22px',borderRadius:8,border:'none',background:'#059669',
+                        color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
+                      {busy?'처리 중…':`${ym} 정산 확정`}
+                    </button>
+                    :<button onClick={reopen} disabled={busy}
+                      style={{padding:'11px 22px',borderRadius:8,border:'1px solid #fca5a5',
+                        background:'#fff',color:'#dc2626',cursor:'pointer',fontSize:14,fontWeight:700}}>
+                      {busy?'처리 중…':'잠금 해제 (정정)'}
+                    </button>}
+                </div>
+              </div>
+              :<div style={{fontSize:12,color:'#6b7280',lineHeight:1.7}}>
+                정산 확정은 <strong>대표이사만</strong> 할 수 있습니다.
+                {settled
+                  ?<div style={{color:'#065f46',marginTop:6}}>이 달은 이미 정산이 완료되었습니다.</div>
+                  :<div style={{marginTop:6}}>확정 전이므로 금액이 바뀔 수 있습니다.</div>}
+              </div>}
+            <div style={{marginTop:14,paddingTop:12,borderTop:'1px solid #e5e7eb',fontSize:11,color:'#6b7280',lineHeight:1.8}}>
+              <strong>입금 계좌</strong> — 기업은행 456-010313-04-011 (주) 바이트론 이앤에스<br/>
+              정산 주기는 매월 1회(익월 초)입니다.
+            </div>
+          </Card>
+        </>
+      )}
     </div>
   )
 }

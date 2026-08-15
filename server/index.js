@@ -898,6 +898,324 @@ app.delete('/api/schedule/actuals/:id', async (req, res) => {
   }
 })
 
+// ─── 로그인 (정산 화면 전용) ──────────────────────────────────
+// 달력·계획 입력에는 로그인이 없다. 금액과 개인 사용 내역이 보이는 «정산 화면» 만 막는다.
+//
+// ⚠ 계정과 세션을 KPI 추적 시스템(:8083)과 «그대로 공유» 한다.
+//    - 계정: kpi_users (같은 DB). 새로 만들면 두 벌이 되어 반드시 어긋난다
+//    - 세션: 같은 SESSION_SECRET + 같은 쿠키 이름 → KPI 에서 로그인하면 여기서도 통한다
+//    그래서 해시 검증·토큰 형식을 KPI 구현과 «똑같이» 맞춰야 한다. 임의로 바꾸면
+//    한쪽에서 만든 쿠키를 다른 쪽이 읽지 못한다.
+const crypto = require('crypto')
+const SESSION_COOKIE = 'kpi_session'
+const SESSION_HOURS = 12
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex')
+if (!process.env.SESSION_SECRET) {
+  console.warn('경고: SESSION_SECRET 이 없어 임시 값을 씁니다. KPI 로그인이 이 서버에서 통하지 않습니다.')
+}
+
+// 저장 형식: scrypt$<salt hex>$<key hex>  (KPI 와 동일)
+function verifyPassword(plain, stored) {
+  const [algo, saltHex, keyHex] = String(stored || '').split('$')
+  if (algo !== 'scrypt' || !saltHex || !keyHex) return false
+  const expected = Buffer.from(keyHex, 'hex')
+  const actual = crypto.scryptSync(plain, Buffer.from(saltHex, 'hex'), expected.length)
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected)
+}
+
+function readToken(token) {
+  const [body, sig] = String(token || '').split('.')
+  if (!body || !sig) return null
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(body).digest('base64url')
+  if (sig.length !== expected.length) return null
+  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null
+  try {
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString())
+    return payload.exp > Date.now() ? payload : null
+  } catch { return null }
+}
+
+function makeToken(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url')
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(body).digest('base64url')
+  return `${body}.${sig}`
+}
+
+function readCookie(req, name) {
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const [key, ...rest] = part.trim().split('=')
+    if (key === name) return decodeURIComponent(rest.join('='))
+  }
+  return null
+}
+
+function sessionOf(req) { return readToken(readCookie(req, SESSION_COOKIE)) }
+
+function requireLogin(req, res, next) {
+  const session = sessionOf(req)
+  if (!session) return res.status(401).json({ error: '로그인이 필요합니다.' })
+  req.session = session
+  next()
+}
+
+// 정산 승인 권한. kpi_users.role 에 새 등급을 만들지 않고 «허가» 컬럼으로 둔 이유는
+// 이 표를 KPI 와 함께 쓰기 때문이다 — KPI 가 모르는 role 값이 들어가면 그 계정이
+// 권한 없는 사용자로 취급될 수 있다(설계서 4.2절).
+async function canApprove(uid) {
+  const { rows } = await pool.query(
+    'SELECT can_approve_settlement FROM kpi_users WHERE id = $1 AND active', [uid])
+  return !!rows[0]?.can_approve_settlement
+}
+
+app.post('/api/auth/login', async (req, res) => {
+  const loginId = String(req.body?.login_id || '').trim().toLowerCase()
+  const password = String(req.body?.password || '')
+  if (!loginId || !password) {
+    return res.status(400).json({ error: '아이디와 비밀번호를 입력해 주세요.' })
+  }
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM kpi_users WHERE lower(login_id) = $1 AND active', [loginId])
+    const user = rows[0]
+    // 아이디가 없는 것과 비밀번호가 틀린 것을 구분해 알리지 않는다(계정 탐색 방지).
+    if (!user || !verifyPassword(password, user.password_hash)) {
+      return res.status(401).json({ error: '아이디 또는 비밀번호가 올바르지 않습니다.' })
+    }
+    const payload = {
+      uid: user.id, login: user.login_id, name: user.display_name,
+      role: user.role, workerId: user.worker_id,
+      mustChange: user.must_change_password,
+      exp: Date.now() + SESSION_HOURS * 3600 * 1000
+    }
+    // Secure 는 붙이지 않는다 — 사내망 http 라 붙이면 쿠키가 저장되지 않는다.
+    res.setHeader('Set-Cookie',
+      `${SESSION_COOKIE}=${makeToken(payload)}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_HOURS * 3600}`)
+    await pool.query('UPDATE kpi_users SET last_login_at = now() WHERE id = $1', [user.id])
+    res.json({
+      login_id: user.login_id, name: user.display_name, role: user.role,
+      worker_id: user.worker_id, must_change_password: user.must_change_password,
+      can_approve: await canApprove(user.id),
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/auth/logout', (req, res) => {
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`)
+  res.json({ ok: true })
+})
+
+// 화면이 «지금 로그인 상태인가» 를 물어보는 곳. 로그인 안 했으면 401 이 아니라
+// {logged_in:false} 를 준다 — 정산 화면에 들어가기 전에 조용히 확인해야 하기 때문이다.
+app.get('/api/auth/me', async (req, res) => {
+  const session = sessionOf(req)
+  if (!session) return res.json({ logged_in: false })
+  try {
+    res.json({
+      logged_in: true, login_id: session.login, name: session.name,
+      role: session.role, worker_id: session.workerId,
+      must_change_password: session.mustChange,
+      can_approve: await canApprove(session.uid),
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ─── 정산 ────────────────────────────────────────────────────
+// 실적을 월별로 모아 «직원이 회사에 낼 돈» 과 «회사가 직원에게 줄 것» 을 계산한다.
+//   직원 → 회사 : 법인차 개인 사용 = 주행거리 × 차량 단가 + 하이패스
+//   회사 → 직원 : 자차 업무 주행 = 거리 ÷ 연비 = 주유 한도(리터) / 대중교통 실비
+// 계산식은 현행 정산기준 문서를 그대로 따른다(설계서 3장).
+
+function ymRange(ym) {
+  const [y, m] = String(ym).split('-').map(Number)
+  const last = new Date(y, m, 0).getDate()
+  return [`${ym}-01`, `${ym}-${String(last).padStart(2, '0')}`]
+}
+
+async function buildSettlement(ym) {
+  const [from, to] = ymRange(ym)
+  const { rows } = await pool.query(
+    `SELECT a.*, w.name AS worker_name, w.team AS worker_team,
+            v.kind AS vehicle_kind, v.name AS vehicle_name, v.plate AS vehicle_plate,
+            v.rate_per_km, v.km_per_liter
+       FROM schedule_actuals a
+       LEFT JOIN workers w           ON w.id = a.worker_id
+       LEFT JOIN schedule_vehicles v ON v.id = a.vehicle_id
+      WHERE a.work_date >= $1 AND a.work_date <= $2
+      ORDER BY a.work_date ASC`, [from, to])
+
+  const byWorker = new Map()
+  const byVehicle = new Map()
+
+  for (const r of rows) {
+    const km = Number(r.distance_km || 0)
+    // ── 사람별 ──
+    if (!byWorker.has(r.worker_id)) {
+      byWorker.set(r.worker_id, {
+        worker_id: r.worker_id, worker_name: r.worker_name, team: r.worker_team,
+        personal_km: 0, personal_amount: 0, toll_amount: 0,
+        own_car_km: 0, own_car_liter: 0, own_car_missing_efficiency: false,
+        transit_amount: 0, business_km: 0, fuel_amount: 0, rows: [],
+      })
+    }
+    const w = byWorker.get(r.worker_id)
+    if (r.use_type === 'personal') {
+      w.personal_km += km
+      // 단가가 없으면 청구액을 0 으로 두고 «단가 없음» 을 화면에서 알린다
+      w.personal_amount += Math.round(km * Number(r.rate_per_km || 0))
+      w.toll_amount += Number(r.toll_fee || 0)
+    } else if (r.use_type === 'business') {
+      w.business_km += km
+      w.fuel_amount += Number(r.fuel_fee || 0)
+      w.transit_amount += Number(r.transit_fee || 0)
+      if (r.vehicle_kind === 'own') {
+        w.own_car_km += km
+        if (r.km_per_liter) w.own_car_liter += km / Number(r.km_per_liter)
+        else if (km > 0) w.own_car_missing_efficiency = true
+      }
+    }
+    w.rows.push({
+      id: r.id, work_date: r.work_date, use_type: r.use_type,
+      distance_km: km, toll_fee: r.toll_fee, fuel_fee: r.fuel_fee,
+      transit_fee: r.transit_fee, vehicle_name: r.vehicle_name,
+      vehicle_kind: r.vehicle_kind, memo: r.memo, locked: r.locked,
+    })
+
+    // ── 차량별 ──
+    if (r.vehicle_id) {
+      if (!byVehicle.has(r.vehicle_id)) {
+        byVehicle.set(r.vehicle_id, {
+          vehicle_id: r.vehicle_id, name: r.vehicle_name, plate: r.vehicle_plate,
+          kind: r.vehicle_kind, total_km: 0, business_km: 0, personal_km: 0,
+          toll_amount: 0, fuel_amount: 0,
+        })
+      }
+      const v = byVehicle.get(r.vehicle_id)
+      v.total_km += km
+      if (r.use_type === 'personal') v.personal_km += km
+      else v.business_km += km
+      v.toll_amount += Number(r.toll_fee || 0)
+      v.fuel_amount += Number(r.fuel_fee || 0)
+    }
+  }
+
+  const workers = [...byWorker.values()].map(w => ({
+    ...w,
+    personal_km: Math.round(w.personal_km * 10) / 10,
+    business_km: Math.round(w.business_km * 10) / 10,
+    own_car_km: Math.round(w.own_car_km * 10) / 10,
+    own_car_liter: Math.round(w.own_car_liter * 100) / 100,
+    // 회사에 낼 돈 = 개인 사용 거리 × 단가 + 하이패스
+    charge_total: w.personal_amount + w.toll_amount,
+  })).sort((a, b) => String(a.worker_name).localeCompare(String(b.worker_name), 'ko'))
+
+  return {
+    ym, from, to,
+    workers,
+    vehicles: [...byVehicle.values()].map(v => ({
+      ...v,
+      total_km: Math.round(v.total_km * 10) / 10,
+      business_km: Math.round(v.business_km * 10) / 10,
+      personal_km: Math.round(v.personal_km * 10) / 10,
+    })),
+    actual_count: rows.length,
+  }
+}
+
+app.get('/api/schedule/settlement', requireLogin, async (req, res) => {
+  const ym = String(req.query.ym || '')
+  if (!/^\d{4}-\d{2}$/.test(ym)) return res.status(400).json({ error: 'ym 은 YYYY-MM 형식이어야 합니다.' })
+  try {
+    const calc = await buildSettlement(ym)
+    // 저장된 정산 상태(승인 여부·승인 시점 금액)를 함께 준다
+    const { rows: saved } = await pool.query(
+      `SELECT s.*, u.display_name AS settled_by_name
+         FROM schedule_settlements s
+         LEFT JOIN kpi_users u ON u.id = s.settled_by
+        WHERE s.ym = $1`, [ym])
+    res.json({
+      ...calc,
+      saved,
+      can_approve: await canApprove(req.session.uid),
+      me: { worker_id: req.session.workerId, name: req.session.name, role: req.session.role },
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 정산 확정 — 대표이사만. 그 달 금액을 «승인 시점 값으로 박아» 두고 실적을 잠근다.
+// 나중에 단가나 연비가 바뀌어도 지난 정산액이 흔들리지 않게 하려는 것이다.
+app.post('/api/schedule/settlement/:ym/approve', requireLogin, async (req, res) => {
+  const ym = req.params.ym
+  if (!/^\d{4}-\d{2}$/.test(ym)) return res.status(400).json({ error: 'ym 형식이 올바르지 않습니다.' })
+  if (!await canApprove(req.session.uid)) {
+    return res.status(403).json({ error: '정산 승인 권한이 없습니다. 대표이사만 승인할 수 있습니다.' })
+  }
+  const client = await pool.connect()
+  try {
+    const calc = await buildSettlement(ym)
+    await client.query('BEGIN')
+    for (const w of calc.workers) {
+      await client.query(
+        `INSERT INTO schedule_settlements
+           (ym, worker_id, personal_km, personal_amount, toll_amount,
+            own_car_km, own_car_liter, transit_amount, status, settled_by, settled_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'settled',$9,now())
+         ON CONFLICT (ym, worker_id) DO UPDATE
+         SET personal_km=EXCLUDED.personal_km, personal_amount=EXCLUDED.personal_amount,
+             toll_amount=EXCLUDED.toll_amount, own_car_km=EXCLUDED.own_car_km,
+             own_car_liter=EXCLUDED.own_car_liter, transit_amount=EXCLUDED.transit_amount,
+             status='settled', settled_by=EXCLUDED.settled_by, settled_at=now(),
+             updated_at=now()`,
+        [ym, w.worker_id, w.personal_km, w.personal_amount, w.toll_amount,
+         w.own_car_km, w.own_car_liter, w.transit_amount, req.session.uid])
+    }
+    // 그 달 실적을 잠근다 — 승인 금액과 근거가 어긋나지 않게 한다
+    const [from, to] = ymRange(ym)
+    const { rowCount } = await client.query(
+      'UPDATE schedule_actuals SET locked = TRUE WHERE work_date >= $1 AND work_date <= $2',
+      [from, to])
+    await client.query('COMMIT')
+    res.json({ ok: true, workers: calc.workers.length, locked: rowCount })
+  } catch (e) {
+    await client.query('ROLLBACK')
+    res.status(500).json({ error: e.message })
+  } finally {
+    client.release()
+  }
+})
+
+// 잠금 해제 — 정정이 필요할 때. 대표이사만. 다시 승인해야 확정된다.
+app.post('/api/schedule/settlement/:ym/reopen', requireLogin, async (req, res) => {
+  const ym = req.params.ym
+  if (!/^\d{4}-\d{2}$/.test(ym)) return res.status(400).json({ error: 'ym 형식이 올바르지 않습니다.' })
+  if (!await canApprove(req.session.uid)) {
+    return res.status(403).json({ error: '잠금 해제 권한이 없습니다. 대표이사만 할 수 있습니다.' })
+  }
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query(
+      `UPDATE schedule_settlements SET status='open', settled_by=NULL, settled_at=NULL,
+              updated_at=now() WHERE ym = $1`, [ym])
+    const [from, to] = ymRange(ym)
+    const { rowCount } = await client.query(
+      'UPDATE schedule_actuals SET locked = FALSE WHERE work_date >= $1 AND work_date <= $2',
+      [from, to])
+    await client.query('COMMIT')
+    res.json({ ok: true, unlocked: rowCount })
+  } catch (e) {
+    await client.query('ROLLBACK')
+    res.status(500).json({ error: e.message })
+  } finally {
+    client.release()
+  }
+})
+
 // ─── 헬스체크 ────────────────────────────────────────────────
 
 app.get('/api/health', async (req, res) => {

@@ -52,6 +52,37 @@ export const addPlan = (plan) => request('POST', '/plans', plan)
 export const updatePlan = (id, patch) => request('PATCH', `/plans/${id}`, patch)
 export const removePlan = (id) => request('DELETE', `/plans/${id}`)
 
+// ── 로그인 (정산 화면 전용) ──
+// 계정·세션을 KPI 추적 시스템과 공유한다 — KPI 에서 로그인했으면 여기서도 통한다.
+// credentials:'include' 가 없으면 쿠키가 실려 가지 않는다.
+async function authRequest(method, path, body) {
+  const res = await fetch('/api' + path, {
+    method,
+    credentials: 'include',
+    headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  const text = await res.text()
+  let data = null
+  try { data = text ? JSON.parse(text) : null } catch { /* JSON 이 아니면 원문 */ }
+  if (!res.ok) {
+    const err = new Error(data?.error || text || `요청 실패 (HTTP ${res.status})`)
+    err.status = res.status
+    throw err
+  }
+  return data
+}
+
+export const login = (loginId, password) =>
+  authRequest('POST', '/auth/login', { login_id: loginId, password })
+export const logout = () => authRequest('POST', '/auth/logout')
+export const whoAmI = () => authRequest('GET', '/auth/me')
+
+// ── 정산 ──
+export const getSettlement = (ym) => authRequest('GET', `/schedule/settlement?ym=${ym}`)
+export const approveSettlement = (ym) => authRequest('POST', `/schedule/settlement/${ym}/approve`)
+export const reopenSettlement = (ym) => authRequest('POST', `/schedule/settlement/${ym}/reopen`)
+
 // ── 실적 ──
 export function getActuals(from, to, workerId) {
   const q = new URLSearchParams({ from, to })
