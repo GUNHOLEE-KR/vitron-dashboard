@@ -6,7 +6,8 @@ import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
 import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
 import { getPlaces, addPlace, updatePlace, hidePlace, getVehicles, addVehicle, updateVehicle,
-         getPlans, addPlan, updatePlan, removePlan, getActuals, addActual } from './repositories/scheduleRepo'
+         getPlans, addPlan, updatePlan, removePlan, getActuals, addActual, updateActual,
+         removeActual } from './repositories/scheduleRepo'
 
 const WORK_HOURS=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
 // 정규 근무시간 (09:00 시작 ~ 18:00 종료 → 17:00 행까지 포함) — 입력표에서 노랗게 강조
@@ -688,6 +689,8 @@ export default function App(){
   const [places,setPlaces]=useState([])
   const [vehicles,setVehicles]=useState([])
   const [plans,setPlans]=useState([])
+  const [actuals,setActuals]=useState([])
+  const [actualDialog,setActualDialog]=useState(null)   // {plan} — 실적 입력 창
   const [schedLoading,setSchedLoading]=useState(false)
   const [planDialog,setPlanDialog]=useState(null)   // {editing} | {date} | null
   const [schedFocus,setSchedFocus]=useState('')     // 등록 직후 달력을 옮길 날짜
@@ -748,10 +751,11 @@ export default function App(){
     setSchedLoading(true)
     try{
       const y=toYear(today())
-      const [pl,vh,pn]=await Promise.all([
-        getPlaces(), getVehicles(), getPlans(`${y-1}-01-01`,`${y+1}-12-31`)
+      const [pl,vh,pn,ac]=await Promise.all([
+        getPlaces(), getVehicles(), getPlans(`${y-1}-01-01`,`${y+1}-12-31`),
+        getActuals(`${y-1}-01-01`,`${y+1}-12-31`)
       ])
-      setPlaces(pl); setVehicles(vh); setPlans(pn)
+      setPlaces(pl); setVehicles(vh); setPlans(pn); setActuals(ac)
     }catch(e){ showToast('스케줄 조회 실패: '+e.message) }
     finally{ setSchedLoading(false) }
   }
@@ -853,6 +857,8 @@ export default function App(){
           onOpenNew={()=>setPlanDialog({editing:null,date:today()})}
           onOpenPlan={p=>setPlanDialog({editing:p})}
           onOpenCell={(d)=>setPlanDialog({editing:null,...d})}
+          onOpenActual={p=>setActualDialog({plan:p})}
+          actuals={actuals}
           clipboard={clipboard} onPaste={handlePaste} onCancelCopy={()=>setClipboard(null)}/>}
         {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers} dupNames={dupNames}
           jiraTree={jiraTree} setJiraTree={setJiraTree} showToast={showToast} tokenStatus={tokenStatus}
@@ -867,6 +873,14 @@ export default function App(){
           places={places} vehicles={vehicles} showToast={showToast}
           onClose={()=>setPlanDialog(null)}
           onCopy={p=>{ setClipboard(p); showToast('복사했습니다 — 달력에서 붙일 칸을 골라 주세요',4000) }}
+          onOpenActual={p=>setActualDialog({plan:p})}
+          onSaved={async(r={})=>{ await loadSchedule(); if(r.focusDate) setSchedFocus(r.focusDate) }}/>
+      )}
+      {actualDialog&&(
+        <ActualDialog plan={actualDialog.plan}
+          actual={actuals.find(a=>a.plan_id===actualDialog.plan.id)||null}
+          places={places} vehicles={vehicles} showToast={showToast}
+          onClose={()=>setActualDialog(null)}
           onSaved={async(r={})=>{ await loadSchedule(); if(r.focusDate) setSchedFocus(r.focusDate) }}/>
       )}
       {toast&&(
@@ -1425,8 +1439,8 @@ function PlanBadge({plan,workers,onClick,todayStr,compact=false,showWorker=true}
   )
 }
 
-function TabSchedule({workers,places,vehicles,plans,loading,onReload,onOpenNew,onOpenPlan,onOpenCell,
-                      showToast,focusDate,clipboard,onPaste,onCancelCopy}){
+function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,onOpenNew,onOpenPlan,
+                      onOpenCell,onOpenActual,showToast,focusDate,clipboard,onPaste,onCancelCopy}){
   // 붙여넣기 모드에서 고른 칸들. 「날짜_직원id」 를 키로 담는다
   // (주 뷰는 사람까지 고를 수 있고, 월·일 뷰는 날짜만 고른다)
   const [picked,setPicked]=useState([])
@@ -1475,6 +1489,10 @@ function TabSchedule({workers,places,vehicles,plans,loading,onReload,onOpenNew,o
                            String(a.slot).localeCompare(String(b.slot))
   const byDate=(d)=>shown.filter(p=>p.plan_date===d).sort(sortByGroup)
   const groupRows=buildGroupRows(groupBy,workers,places,vehicles,shown)
+
+  // 지난 날짜인데 실적이 없는 계획 — 정산 근거가 비어 있는 것들이라 눈에 띄게 모아 준다
+  const pending=shown.filter(p=>planState(p,todayStr)==='needCheck')
+    .sort((a,b)=>a.plan_date.localeCompare(b.plan_date))
 
   const selS={padding:'6px 8px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:12,background:'#fff'}
   const navBtn={padding:'6px 12px',border:'1px solid #e5e7eb',borderRadius:7,background:'#fff',
@@ -1590,6 +1608,26 @@ function TabSchedule({workers,places,vehicles,plans,loading,onReload,onOpenNew,o
         </div>
       )}
 
+      {/* 실적 미입력 안내 — 정산 근거가 비어 있는 것들 */}
+      {!pasting&&pending.length>0&&(
+        <div style={{background:'#fff7ed',border:'1px solid #fdba74',borderRadius:8,padding:'10px 14px',
+          marginBottom:14,fontSize:12,color:'#9a3412'}}>
+          <strong>● 실적을 넣지 않은 일정이 {pending.length}건 있습니다</strong>
+          <span style={{marginLeft:6,opacity:.85}}>— 주행거리·비용이 비어 있으면 정산할 수 없습니다.</span>
+          <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:8}}>
+            {pending.slice(0,12).map(p=>(
+              <button key={p.id} onClick={()=>onOpenActual(p)}
+                style={{padding:'4px 9px',borderRadius:6,border:'1px solid #fdba74',background:'#fff',
+                  color:'#9a3412',cursor:'pointer',fontSize:11,fontWeight:600}}>
+                {mdLabel(p.plan_date)} {p.worker_name}
+                {p.vehicle_name?` · ${p.vehicle_name}`:''}
+              </button>
+            ))}
+            {pending.length>12&&<span style={{fontSize:11,alignSelf:'center'}}>외 {pending.length-12}건</span>}
+          </div>
+        </div>
+      )}
+
       {/* 차량 겹침 경고 */}
       {vehicleConflicts.length>0&&(
         <div style={{background:'#fef2f2',border:'1px solid #fca5a5',borderRadius:8,padding:'10px 14px',
@@ -1614,7 +1652,7 @@ function TabSchedule({workers,places,vehicles,plans,loading,onReload,onOpenNew,o
         pasting={pasting} isPicked={isPicked} togglePick={togglePick}
         rows={groupRows} groupBy={groupBy} sortByGroup={sortByGroup}/>}
       {view==='day'&&<ScheduleDay date={anchor} byDate={byDate} workers={workers} vehicles={vehicles}
-        todayStr={todayStr} onOpenPlan={onOpenPlan} onOpenCell={onOpenCell}
+        todayStr={todayStr} onOpenPlan={onOpenPlan} onOpenCell={onOpenCell} onOpenActual={onOpenActual}
         rows={groupRows} groupBy={groupBy} sortByGroup={sortByGroup}/>}
       {view==='year'&&<ScheduleYear year={year} plans={shown} workers={workers}
         onPickMonth={m=>{setYm(m);setView('month')}}/>}
@@ -1766,7 +1804,7 @@ function ScheduleWeek({anchor,shown,workers,todayStr,onOpenPlan,onOpenCell,
 
 // 일 뷰 — 그날 일정을 «고른 기준» 으로 묶어 보여 준다 + 차량 배정.
 // 한 표에 섞어 놓으면 여러 사람이 등록했을 때 누가 무엇인지 읽기 어렵다.
-function ScheduleDay({date,byDate,workers,vehicles,todayStr,onOpenPlan,onOpenCell,
+function ScheduleDay({date,byDate,workers,vehicles,todayStr,onOpenPlan,onOpenCell,onOpenActual,
                       rows,groupBy,sortByGroup}){
   const list=byDate(date)
   const noPlan=workers.filter(w=>!list.some(p=>p.worker_id===w.id))
@@ -1829,6 +1867,22 @@ function ScheduleDay({date,byDate,workers,vehicles,todayStr,onOpenPlan,onOpenCel
                           {vacation?'-':`${tp.icon} ${p.vehicle_name||tp.label}`}
                         </td>
                         <td style={{...tdS,width:64}}>{dist!=null?`${dist}km`:'-'}</td>
+                        <td style={{...tdS,width:96}} onClick={e=>e.stopPropagation()}>
+                          {p.actual_id
+                            ?<button onClick={()=>onOpenActual(p)}
+                              style={{padding:'3px 8px',borderRadius:6,border:'1px solid #059669',
+                                background:'#ecfdf5',color:'#059669',cursor:'pointer',fontSize:11,fontWeight:700}}>
+                              {p.actual_distance_km!=null?`${p.actual_distance_km}km`:'완료'}
+                              {p.as_planned===false?' ↺':''}
+                            </button>
+                            :<button onClick={()=>onOpenActual(p)}
+                              style={{padding:'3px 8px',borderRadius:6,
+                                border:'1px solid '+(p.plan_date<todayStr?'#fdba74':'#e5e7eb'),
+                                background:'#fff',color:p.plan_date<todayStr?'#9a3412':'#6b7280',
+                                cursor:'pointer',fontSize:11,fontWeight:600}}>
+                              실적 입력
+                            </button>}
+                        </td>
                       </tr>
                     )
                   })}
@@ -2096,6 +2150,206 @@ function PlacePicker({places,onPick,onClose,onChanged,showToast}){
   )
 }
 
+// 실적 입력 창.
+// 계획이 실제로 어땠는지 적는다. 여기에 적은 «주행거리·하이패스·주유·대중교통비» 가
+// 월 정산의 근거가 된다(설계서 3장).
+//   plan     대상 계획 (plan.actual_id 가 있으면 이미 실적이 있는 것)
+//   actual   기존 실적 (없으면 새로 만든다)
+function ActualDialog({plan,actual,places,vehicles,onClose,onSaved,showToast}){
+  const isNew=!actual
+  // 계획 거리를 기본값으로 채운다. 왕복이면 2배가 실제 주행거리다.
+  const planned=plan.est_distance_km!=null
+    ?(plan.round_trip?plan.est_distance_km*2:plan.est_distance_km):null
+  const [asPlanned,setAsPlanned]=useState(actual?actual.as_planned:true)
+  const [distance,setDistance]=useState(actual?.distance_km??planned??'')
+  const [toll,setToll]=useState(actual?.toll_fee??'')
+  const [fuel,setFuel]=useState(actual?.fuel_fee??'')
+  const [transit,setTransit]=useState(actual?.transit_fee??'')
+  const [memo,setMemo]=useState(actual?.memo||'')
+  const [busy,setBusy]=useState(false)
+
+  const vacation=plan.use_type==='vacation'
+  const personal=plan.use_type==='personal'
+  const atOffice=plan.transport==='office'
+  const usesVehicle=!!plan.vehicle_id
+  const isTransit=plan.transport==='transit'
+  const vehicle=vehicles.find(v=>v.id===plan.vehicle_id)
+  // 개인 사용이면 그 자리에서 청구액을 보여 준다 — 월말에 놀라지 않게
+  const rate=vehicle?.rate_per_km??null
+  const charge=(personal&&rate!=null&&distance!=='')
+    ?Math.round(Number(distance)*rate)+Number(toll||0):null
+
+  const inputS={padding:'8px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,width:'100%'}
+  const labelS={fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:4,display:'block'}
+  const rowS={marginBottom:12}
+  const num=(v)=>v===''||v==null?null:Number(v)
+
+  async function save(){
+    // 차량을 쓴 일정은 거리를 받아야 정산이 된다. 사무실·휴가는 필요 없다.
+    if(usesVehicle&&(distance===''||Number(distance)<0)){
+      showToast('주행거리를 입력해 주세요');return
+    }
+    const body={
+      as_planned:asPlanned,
+      distance_km:(atOffice||vacation)?null:num(distance),
+      toll_fee:num(toll)??0, fuel_fee:num(fuel)??0, transit_fee:num(transit)??0,
+      memo:memo||null,
+    }
+    try{
+      setBusy(true)
+      if(isNew) await addActual({plan_id:plan.id,...body})
+      else      await updateActual(actual.id,body)
+      showToast(isNew?'실적을 기록했습니다':'실적을 수정했습니다')
+      await onSaved({focusDate:plan.plan_date})
+      onClose()
+    }catch(e){
+      // 정산이 끝난 달은 서버가 409 로 막는다
+      showToast((e.status===409?'':'실패: ')+e.message)
+    }finally{setBusy(false)}
+  }
+
+  async function remove(){
+    if(!confirm('이 실적을 지울까요?\n\n계획은 남고 「확인 필요」 상태로 돌아갑니다.'))return
+    try{
+      setBusy(true)
+      await removeActual(actual.id)
+      showToast('실적을 지웠습니다')
+      await onSaved({focusDate:plan.plan_date})
+      onClose()
+    }catch(e){ showToast((e.status===409?'':'실패: ')+e.message) }
+    finally{setBusy(false)}
+  }
+
+  return(
+    <div onClick={onClose}
+      style={{position:'fixed',inset:0,background:'rgba(17,24,39,.5)',zIndex:9400,
+        display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'40px 16px',overflowY:'auto'}}>
+      <div onClick={e=>e.stopPropagation()}
+        style={{background:'#fff',borderRadius:12,width:'100%',maxWidth:480,padding:22,
+          boxShadow:'0 20px 50px rgba(0,0,0,.3)'}}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
+          <strong style={{fontSize:16}}>{isNew?'실적 기록':'실적 수정'}</strong>
+          <button onClick={onClose} style={{border:'none',background:'none',fontSize:20,cursor:'pointer',color:'#6b7280'}}>×</button>
+        </div>
+
+        {/* 어떤 계획에 대한 실적인지 */}
+        <div style={{background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,
+          padding:'10px 12px',marginBottom:14,fontSize:12,lineHeight:1.7}}>
+          <strong>{plan.plan_date} ({dayName(plan.plan_date)})</strong>
+          <span style={{marginLeft:6}}>{plan.worker_name}</span>
+          <span style={{marginLeft:6,color:'#6b7280'}}>{SLOT_MAP[plan.slot]}</span>
+          <div>
+            {vacation?`🌴 휴가 · ${plan.vacation_type||''}`
+             :personal?'개인 사용'
+             :atOffice?'🏢 사무실'
+             :`${planIcon(plan)} ${plan.place_name||plan.place_text||'장소 미정'}`}
+            {plan.vehicle_name&&<span style={{color:'#6b7280'}}> · {plan.vehicle_name} {plan.vehicle_plate||''}</span>}
+          </div>
+          {plan.purpose&&<div style={{color:'#6b7280'}}>{plan.purpose}</div>}
+          {planned!=null&&<div style={{color:'#6b7280'}}>계획 거리 {planned}km{plan.round_trip?' (왕복)':''}</div>}
+        </div>
+
+        <div style={rowS}>
+          <label style={labelS}>계획대로 되었습니까</label>
+          <div style={{display:'flex',gap:8}}>
+            {[{v:true,label:'계획대로'},{v:false,label:'달랐음'}].map(o=>(
+              <button key={String(o.v)} onClick={()=>setAsPlanned(o.v)}
+                style={{flex:1,padding:'9px',borderRadius:7,cursor:'pointer',fontSize:13,
+                  fontWeight:asPlanned===o.v?700:500,
+                  border:'1px solid '+(asPlanned===o.v?'#1a56db':'#e5e7eb'),
+                  background:asPlanned===o.v?'#eff6ff':'#fff',
+                  color:asPlanned===o.v?'#1a56db':'#6b7280'}}>{o.label}</button>
+            ))}
+          </div>
+          {!asPlanned&&(
+            <div style={{fontSize:11,color:'#92400e',marginTop:6}}>
+              달력 배지에 ↺ 로 표시됩니다. 어떻게 달랐는지는 아래 비고에 적어 주십시오.
+            </div>
+          )}
+        </div>
+
+        {/* 차량을 쓴 일정만 거리를 받는다 */}
+        {usesVehicle&&(
+          <div style={rowS}>
+            <label style={labelS}>주행거리 (km) — 정산 근거</label>
+            <input type="number" step="0.1" value={distance} onChange={e=>setDistance(e.target.value)}
+              placeholder={planned!=null?`계획 ${planned}km`:'실제 주행거리'} style={inputS}/>
+            {planned!=null&&distance!==''&&Math.abs(Number(distance)-planned)>planned*0.3&&(
+              <div style={{fontSize:11,color:'#c2410c',marginTop:5}}>
+                계획({planned}km)과 30% 이상 차이가 납니다 — 맞는지 확인해 주십시오.
+              </div>
+            )}
+          </div>
+        )}
+
+        {!vacation&&(
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,...rowS}}>
+            {usesVehicle&&(
+              <div>
+                <label style={labelS}>하이패스 (원)</label>
+                <input type="number" value={toll} onChange={e=>setToll(e.target.value)}
+                  placeholder="0" style={inputS}/>
+              </div>
+            )}
+            {usesVehicle&&!personal&&(
+              <div>
+                <label style={labelS}>주유·충전 (원)</label>
+                <input type="number" value={fuel} onChange={e=>setFuel(e.target.value)}
+                  placeholder="0" style={inputS}/>
+              </div>
+            )}
+            {isTransit&&(
+              <div style={{gridColumn:'1 / -1'}}>
+                <label style={labelS}>대중교통비 (원)</label>
+                <input type="number" value={transit} onChange={e=>setTransit(e.target.value)}
+                  placeholder="0" style={inputS}/>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 개인 사용은 그 자리에서 청구액을 보여 준다 */}
+        {personal&&(
+          <div style={{...rowS,background:'#fffbeb',border:'1px solid #fcd34d',borderRadius:8,padding:'10px 12px'}}>
+            <div style={{fontSize:12,color:'#92400e'}}>
+              <strong>개인 사용 정산</strong>
+              {rate!=null
+                ?<div style={{marginTop:4}}>
+                  {distance!==''?`${distance}km × ${rate}원`:'거리 입력 시 계산'}
+                  {toll?` + 하이패스 ${Number(toll).toLocaleString()}원`:''}
+                  {charge!=null&&<strong style={{marginLeft:6}}>= {charge.toLocaleString()}원</strong>}
+                </div>
+                :<div style={{marginTop:4}}>이 차량에 정산 단가가 없습니다 — 설정에서 확인해 주십시오.</div>}
+              <div style={{marginTop:4,opacity:.85}}>월말에 합산되어 정산 화면에 나옵니다.</div>
+            </div>
+          </div>
+        )}
+
+        <div style={rowS}>
+          <label style={labelS}>비고</label>
+          <input value={memo} onChange={e=>setMemo(e.target.value)}
+            placeholder="특이사항 (선택)" style={inputS}/>
+        </div>
+
+        <div style={{display:'flex',gap:8,marginTop:16}}>
+          <button onClick={save} disabled={busy}
+            style={{flex:1,padding:'11px',borderRadius:8,border:'none',background:'#059669',
+              color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
+            {busy?'처리 중…':(isNew?'실적 기록':'수정 저장')}
+          </button>
+          {!isNew&&(
+            <button onClick={remove} disabled={busy}
+              style={{padding:'11px 16px',borderRadius:8,border:'1px solid #fca5a5',
+                background:'#fff',color:'#dc2626',cursor:'pointer',fontSize:14}}>삭제</button>
+          )}
+          <button onClick={onClose} style={{padding:'11px 16px',borderRadius:8,
+            border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:14}}>취소</button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // 계획 입력·확인 창.
 //   editing=null           새 계획
 //   editing=계획           기존 계획 — 실적이 없으면 그 자리에서 고칠 수 있다
@@ -2103,7 +2357,7 @@ function PlacePicker({places,onPick,onClose,onChanged,showToast}){
 // 새 계획은 날짜를 «여러 개» 고를 수 있다 — 같은 일정을 여러 날 넣는 일이 잦다.
 function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId,defaultVehicleId,
                      defaultTransport,defaultKind,workers,places,vehicles,
-                     onClose,onSaved,onCopy,showToast}){
+                     onClose,onSaved,onCopy,onOpenActual,showToast}){
   const isNew=!editing
   const src=editing||copyFrom||null        // 값을 가져올 원본
   // 실적이 등록된 계획은 고칠 수 없다. 계획을 바꾸면 실적·정산 근거와 어긋난다.
@@ -2273,8 +2527,14 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
     finally{setBusy(false)}
   }
 
-  // 「계획대로」 — 계획 내용을 그대로 실적으로 만든다
+  // 「계획대로」 — 계획 내용을 그대로 실적으로 만든다.
+  // 차량을 쓴 일정은 거리·비용을 받아야 정산이 되므로 실적 창을 연다.
   async function handleAsPlanned(){
+    if(editing.vehicle_id||editing.transport==='transit'){
+      onOpenActual&&onOpenActual(editing)
+      onClose()
+      return
+    }
     try{
       setBusy(true)
       await addActual({plan_id:editing.id,as_planned:true})
@@ -2312,6 +2572,13 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
             <strong>실적이 등록된 계획입니다</strong>{editing.as_planned===false?' (계획과 달랐음)':''}.
             {editing.actual_distance_km!=null&&` 주행 ${editing.actual_distance_km}km.`}
             <br/>정산 근거와 어긋나지 않도록 계획은 고칠 수 없습니다 — 고쳐야 하면 실적을 먼저 지워 주십시오.
+            <div style={{marginTop:8}}>
+              <button onClick={()=>{onOpenActual&&onOpenActual(editing);onClose()}}
+                style={{padding:'6px 12px',borderRadius:7,border:'1px solid #059669',
+                  background:'#fff',color:'#059669',cursor:'pointer',fontSize:12,fontWeight:700}}>
+                실적 보기·수정
+              </button>
+            </div>
           </div>
         )}
 
