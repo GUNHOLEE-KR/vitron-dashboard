@@ -1,6 +1,7 @@
 # 바이트론 이앤에스 업무 현황 대시보드
 
 직원별 일간/주간/월간/연간 업무 기록 및 Jira 연동 대시보드.
+2026-08-15 부터 **일정 관리(스케줄)** — 사람 위치·차량 예약·이동 비용 정산 — 도 함께 담는다.
 
 ## ⚠️ 대화·작업 규칙 (최우선 — 반드시 준수)
 
@@ -33,9 +34,11 @@ src/
     workerRepo.js          # 직원 CRUD
     historyRepo.js         # 업무 기록 CRUD
     jiraRepo.js            # Jira 동기화·이슈 관리·토큰 만료 조회
+    scheduleRepo.js        # 일정·장소·차량·실적·정산·로그인
 server/
   index.js                 # Express REST API + Jira 동기화 (단일 파일)
-db/init.sql                # PostgreSQL 스키마 (테이블 3개)
+db/init.sql                # PostgreSQL 스키마 (기존 테이블 3개)
+db/migrations/             # 이후 변경 SQL — 001~004 (003 은 롤백용도 함께 둠)
 Dockerfile.frontend        # React 빌드 → nginx
 Dockerfile.backend         # Node.js API 서버
 nginx.conf                 # /api/* → backend 프록시, 타임아웃 300초
@@ -43,13 +46,39 @@ docker-compose.yml         # 프론트(8082) + 백엔드 2개 컨테이너
 deploy.sh                  # NAS 배포 스크립트
 ```
 
-## PostgreSQL 테이블
+## PostgreSQL 테이블 (8개)
 - `workers` — 직원 정보 (name, active, hired_at, resigned_at)
 - `work_history` — 업무 기록 (worker_name, work_date, work_hour, work_text)
 - `jira_issues` — Jira 이슈 캐시 (jira_key, summary, parent_key, full_text)
+- `schedule_places` / `schedule_vehicles` / `schedule_plans` / `schedule_actuals` /
+  `schedule_settlements` — 일정 관리 (아래 절 참고)
 
 ⚠️ `DATE` 타입은 `pg` 가 Date 객체로 바꿔 프론트의 `slice(0,7)` 를 깨뜨린다.
 `server/index.js` 에서 `types.setTypeParser(1082, …)` 로 문자열 유지 중이니 제거하지 말 것.
+
+⚠️ `NUMERIC` 도 마찬가지로 문자열로 온다. `types.setTypeParser(1700, parseFloat)` 가 없으면
+거리 합산이 덧셈이 아니라 **이어붙이기**(`100.0`+`50.0`=`100.050.0`)가 되어 정산 금액이 무너진다.
+
+## 일정 관리 (스케줄)
+사람 위치 파악 · 회사 차량 예약 · 이동 비용 정산. 월/주/일/연 달력 + 정산 화면.
+
+- 유형 3가지 = 업무 / 차량 개인사용 / 휴가. **유형이 저장할 칸을 결정**한다 —
+  개인사용의 장소·목적은 화면에서 묻지 않을 뿐 아니라 **서버가 받아도 지운다**(사생활)
+- 🔑**장소가 이동 수단을 결정한다.** 이동 수단 목록에 「사무실」을 두지 않는다 —
+  고를 수 없으면 장소와 어긋날 수 없다 (이 어긋남으로 내근 등록이 막힌 적 있음)
+- 거리·소요시간은 **수기 입력**(지도 API 는 비용 때문에 쓰지 않기로 결정). 장소에 저장해 두고 자동 채움
+- 정산 = 개인사용 `거리×단가+하이패스` 청구 / 자차 `거리÷연비` **리터**로 환급 / 대중교통 실비.
+  **확정 시 금액 박제 + 실적 `locked`**, 이후 수정은 409 → 대표이사가 잠금 해제 후 재승인
+- ⚠️ 이동 수단을 바꾸면 **차량 선택을 비울 것** — 남아 있으면 자차 일정이 회사 차량을 잡아 겹침 오탐
+- 문서 = Confluence 「일정 관리」(부모 170164456, 하위 6쪽) / Jira VITRON-317·318
+
+### 로그인 — 정산 화면만
+달력·업무 입력은 **로그인 없이** 쓴다(요구하면 아무도 안 적는다). 돈이 걸린 정산만 받는다.
+계정·세션은 **KPI 추적 시스템과 공유** — 같은 `kpi_users`·같은 `SESSION_SECRET`·쿠키 `kpi_session`.
+
+- ⚠️ 쿠키에 `Secure` 금지 (사내는 `http` — 붙이면 쿠키가 저장되지 않아 로그인 불가)
+- ⚠️ `.env` 의 `SESSION_SECRET` 이 KPI 와 **같은 값이어야** 세션이 공유된다. 없으면 재시작마다 전원 로그아웃
+- 확정 권한은 등급이 아니라 `kpi_users.can_approve_settlement` 컬럼 (일반 관리자에게 비용 승인 권한을 주지 않는다)
 
 ## Jira 동기화
 - 프론트 → 백엔드 `POST /api/jira-sync` → Jira REST API → PostgreSQL
@@ -99,5 +128,9 @@ npm run dev                # 프론트 :5173
 
 ## 주의사항
 - `App.jsx`는 의도적으로 단일 파일 구조 유지 (분리 금지)
-- 탭 구성: 오늘 업무 / 일간 / 주간 / 월간 / 연간 / 설정
+- 탭 구성: 오늘 업무 / 일간 / 주간 / 월간 / 연간 / **일정** / 설정
 - 직원 필터는 기간별로 재직 여부를 판단 (`workersForPeriod` 함수)
+- ⚠️ **스키마 변경은 `admin` 계정으로** — 앱 계정(`vitron-dashboard`)은 테이블 소유자가 아니라
+  `ALTER TABLE` 이 거부된다. 새 테이블을 만들었으면 앱 계정에 `GRANT` 하는 것을 잊지 말 것
+  (안 하면 화면이 권한 오류로 조용히 비어 보인다)
+- ⚠️ **배포 검증은 브라우저에서 버튼까지 눌러 볼 것.** API E2E 만 돌리고 끝냈다가 놓친 사고가 있다
