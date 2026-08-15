@@ -667,6 +667,7 @@ export default function App(){
   const [plans,setPlans]=useState([])
   const [schedLoading,setSchedLoading]=useState(false)
   const [planDialog,setPlanDialog]=useState(null)   // {editing} | {date} | null
+  const [schedFocus,setSchedFocus]=useState('')     // 등록 직후 달력을 옮길 날짜
 
   // 오늘 기준 재직 중인 직원만 (입사일 이후 + 퇴사 전)
   const td=today()
@@ -786,7 +787,7 @@ export default function App(){
         {tab==='yearly'  &&<TabYearly  history={history} workers={workersLabeled} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
         {tab==='schedule'&&<TabSchedule workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
           places={places} vehicles={vehicles} plans={plans} loading={schedLoading}
-          onReload={loadSchedule} showToast={showToast}
+          onReload={loadSchedule} showToast={showToast} focusDate={schedFocus}
           onOpenNew={()=>setPlanDialog({editing:null,date:today()})}
           onOpenPlan={p=>setPlanDialog({editing:p})}/>}
         {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers} dupNames={dupNames}
@@ -797,7 +798,7 @@ export default function App(){
           workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
           places={places} vehicles={vehicles} showToast={showToast}
           onClose={()=>setPlanDialog(null)}
-          onSaved={async()=>{ await loadSchedule() }}/>
+          onSaved={async(r={})=>{ await loadSchedule(); if(r.focusDate) setSchedFocus(r.focusDate) }}/>
       )}
       {toast&&(
         <div style={{position:'fixed',bottom:24,left:'50%',transform:'translateX(-50%)',
@@ -1284,11 +1285,18 @@ function PlanBadge({plan,workers,onClick,todayStr,compact=false}){
   )
 }
 
-function TabSchedule({workers,places,vehicles,plans,loading,onReload,onOpenNew,onOpenPlan,showToast}){
+function TabSchedule({workers,places,vehicles,plans,loading,onReload,onOpenNew,onOpenPlan,showToast,focusDate}){
   const [view,setView]=useState('week')
   const [anchor,setAnchor]=useState(today())      // 기준 날짜 (주·일 뷰)
   const [ym,setYm]=useState(toMonth(today()))     // 기준 월 (월 뷰)
   const [year,setYear]=useState(toYear(today()))
+
+  // 계획을 등록하면 그 날짜로 달력을 옮긴다.
+  // 보고 있는 기간 밖에 등록되면 화면에 안 나타나 «등록이 안 됐다» 고 오해한다.
+  useEffect(()=>{
+    if(!focusDate) return
+    setAnchor(focusDate); setYm(toMonth(focusDate)); setYear(toYear(focusDate))
+  },[focusDate])
   const [filterWorker,setFilterWorker]=useState('')
   const [filterVehicle,setFilterVehicle]=useState('')
   const todayStr=today()
@@ -1650,47 +1658,77 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
   const labelS={fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:4,display:'block'}
   const rowS={marginBottom:12}
 
-  async function saveNewPlace(){
+  // 새 장소를 실제로 등록하고 만들어진 장소를 돌려준다.
+  // 실패하거나 사용자가 취소하면 null — 부르는 쪽에서 계획 등록도 멈춘다.
+  async function ensureNewPlace(){
     const np=newPlace
-    if(!np?.name?.trim()){showToast('장소 이름을 입력해 주세요');return}
+    if(!np?.name?.trim()){showToast('장소 이름을 입력해 주세요');return null}
+    const payload={...np,name:np.name.trim(),created_by:workerId||null}
     try{
       setBusy(true)
-      const created=await addPlace({...np,name:np.name.trim(),created_by:workerId||null})
-      showToast(`장소 「${created.name}」 등록`)
-      setNewPlace(null)
-      await onSaved({placeAdded:created})
-      setPlaceId(created.id)
+      const created=await addPlace(payload)
+      setNewPlace(null); setPlaceId(created.id)
+      await onSaved({})
+      return created
     }catch(e){
       // 비슷한 이름이 있으면 서버가 409 + 후보를 준다. 사용자에게 물어본다.
       if(e.status===409&&e.similar?.length){
         const names=e.similar.map(s=>`· ${s.name}${s.distance_km!=null?` (${s.distance_km}km)`:''}`).join('\n')
-        if(confirm(`비슷한 이름의 장소가 이미 있습니다.\n\n${names}\n\n같은 곳이면 취소하고 위 장소를 골라 주세요.\n다른 곳이면 그대로 등록할까요?`)){
-          try{
-            const created=await addPlace({...np,name:np.name.trim(),force:true,created_by:workerId||null})
-            setNewPlace(null); await onSaved({placeAdded:created}); setPlaceId(created.id)
-          }catch(e2){showToast('장소 등록 실패: '+e2.message)}
+        if(!confirm(`비슷한 이름의 장소가 이미 있습니다.\n\n${names}\n\n같은 곳이면 「취소」를 누르고 위 장소를 골라 주세요.\n다른 곳이면 「확인」을 눌러 새로 등록합니다.`)){
+          return null
         }
-      }else showToast('장소 등록 실패: '+e.message)
+        try{
+          const created=await addPlace({...payload,force:true})
+          setNewPlace(null); setPlaceId(created.id)
+          await onSaved({})
+          return created
+        }catch(e2){showToast('장소 등록 실패: '+e2.message);return null}
+      }
+      showToast('장소 등록 실패: '+e.message)
+      return null
     }finally{setBusy(false)}
+  }
+
+  // 「장소만 먼저 등록」 버튼 — 계획은 그대로 두고 장소만 목록에 넣는다
+  async function saveNewPlaceOnly(){
+    const created=await ensureNewPlace()
+    if(created) showToast(`장소 「${created.name}」 등록`)
   }
 
   async function submit(force=false){
     if(!workerId){showToast('이름을 선택해 주세요');return}
     if(!personal&&!placeId&&!newPlace){showToast('장소를 선택해 주세요');return}
     if(tp.needsVehicle&&!vehicleId){showToast('차량을 선택해 주세요');return}
+
+    // 새 장소를 적어 둔 채 「계획 등록」을 누르는 것이 자연스러운 흐름이다.
+    // 예전에는 「장소 등록」을 따로 누르지 않으면 적은 내용이 버려지고
+    // 장소 없는 계획만 들어갔다 — 사용자는 아무 것도 안 된 것처럼 느낀다.
+    let usePlaceId=placeId
+    let useKm=estKm, useMin=estMin
+    if(!personal&&newPlace){
+      if(!newPlace.name?.trim()){showToast('장소 이름을 입력해 주세요');return}
+      const created=await ensureNewPlace()
+      if(!created) return              // 등록 실패·사용자 취소 → 계획도 넣지 않는다
+      usePlaceId=created.id
+      useKm=created.distance_km??null
+      useMin=created.travel_min??null
+    }
+
     const body={
       worker_id:Number(workerId), plan_date:date, slot, use_type:useType,
-      place_id:personal?null:(placeId?Number(placeId):null),
+      place_id:personal?null:(usePlaceId?Number(usePlaceId):null),
       purpose:personal?null:purpose,
       transport, vehicle_id:tp.needsVehicle?Number(vehicleId):null,
-      est_distance_km:personal?null:estKm, est_travel_min:personal?null:estMin,
+      est_distance_km:personal?null:useKm, est_travel_min:personal?null:useMin,
       round_trip:roundTrip, force,
     }
     try{
       setBusy(true)
       await addPlan(body)
-      showToast('계획을 등록했습니다')
-      await onSaved({})
+      // 등록한 날짜로 달력을 옮겨 준다. 보고 있는 기간 밖에 등록되면
+      // 화면에 나타나지 않아 «등록이 안 됐다» 고 오해하게 된다.
+      showToast(`${date} 계획을 등록했습니다`)
+      await onSaved({focusDate:date})
       onClose()
     }catch(e){
       // 차량이 겹치면 409. 먼저 등록한 사람이 우선이고, 그래도 넣을지 물어본다.
@@ -1810,11 +1848,14 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
                   </div>
                   <div style={{fontSize:11,color:'#6b7280',margin:'8px 0'}}>
                     거리·시간은 한 번만 넣으면 다음부터 자동으로 채워집니다.
+                    아래 <strong>「계획 등록」</strong>을 누르면 이 장소도 함께 등록됩니다.
                   </div>
                   <div style={{display:'flex',gap:8}}>
-                    <button onClick={saveNewPlace} disabled={busy}
-                      style={{flex:1,padding:'7px',borderRadius:7,border:'none',background:'#1a56db',
-                        color:'#fff',cursor:'pointer',fontSize:12,fontWeight:700}}>장소 등록</button>
+                    <button onClick={saveNewPlaceOnly} disabled={busy}
+                      style={{flex:1,padding:'7px',borderRadius:7,border:'1px solid #1a56db',
+                        background:'#fff',color:'#1a56db',cursor:'pointer',fontSize:12,fontWeight:700}}>
+                      장소만 먼저 등록
+                    </button>
                     <button onClick={()=>setNewPlace(null)}
                       style={{padding:'7px 14px',borderRadius:7,border:'1px solid #e5e7eb',
                         background:'#fff',cursor:'pointer',fontSize:12}}>취소</button>
@@ -1907,7 +1948,7 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
               <button onClick={()=>submit(false)} disabled={busy}
                 style={{flex:1,padding:'11px',borderRadius:8,border:'none',background:'#1a56db',
                   color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
-                {busy?'처리 중…':'계획 등록'}
+                {busy?'처리 중…':(newPlace&&!personal?'장소 + 계획 등록':'계획 등록')}
               </button>
               <button onClick={onClose} style={{padding:'11px 18px',borderRadius:8,
                 border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:14}}>취소</button>
