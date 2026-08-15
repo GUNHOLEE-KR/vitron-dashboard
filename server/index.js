@@ -8,6 +8,11 @@ const cors = require('cors')
 const { types } = require('pg')
 types.setTypeParser(1082, val => val)
 
+// NUMERIC 은 기본이 «문자열» 이다. 그대로 두면 거리를 더할 때 숫자 덧셈이 아니라
+// 문자열 이어붙이기가 되어 「12.3」+「4.5」가 「12.34.5」가 된다.
+// (KPI 추적 시스템에서 점수 합산이 이렇게 깨진 사고가 있었다)
+types.setTypeParser(1700, val => (val === null ? null : parseFloat(val)))
+
 // ⚠️ 오늘 날짜를 만들 때 toISOString() 을 쓰면 안 된다.
 // toISOString() 은 UTC 기준이라 한국(UTC+9)에서는 오전 9시 이전에 전날이 된다.
 // 컨테이너 시간대가 UTC 면 하루 종일 어긋날 수도 있다.
@@ -423,6 +428,465 @@ app.get('/api/jira/token-status', (req, res) => {
     : 'ok'
 
   res.json({ configured: true, expiresAt, daysLeft, level })
+})
+
+// ─── 스케줄표 ────────────────────────────────────────────────
+// 설계서: docs/design/스케줄표_설계.md
+// 「어느 날 어디에서 무엇을 할 계획인가」를 다룬다. 업무 내용을 적는
+// work_history 와 달리 «장소와 이동 수단» 이 중심이다.
+
+// 장소 이름이 갈라지는 것을 막기 위한 정규화.
+// 「(주)삼양화학 인천공장」·「삼양화학인천공장」 을 같은 것으로 보고 경고한다.
+function normalizePlaceName(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/[（(]주[）)]|㈜/g, '')
+    .replace(/[\s\-_.·,]/g, '')
+}
+
+// 이름이 서로 «포함» 관계면 같은 곳일 가능성이 높다고 본다.
+// 편집거리 같은 정교한 방법은 장소 수가 적어 과하고, 오히려 엉뚱한 경고를 낸다.
+function findSimilarPlaces(name, places) {
+  const target = normalizePlaceName(name)
+  if (target.length < 2) return []
+  return places.filter(p => {
+    const other = normalizePlaceName(p.name)
+    if (!other) return false
+    return other === target || other.includes(target) || target.includes(other)
+  })
+}
+
+// 시간대가 겹치는가. 종일은 모든 시간대와 겹치고, 오전과 오후는 겹치지 않는다.
+function slotsOverlap(a, b) {
+  if (a === 'allday' || b === 'allday') return true
+  if (a === 'time' || b === 'time') return true   // 시각 지정은 판단이 어려워 겹침으로 본다
+  return a === b
+}
+
+// ── 장소 ──
+app.get('/api/schedule/places', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT * FROM schedule_places
+        WHERE ($1 = 'true' OR active) ORDER BY active DESC, name ASC`,
+      [String(req.query.all === '1')]
+    )
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/schedule/places', async (req, res) => {
+  const { name, address, distance_km, travel_min, category, memo, created_by, force } = req.body
+  const value = String(name || '').trim()
+  if (!value) return res.status(400).json({ error: '장소 이름을 입력해 주세요.' })
+  try {
+    // 비슷한 이름이 있으면 «등록 시점에» 알린다. 나중에 합치는 것보다 훨씬 싸다.
+    if (!force) {
+      const { rows: existing } = await pool.query('SELECT id, name, distance_km FROM schedule_places WHERE active')
+      const similar = findSimilarPlaces(value, existing)
+      if (similar.length > 0) {
+        return res.status(409).json({
+          error: '비슷한 이름의 장소가 이미 있습니다.',
+          similar,
+        })
+      }
+    }
+    const { rows } = await pool.query(
+      `INSERT INTO schedule_places (name, address, distance_km, travel_min, category, memo, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [value, address || null, distance_km ?? null, travel_min ?? null,
+       category || null, memo || null, created_by ?? null]
+    )
+    res.json(rows[0])
+  } catch (e) {
+    if (e.code === '23505') {   // unique_violation
+      return res.status(409).json({ error: '같은 이름의 장소가 이미 있습니다.' })
+    }
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.patch('/api/schedule/places/:id', async (req, res) => {
+  const { name, address, distance_km, travel_min, category, memo, active } = req.body
+  try {
+    const { rowCount } = await pool.query(
+      `UPDATE schedule_places
+          SET name = COALESCE($1, name), address = $2,
+              distance_km = $3, travel_min = $4,
+              category = $5, memo = $6, active = COALESCE($7, active)
+        WHERE id = $8`,
+      [name ? String(name).trim() : null, address || null, distance_km ?? null,
+       travel_min ?? null, category || null, memo || null,
+       active === undefined ? null : !!active, req.params.id]
+    )
+    if (rowCount === 0) return res.status(404).json({ error: '해당 장소를 찾을 수 없습니다.' })
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 지우지 않고 «숨긴다». 지난 계획·실적이 이 장소를 참조하고 있기 때문이다.
+app.delete('/api/schedule/places/:id', async (req, res) => {
+  try {
+    const { rowCount } = await pool.query(
+      'UPDATE schedule_places SET active = FALSE WHERE id = $1', [req.params.id]
+    )
+    if (rowCount === 0) return res.status(404).json({ error: '해당 장소를 찾을 수 없습니다.' })
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ── 차량 ──
+app.get('/api/schedule/vehicles', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT v.*, w.name AS owner_name
+         FROM schedule_vehicles v
+         LEFT JOIN workers w ON w.id = v.owner_worker_id
+        WHERE ($1 = 'true' OR v.active)
+        ORDER BY v.kind ASC, v.name ASC, v.id ASC`,
+      [String(req.query.all === '1')]
+    )
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/schedule/vehicles', async (req, res) => {
+  const { kind, name, plate, owner_worker_id, fuel_type, rate_per_km, km_per_liter, memo } = req.body
+  if (!name) return res.status(400).json({ error: '차량 이름(차종)을 입력해 주세요.' })
+  if (kind === 'own' && !owner_worker_id) {
+    return res.status(400).json({ error: '자차는 소유 직원을 지정해 주세요.' })
+  }
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO schedule_vehicles
+         (kind, name, plate, owner_worker_id, fuel_type, rate_per_km, km_per_liter, memo)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [kind || 'company', String(name).trim(), plate || null, owner_worker_id ?? null,
+       fuel_type || null, rate_per_km ?? null, km_per_liter ?? null, memo || null]
+    )
+    res.json(rows[0])
+  } catch (e) {
+    if (e.code === '23505') {   // unique_violation — 번호판 중복
+      return res.status(409).json({ error: '같은 번호판의 차량이 이미 등록돼 있습니다.' })
+    }
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 단가·연비는 정산 금액에 직접 영향을 준다. 화면에서 대표이사만 부를 수 있게 하고,
+// 여기서는 값만 바꾼다 (권한 판정은 정산 화면에서 한다 — 설계서 4.2절)
+app.patch('/api/schedule/vehicles/:id', async (req, res) => {
+  const { name, plate, fuel_type, rate_per_km, km_per_liter, memo, active } = req.body
+  try {
+    const { rowCount } = await pool.query(
+      `UPDATE schedule_vehicles
+          SET name = COALESCE($1, name), plate = $2, fuel_type = $3,
+              rate_per_km = $4, km_per_liter = $5, memo = $6,
+              active = COALESCE($7, active)
+        WHERE id = $8`,
+      [name ? String(name).trim() : null, plate || null, fuel_type || null,
+       rate_per_km ?? null, km_per_liter ?? null, memo || null,
+       active === undefined ? null : !!active, req.params.id]
+    )
+    if (rowCount === 0) return res.status(404).json({ error: '해당 차량을 찾을 수 없습니다.' })
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ── 계획 ──
+// 달력이 한 번에 그려지도록 장소·차량·직원 이름을 함께 돌려준다.
+const PLAN_SELECT = `
+  SELECT p.*, w.name AS worker_name, w.team AS worker_team,
+         pl.name AS place_name, pl.category AS place_category,
+         v.name AS vehicle_name, v.plate AS vehicle_plate, v.kind AS vehicle_kind,
+         a.id AS actual_id, a.as_planned, a.distance_km AS actual_distance_km
+    FROM schedule_plans p
+    LEFT JOIN workers w          ON w.id  = p.worker_id
+    LEFT JOIN schedule_places pl ON pl.id = p.place_id
+    LEFT JOIN schedule_vehicles v ON v.id = p.vehicle_id
+    LEFT JOIN schedule_actuals a  ON a.plan_id = p.id`
+
+app.get('/api/schedule/plans', async (req, res) => {
+  const { from, to, worker_id, vehicle_id } = req.query
+  if (!from || !to) return res.status(400).json({ error: 'from·to 날짜가 필요합니다.' })
+  try {
+    const { rows } = await pool.query(
+      `${PLAN_SELECT}
+        WHERE p.plan_date >= $1 AND p.plan_date <= $2
+          AND ($3::int IS NULL OR p.worker_id  = $3::int)
+          AND ($4::int IS NULL OR p.vehicle_id = $4::int)
+        ORDER BY p.plan_date ASC, p.slot ASC, p.worker_id ASC`,
+      [from, to, worker_id || null, vehicle_id || null]
+    )
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 같은 날 같은 차량을 쓰려는 계획이 있는지 알려 준다(달력에서 미리 보여 주기 위함).
+app.get('/api/schedule/vehicle-usage', async (req, res) => {
+  const { from, to } = req.query
+  if (!from || !to) return res.status(400).json({ error: 'from·to 날짜가 필요합니다.' })
+  try {
+    const { rows } = await pool.query(
+      `SELECT p.vehicle_id, p.plan_date, p.slot, p.worker_id, w.name AS worker_name,
+              v.name AS vehicle_name, v.plate AS vehicle_plate
+         FROM schedule_plans p
+         LEFT JOIN workers w ON w.id = p.worker_id
+         LEFT JOIN schedule_vehicles v ON v.id = p.vehicle_id
+        WHERE p.vehicle_id IS NOT NULL
+          AND p.status <> 'canceled'
+          AND p.plan_date >= $1 AND p.plan_date <= $2
+        ORDER BY p.plan_date ASC, p.vehicle_id ASC`,
+      [from, to]
+    )
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/schedule/plans', async (req, res) => {
+  const b = req.body
+  if (!b.worker_id) return res.status(400).json({ error: '이름을 먼저 선택해 주세요.' })
+  if (!b.plan_date) return res.status(400).json({ error: '날짜가 필요합니다.' })
+  const useType = b.use_type === 'personal' ? 'personal' : 'business'
+  // 개인 사용은 장소·용무를 받지 않는다 (설계서 5.2절 — 사적인 행선지를 남기지 않는다)
+  const placeId   = useType === 'personal' ? null : (b.place_id ?? null)
+  const placeText = useType === 'personal' ? null : (b.place_text || null)
+  const purpose   = useType === 'personal' ? null : (b.purpose || null)
+  try {
+    // 차량 겹침 검사 — 먼저 등록한 사람이 우선이고, 겹치면 경고만 한다.
+    // force=true 로 다시 부르면 그대로 등록된다 (승인 절차를 두지 않는다)
+    if (b.vehicle_id && !b.force) {
+      const { rows: conflicts } = await pool.query(
+        `SELECT p.id, p.slot, p.worker_id, w.name AS worker_name
+           FROM schedule_plans p LEFT JOIN workers w ON w.id = p.worker_id
+          WHERE p.vehicle_id = $1 AND p.plan_date = $2 AND p.status <> 'canceled'`,
+        [b.vehicle_id, b.plan_date]
+      )
+      const hit = conflicts.filter(c => slotsOverlap(c.slot, b.slot || 'allday'))
+      if (hit.length > 0) {
+        return res.status(409).json({
+          error: `이미 ${hit.map(h => h.worker_name).join('·')} 님이 예약한 차량입니다.`,
+          conflicts: hit,
+        })
+      }
+    }
+    const { rows } = await pool.query(
+      `INSERT INTO schedule_plans
+         (worker_id, plan_date, slot, start_time, end_time, use_type,
+          place_id, place_text, purpose, transport, vehicle_id,
+          est_distance_km, est_travel_min, round_trip)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+      [b.worker_id, b.plan_date, b.slot || 'allday', b.start_time || null, b.end_time || null,
+       useType, placeId, placeText, purpose, b.transport || 'office', b.vehicle_id ?? null,
+       b.est_distance_km ?? null, b.est_travel_min ?? null,
+       b.round_trip === undefined ? true : !!b.round_trip]
+    )
+    res.json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.patch('/api/schedule/plans/:id', async (req, res) => {
+  const b = req.body
+  try {
+    const { rows: cur } = await pool.query('SELECT * FROM schedule_plans WHERE id = $1', [req.params.id])
+    if (cur.length === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
+    const useType = b.use_type ?? cur[0].use_type
+    const personal = useType === 'personal'
+    const { rowCount } = await pool.query(
+      `UPDATE schedule_plans
+          SET plan_date = COALESCE($1, plan_date), slot = COALESCE($2, slot),
+              start_time = $3, end_time = $4, use_type = $5,
+              place_id = $6, place_text = $7, purpose = $8,
+              transport = COALESCE($9, transport), vehicle_id = $10,
+              est_distance_km = $11, est_travel_min = $12,
+              round_trip = COALESCE($13, round_trip),
+              status = COALESCE($14, status), updated_at = now()
+        WHERE id = $15`,
+      [b.plan_date || null, b.slot || null, b.start_time || null, b.end_time || null, useType,
+       personal ? null : (b.place_id ?? cur[0].place_id),
+       personal ? null : (b.place_text ?? cur[0].place_text),
+       personal ? null : (b.purpose ?? cur[0].purpose),
+       b.transport || null, b.vehicle_id ?? cur[0].vehicle_id,
+       b.est_distance_km ?? cur[0].est_distance_km,
+       b.est_travel_min ?? cur[0].est_travel_min,
+       b.round_trip === undefined ? null : !!b.round_trip,
+       b.status || null, req.params.id]
+    )
+    if (rowCount === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.delete('/api/schedule/plans/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT locked FROM schedule_actuals WHERE plan_id = $1', [req.params.id]
+    )
+    if (rows.some(r => r.locked)) {
+      return res.status(409).json({ error: '정산이 완료된 달의 기록은 지울 수 없습니다.' })
+    }
+    await pool.query('DELETE FROM schedule_actuals WHERE plan_id = $1', [req.params.id])
+    const { rowCount } = await pool.query('DELETE FROM schedule_plans WHERE id = $1', [req.params.id])
+    if (rowCount === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ── 실적 ──
+app.get('/api/schedule/actuals', async (req, res) => {
+  const { from, to, worker_id } = req.query
+  if (!from || !to) return res.status(400).json({ error: 'from·to 날짜가 필요합니다.' })
+  try {
+    const { rows } = await pool.query(
+      `SELECT a.*, w.name AS worker_name, w.team AS worker_team,
+              pl.name AS place_name,
+              v.name AS vehicle_name, v.plate AS vehicle_plate,
+              v.kind AS vehicle_kind, v.rate_per_km, v.km_per_liter
+         FROM schedule_actuals a
+         LEFT JOIN workers w           ON w.id  = a.worker_id
+         LEFT JOIN schedule_places pl  ON pl.id = a.place_id
+         LEFT JOIN schedule_vehicles v ON v.id  = a.vehicle_id
+        WHERE a.work_date >= $1 AND a.work_date <= $2
+          AND ($3::int IS NULL OR a.worker_id = $3::int)
+        ORDER BY a.work_date ASC, a.worker_id ASC`,
+      [from, to, worker_id || null]
+    )
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 「계획대로」 한 번 누르면 계획 내용을 그대로 실적으로 만든다.
+// 계획 없이 생긴 일도 기록할 수 있게 plan_id 없이도 받는다.
+app.post('/api/schedule/actuals', async (req, res) => {
+  const b = req.body
+  try {
+    let base = {}
+    if (b.plan_id) {
+      const { rows } = await pool.query('SELECT * FROM schedule_plans WHERE id = $1', [b.plan_id])
+      if (rows.length === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
+      base = rows[0]
+      const { rows: dup } = await pool.query(
+        'SELECT id FROM schedule_actuals WHERE plan_id = $1', [b.plan_id]
+      )
+      if (dup.length > 0) {
+        return res.status(409).json({ error: '이 계획에는 이미 실적이 있습니다.', actual_id: dup[0].id })
+      }
+    }
+    const workerId = b.worker_id ?? base.worker_id
+    const workDate = b.work_date ?? base.plan_date
+    if (!workerId || !workDate) {
+      return res.status(400).json({ error: '직원과 날짜가 필요합니다.' })
+    }
+    const useType  = b.use_type ?? base.use_type ?? 'business'
+    const personal = useType === 'personal'
+    // 왕복이면 거리를 2배로 잡아 기본값을 만든다 (사용자가 고칠 수 있다)
+    const estimated = base.est_distance_km != null
+      ? (base.round_trip ? base.est_distance_km * 2 : base.est_distance_km)
+      : null
+
+    const { rows } = await pool.query(
+      `INSERT INTO schedule_actuals
+         (plan_id, worker_id, work_date, as_planned, use_type,
+          place_id, place_text, purpose, transport, vehicle_id,
+          distance_km, toll_fee, transit_fee, fuel_fee, memo)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+      [b.plan_id ?? null, workerId, workDate,
+       b.as_planned === undefined ? true : !!b.as_planned, useType,
+       personal ? null : (b.place_id ?? base.place_id ?? null),
+       personal ? null : (b.place_text ?? base.place_text ?? null),
+       personal ? null : (b.purpose ?? base.purpose ?? null),
+       b.transport ?? base.transport ?? 'office',
+       b.vehicle_id ?? base.vehicle_id ?? null,
+       b.distance_km ?? estimated,
+       b.toll_fee ?? 0, b.transit_fee ?? 0, b.fuel_fee ?? 0, b.memo || null]
+    )
+    // 계획 상태를 함께 옮겨 달력에서 «확인 필요» 표시가 사라지게 한다
+    if (b.plan_id) {
+      await pool.query(
+        'UPDATE schedule_plans SET status = $1, updated_at = now() WHERE id = $2',
+        [b.as_planned === false ? 'changed' : 'done', b.plan_id]
+      )
+    }
+    res.json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.patch('/api/schedule/actuals/:id', async (req, res) => {
+  const b = req.body
+  try {
+    const { rows: cur } = await pool.query('SELECT * FROM schedule_actuals WHERE id = $1', [req.params.id])
+    if (cur.length === 0) return res.status(404).json({ error: '해당 실적을 찾을 수 없습니다.' })
+    // 정산이 끝난 달은 고칠 수 없다. 승인 금액과 근거가 어긋나기 때문이다.
+    // 정정이 필요하면 대표이사가 잠금을 풀고 재승인한다 (설계서 3.3절)
+    if (cur[0].locked) {
+      return res.status(409).json({ error: '정산이 완료된 달의 기록입니다. 수정하려면 대표이사가 잠금을 해제해야 합니다.' })
+    }
+    const useType  = b.use_type ?? cur[0].use_type
+    const personal = useType === 'personal'
+    await pool.query(
+      `UPDATE schedule_actuals
+          SET as_planned = COALESCE($1, as_planned), use_type = $2,
+              place_id = $3, place_text = $4, purpose = $5,
+              transport = COALESCE($6, transport), vehicle_id = $7,
+              distance_km = $8, toll_fee = COALESCE($9, toll_fee),
+              transit_fee = COALESCE($10, transit_fee), fuel_fee = COALESCE($11, fuel_fee),
+              memo = $12, updated_at = now()
+        WHERE id = $13`,
+      [b.as_planned === undefined ? null : !!b.as_planned, useType,
+       personal ? null : (b.place_id ?? cur[0].place_id),
+       personal ? null : (b.place_text ?? cur[0].place_text),
+       personal ? null : (b.purpose ?? cur[0].purpose),
+       b.transport || null, b.vehicle_id ?? cur[0].vehicle_id,
+       b.distance_km ?? cur[0].distance_km,
+       b.toll_fee ?? null, b.transit_fee ?? null, b.fuel_fee ?? null,
+       b.memo ?? cur[0].memo, req.params.id]
+    )
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.delete('/api/schedule/actuals/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT locked, plan_id FROM schedule_actuals WHERE id = $1', [req.params.id])
+    if (rows.length === 0) return res.status(404).json({ error: '해당 실적을 찾을 수 없습니다.' })
+    if (rows[0].locked) {
+      return res.status(409).json({ error: '정산이 완료된 달의 기록은 지울 수 없습니다.' })
+    }
+    await pool.query('DELETE FROM schedule_actuals WHERE id = $1', [req.params.id])
+    // 실적을 지우면 계획은 다시 «확인 필요» 상태로 돌아간다
+    if (rows[0].plan_id) {
+      await pool.query('UPDATE schedule_plans SET status = $1 WHERE id = $2', ['planned', rows[0].plan_id])
+    }
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
 })
 
 // ─── 헬스체크 ────────────────────────────────────────────────
