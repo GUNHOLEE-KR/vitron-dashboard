@@ -5,7 +5,7 @@ import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, L
 import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates, updateWorkerEmail } from './repositories/workerRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
 import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
-import { getPlaces, addPlace, getVehicles, getPlans, addPlan, removePlan,
+import { getPlaces, addPlace, getVehicles, getPlans, addPlan, updatePlan, removePlan,
          getActuals, addActual } from './repositories/scheduleRepo'
 
 const WORK_HOURS=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
@@ -678,6 +678,7 @@ export default function App(){
   const [schedLoading,setSchedLoading]=useState(false)
   const [planDialog,setPlanDialog]=useState(null)   // {editing} | {date} | null
   const [schedFocus,setSchedFocus]=useState('')     // 등록 직후 달력을 옮길 날짜
+  const [clipboard,setClipboard]=useState(null)     // 복사한 계획 (달력에서 붙여넣기)
 
   // 오늘 기준 재직 중인 직원만 (입사일 이후 + 퇴사 전)
   const td=today()
@@ -747,6 +748,43 @@ export default function App(){
     // eslint-disable-next-line react-hooks/exhaustive-deps
   },[tab])
 
+  // 복사한 계획을 고른 칸들에 붙인다.
+  // 주 뷰에서 고른 칸은 사람이 함께 정해지므로 그 사람에게 붙고,
+  // 월·일 뷰에서 고른 칸은 원본과 같은 사람에게 붙는다.
+  async function handlePaste(src,targets){
+    if(!src||targets.length===0)return
+    const conflicts=[]
+    let done=0
+    try{
+      for(const t of targets){
+        const body={
+          worker_id:t.workerId||src.worker_id,
+          plan_date:t.date, slot:src.slot, use_type:src.use_type,
+          place_id:src.place_id??null, place_text:src.place_text??null, purpose:src.purpose??null,
+          transport:src.transport, vehicle_id:src.vehicle_id??null,
+          est_distance_km:src.est_distance_km??null, est_travel_min:src.est_travel_min??null,
+          round_trip:src.round_trip,
+        }
+        try{ await addPlan(body); done++ }
+        catch(e){
+          if(e.status===409&&e.conflicts?.length){
+            conflicts.push({...body,_names:e.conflicts.map(c=>c.worker_name)})
+          }else throw e
+        }
+      }
+      // 겹친 칸은 모아서 한 번만 묻는다
+      if(conflicts.length>0){
+        const lines=conflicts.map(c=>`· ${c.plan_date} — ${c._names.join('·')}`).join('\n')
+        if(confirm(`아래 날짜는 그 차량이 이미 예약돼 있습니다.\n\n${lines}\n\n그래도 붙일까요?`)){
+          for(const c of conflicts){ await addPlan({...c,force:true}); done++ }
+        }
+      }
+      showToast(done>0?`${done}곳에 붙였습니다`:'붙인 계획이 없습니다')
+      if(done>0){ await loadSchedule(); setSchedFocus(targets[0].date) }
+    }catch(e){ showToast('붙이기 실패: '+e.message) }
+    finally{ setClipboard(null) }
+  }
+
   async function handleLoadDate(date){
     try{
       showToast('조회 중...')
@@ -799,15 +837,19 @@ export default function App(){
           places={places} vehicles={vehicles} plans={plans} loading={schedLoading}
           onReload={loadSchedule} showToast={showToast} focusDate={schedFocus}
           onOpenNew={()=>setPlanDialog({editing:null,date:today()})}
-          onOpenPlan={p=>setPlanDialog({editing:p})}/>}
+          onOpenPlan={p=>setPlanDialog({editing:p})}
+          onOpenCell={({date,workerId})=>setPlanDialog({editing:null,date,workerId})}
+          clipboard={clipboard} onPaste={handlePaste} onCancelCopy={()=>setClipboard(null)}/>}
         {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers} dupNames={dupNames}
           jiraTree={jiraTree} setJiraTree={setJiraTree} showToast={showToast} tokenStatus={tokenStatus}/>}
       </main>
       {planDialog&&(
         <PlanDialog editing={planDialog.editing} defaultDate={planDialog.date}
+          defaultWorkerId={planDialog.workerId}
           workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
           places={places} vehicles={vehicles} showToast={showToast}
           onClose={()=>setPlanDialog(null)}
+          onCopy={p=>{ setClipboard(p); showToast('복사했습니다 — 달력에서 붙일 칸을 골라 주세요',4000) }}
           onSaved={async(r={})=>{ await loadSchedule(); if(r.focusDate) setSchedFocus(r.focusDate) }}/>
       )}
       {toast&&(
@@ -1278,7 +1320,8 @@ function PlanBadge({plan,workers,onClick,todayStr,compact=false}){
   const tp=TRANSPORT_MAP[plan.transport]||TRANSPORT_MAP.office
   const personal=plan.use_type==='personal'
   return(
-    <div onClick={onClick} title={`${plan.worker_name} · ${SLOT_MAP[plan.slot]} · ${personal?'개인 사용':(plan.place_name||plan.place_text||'장소 미정')}${plan.purpose?' · '+plan.purpose:''}${plan.vehicle_name?' · '+plan.vehicle_name:''}`}
+    <div data-badge onClick={e=>{e.stopPropagation();onClick()}}
+      title={`${plan.worker_name} · ${SLOT_MAP[plan.slot]} · ${personal?'개인 사용':(plan.place_name||plan.place_text||'장소 미정')}${plan.purpose?' · '+plan.purpose:''}${plan.vehicle_name?' · '+plan.vehicle_name:''}`}
       style={{display:'flex',alignItems:'center',gap:3,cursor:'pointer',
         background:st==='planned'||st==='needCheck'?color+'22':color+'dd',
         color:st==='planned'||st==='needCheck'?'#111827':'#fff',
@@ -1296,7 +1339,21 @@ function PlanBadge({plan,workers,onClick,todayStr,compact=false}){
   )
 }
 
-function TabSchedule({workers,places,vehicles,plans,loading,onReload,onOpenNew,onOpenPlan,showToast,focusDate}){
+function TabSchedule({workers,places,vehicles,plans,loading,onReload,onOpenNew,onOpenPlan,onOpenCell,
+                      showToast,focusDate,clipboard,onPaste,onCancelCopy}){
+  // 붙여넣기 모드에서 고른 칸들. 「날짜_직원id」 를 키로 담는다
+  // (주 뷰는 사람까지 고를 수 있고, 월·일 뷰는 날짜만 고른다)
+  const [picked,setPicked]=useState([])
+  const pasting=!!clipboard
+  const isPicked=(d,wid)=>picked.some(p=>p.date===d&&p.workerId===wid)
+  function togglePick(d,wid){
+    setPicked(prev=>prev.some(p=>p.date===d&&p.workerId===wid)
+      ? prev.filter(p=>!(p.date===d&&p.workerId===wid))
+      : [...prev,{date:d,workerId:wid}])
+  }
+  // 복사를 취소하거나 붙여넣기를 마치면 선택을 비운다
+  useEffect(()=>{ if(!clipboard) setPicked([]) },[clipboard])
+
   const [view,setView]=useState('week')
   const [anchor,setAnchor]=useState(today())      // 기준 날짜 (주·일 뷰)
   const [ym,setYm]=useState(toMonth(today()))     // 기준 월 (월 뷰)
@@ -1380,8 +1437,31 @@ function TabSchedule({workers,places,vehicles,plans,loading,onReload,onOpenNew,o
             cursor:'pointer',fontSize:13,fontWeight:700}}>+ 계획 추가</button>
       </div>
 
+      {/* 붙여넣기 바 — 복사한 계획이 있을 때만 나온다 */}
+      {pasting&&(
+        <div style={{background:'#eff6ff',border:'1px solid #93c5fd',borderRadius:8,padding:'10px 14px',
+          marginBottom:14,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+          <strong style={{fontSize:12,color:'#1e40af'}}>
+            📋 「{clipboard.place_name||clipboard.place_text||(clipboard.transport==='office'?'사무실':'개인 사용')}」 복사됨
+          </strong>
+          <span style={{fontSize:12,color:'#1e40af'}}>
+            붙일 칸을 눌러 고르십시오 (다시 누르면 해제) — <strong>{picked.length}개 선택</strong>
+          </span>
+          <div style={{flex:1}}/>
+          <button onClick={()=>{onPaste(clipboard,picked);setPicked([])}} disabled={picked.length===0}
+            style={{padding:'6px 14px',borderRadius:7,border:'none',fontSize:12,fontWeight:700,
+              background:picked.length?'#1a56db':'#e5e7eb',color:picked.length?'#fff':'#9ca3af',
+              cursor:picked.length?'pointer':'default'}}>
+            {picked.length?`${picked.length}곳에 붙이기`:'붙이기'}
+          </button>
+          <button onClick={onCancelCopy}
+            style={{padding:'6px 12px',borderRadius:7,border:'1px solid #93c5fd',background:'#fff',
+              color:'#1e40af',cursor:'pointer',fontSize:12}}>복사 취소</button>
+        </div>
+      )}
+
       {/* 안내 — 처음 쓸 때 장소가 없으면 알려 준다 */}
-      {places.length===0&&(
+      {places.length===0&&!pasting&&(
         <div style={{background:'#fffbeb',border:'1px solid #fcd34d',borderRadius:8,padding:'10px 14px',
           marginBottom:14,fontSize:12,color:'#92400e'}}>
           등록된 장소가 없습니다. 계획을 추가할 때 「새 장소」로 넣으면 거리·시간을 한 번만 입력하고
@@ -1405,11 +1485,13 @@ function TabSchedule({workers,places,vehicles,plans,loading,onReload,onOpenNew,o
       {loading&&<div style={{fontSize:12,color:'#6b7280',marginBottom:10}}>불러오는 중…</div>}
 
       {view==='month'&&<ScheduleMonth ym={ym} byDate={byDate} workers={workers} todayStr={todayStr}
-        onOpenPlan={onOpenPlan} onPickDate={d=>{setAnchor(d);setView('day')}}/>}
+        onOpenPlan={onOpenPlan} onPickDate={d=>{setAnchor(d);setView('day')}}
+        onOpenCell={onOpenCell} pasting={pasting} isPicked={isPicked} togglePick={togglePick}/>}
       {view==='week'&&<ScheduleWeek anchor={anchor} shown={shown} workers={workers} todayStr={todayStr}
-        onOpenPlan={onOpenPlan}/>}
+        onOpenPlan={onOpenPlan} onOpenCell={onOpenCell}
+        pasting={pasting} isPicked={isPicked} togglePick={togglePick}/>}
       {view==='day'&&<ScheduleDay date={anchor} byDate={byDate} workers={workers} vehicles={vehicles}
-        todayStr={todayStr} onOpenPlan={onOpenPlan}/>}
+        todayStr={todayStr} onOpenPlan={onOpenPlan} onOpenCell={onOpenCell}/>}
       {view==='year'&&<ScheduleYear year={year} plans={shown} workers={workers}
         onPickMonth={m=>{setYm(m);setView('month')}}/>}
 
@@ -1423,8 +1505,10 @@ function TabSchedule({workers,places,vehicles,plans,loading,onReload,onOpenNew,o
   )
 }
 
-// 월 뷰 — 날짜 격자에 배지를 얹는다
-function ScheduleMonth({ym,byDate,workers,todayStr,onOpenPlan,onPickDate}){
+// 월 뷰 — 날짜 격자에 배지를 얹는다.
+// 빈 곳을 누르면 그 날짜로 계획 창이 열리고, 붙여넣기 모드면 칸을 골라 담는다.
+function ScheduleMonth({ym,byDate,workers,todayStr,onOpenPlan,onPickDate,onOpenCell,
+                        pasting,isPicked,togglePick}){
   const days=monthGridDays(ym)
   return(
     <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,overflow:'hidden'}}>
@@ -1439,10 +1523,20 @@ function ScheduleMonth({ym,byDate,workers,todayStr,onOpenPlan,onPickDate}){
           const list=byDate(d)
           const out=!isSameMonth(d,ym)
           const isToday=d===todayStr
+          const chosen=pasting&&isPicked(d,null)
           return(
-            <div key={d} onDoubleClick={()=>onPickDate(d)}
+            <div key={d}
+              onClick={e=>{
+                // 배지를 눌렀을 때는 칸 동작이 겹치지 않게 한다
+                if(e.target.closest('[data-badge]'))return
+                if(pasting) togglePick(d,null)
+                else onOpenCell({date:d})
+              }}
+              title={pasting?'누르면 붙일 칸으로 고릅니다':'누르면 이 날짜에 계획을 추가합니다'}
               style={{minHeight:96,borderRight:'1px solid #f1f5f9',borderBottom:'1px solid #f1f5f9',
-                padding:'4px 5px',background:out?'#fafafa':isToday?'#eff6ff':'#fff',
+                padding:'4px 5px',cursor:'pointer',
+                background:chosen?'#dbeafe':out?'#fafafa':isToday?'#eff6ff':'#fff',
+                boxShadow:chosen?'inset 0 0 0 2px #1a56db':'none',
                 opacity:out?.5:1,overflow:'hidden'}}>
               <div style={{fontSize:11,fontWeight:isToday?700:500,marginBottom:3,
                 color:isToday?'#1a56db':'#6b7280'}}>
@@ -1453,7 +1547,7 @@ function ScheduleMonth({ym,byDate,workers,todayStr,onOpenPlan,onPickDate}){
                   onClick={()=>onOpenPlan(p)} compact/>
               ))}
               {list.length>4&&(
-                <div onClick={()=>onPickDate(d)}
+                <div data-badge onClick={()=>onPickDate(d)}
                   style={{fontSize:10,color:'#1a56db',cursor:'pointer',fontWeight:600}}>
                   +{list.length-4}건 더
                 </div>
@@ -1467,7 +1561,9 @@ function ScheduleMonth({ym,byDate,workers,todayStr,onOpenPlan,onPickDate}){
 }
 
 // 주 뷰 — «사람 × 날짜» 격자. 누가 어디 있는지 한눈에 보는 것이 목적이다.
-function ScheduleWeek({anchor,shown,workers,todayStr,onOpenPlan}){
+// 칸을 누르면 «그 사람 + 그 날짜» 로 계획 창이 열린다 — 이름을 다시 고를 필요가 없다.
+function ScheduleWeek({anchor,shown,workers,todayStr,onOpenPlan,onOpenCell,
+                       pasting,isPicked,togglePick}){
   const days=calWeekDays(anchor)
   return(
     <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,overflowX:'auto'}}>
@@ -1495,11 +1591,21 @@ function ScheduleWeek({anchor,shown,workers,todayStr,onOpenPlan}){
               </td>
               {days.map(d=>{
                 const list=shown.filter(p=>p.plan_date===d&&p.worker_id===w.id)
+                const chosen=pasting&&isPicked(d,w.id)
                 return(
-                  <td key={d} style={{...tdS,verticalAlign:'top',minWidth:96,
-                    background:d===todayStr?'#eff6ff':'transparent'}}>
+                  <td key={d}
+                    onClick={e=>{
+                      if(e.target.closest('[data-badge]'))return
+                      if(pasting) togglePick(d,w.id)
+                      else onOpenCell({date:d,workerId:w.id})
+                    }}
+                    title={pasting?`${w.name} · ${d} — 누르면 붙일 칸으로 고릅니다`
+                                  :`${w.name} · ${d} — 누르면 계획을 추가합니다`}
+                    style={{...tdS,verticalAlign:'top',minWidth:96,cursor:'pointer',
+                      background:chosen?'#dbeafe':d===todayStr?'#eff6ff':'transparent',
+                      boxShadow:chosen?'inset 0 0 0 2px #1a56db':'none'}}>
                     {list.length===0
-                      ?<span style={{color:'#e2e8f0',fontSize:11}}>-</span>
+                      ?<span style={{color:'#e2e8f0',fontSize:11}}>{pasting?'+':'-'}</span>
                       :list.map(p=>(
                         <PlanBadge key={p.id} plan={p} workers={workers} todayStr={todayStr}
                           onClick={()=>onOpenPlan(p)}/>
@@ -1516,7 +1622,7 @@ function ScheduleWeek({anchor,shown,workers,todayStr,onOpenPlan}){
 }
 
 // 일 뷰 — 그날 전원 + 차량 배정
-function ScheduleDay({date,byDate,workers,vehicles,todayStr,onOpenPlan}){
+function ScheduleDay({date,byDate,workers,vehicles,todayStr,onOpenPlan,onOpenCell}){
   const list=byDate(date)
   const noPlan=workers.filter(w=>!list.some(p=>p.worker_id===w.id))
   const carRows=vehicles.filter(v=>v.kind==='company').map(v=>({
@@ -1525,6 +1631,11 @@ function ScheduleDay({date,byDate,workers,vehicles,todayStr,onOpenPlan}){
   return(
     <div style={{display:'grid',gridTemplateColumns:'minmax(0,1.4fr) minmax(0,1fr)',gap:16}}>
       <Card title={`${date} (${dayName(date)}) 일정 ${list.length}건`}>
+        <div style={{marginBottom:10}}>
+          <button onClick={()=>onOpenCell({date})}
+            style={{padding:'7px 14px',borderRadius:7,border:'1px solid #1a56db',background:'#eff6ff',
+              color:'#1a56db',cursor:'pointer',fontSize:12,fontWeight:700}}>+ 이 날짜에 추가</button>
+        </div>
         {list.length===0
           ?<div style={{fontSize:12,color:'#6b7280'}}>등록된 일정이 없습니다.</div>
           :<table style={{width:'100%',borderCollapse:'collapse'}}>
@@ -1642,20 +1753,30 @@ function ScheduleYear({year,plans,workers,onPickMonth}){
 }
 
 // 계획 입력·확인 창.
-// 새 계획이면 editing=null, 기존 계획을 누르면 그 계획이 들어온다.
-function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved,showToast}){
+//   editing=null           새 계획
+//   editing=계획           기존 계획 — 실적이 없으면 그 자리에서 고칠 수 있다
+//   copyFrom=계획          그 내용으로 채운 새 계획 (날짜만 비어 있다)
+// 새 계획은 날짜를 «여러 개» 고를 수 있다 — 같은 일정을 여러 날 넣는 일이 잦다.
+function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,workers,places,vehicles,
+                     onClose,onSaved,onCopy,showToast}){
   const isNew=!editing
-  const [workerId,setWorkerId]=useState(editing?.worker_id||workers[0]?.id||'')
+  const src=editing||copyFrom||null        // 값을 가져올 원본
+  // 실적이 등록된 계획은 고칠 수 없다. 계획을 바꾸면 실적·정산 근거와 어긋난다.
+  const locked=!!editing?.actual_id
+  const canEdit=isNew||!locked
+  const [workerId,setWorkerId]=useState(src?.worker_id||defaultWorkerId||workers[0]?.id||'')
   const [date,setDate]=useState(editing?.plan_date||defaultDate||today())
-  const [slot,setSlot]=useState(editing?.slot||'allday')
-  const [useType,setUseType]=useState(editing?.use_type||'business')
+  // 새 계획에서 고른 날짜들. 수정 모드에서는 쓰지 않는다.
+  const [dates,setDates]=useState(isNew?(defaultDate?[defaultDate]:[today()]):[])
+  const [slot,setSlot]=useState(src?.slot||'allday')
+  const [useType,setUseType]=useState(src?.use_type||'business')
   // 장소가 상위 값이다. 사무실이면 이동 수단·차량·거리를 묻지 않는다.
   const [placeId,setPlaceId]=useState(
-    editing ? (editing.transport==='office'?OFFICE_PLACE:(editing.place_id||'')) : OFFICE_PLACE)
-  const [purpose,setPurpose]=useState(editing?.purpose||'')
-  const [transport,setTransport]=useState(editing?.transport||'office')
-  const [vehicleId,setVehicleId]=useState(editing?.vehicle_id||'')
-  const [roundTrip,setRoundTrip]=useState(editing?editing.round_trip:true)
+    src ? (src.transport==='office'?OFFICE_PLACE:(src.place_id||'')) : OFFICE_PLACE)
+  const [purpose,setPurpose]=useState(src?.purpose||'')
+  const [transport,setTransport]=useState(src?.transport||'office')
+  const [vehicleId,setVehicleId]=useState(src?.vehicle_id||'')
+  const [roundTrip,setRoundTrip]=useState(src?src.round_trip:true)
   const [busy,setBusy]=useState(false)
   // 새 장소 등록
   const [newPlace,setNewPlace]=useState(null)   // {name,address,distance_km,travel_min,category}
@@ -1714,17 +1835,36 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
     if(created) showToast(`장소 「${created.name}」 등록`)
   }
 
-  async function submit(force=false){
-    if(!workerId){showToast('이름을 선택해 주세요');return}
-    if(!personal&&!placeId&&!newPlace){showToast('장소를 선택해 주세요');return}
+  // 입력값 검사 — 새로 넣을 때와 고칠 때 모두 쓴다
+  function validate(){
+    if(!workerId){showToast('이름을 선택해 주세요');return false}
+    if(isNew&&dates.length===0){showToast('날짜를 하나 이상 골라 주세요');return false}
+    if(!personal&&!placeId&&!newPlace){showToast('장소를 선택해 주세요');return false}
     // 외부 장소면 이동 수단을 반드시 고르게 한다. 기본값을 넣어 두면
     // 실제와 다른 수단으로 정산될 수 있다.
-    if(needsTransport&&!transport){showToast('이동 수단을 선택해 주세요');return}
-    if(tp.needsVehicle&&!vehicleId){showToast('차량을 선택해 주세요');return}
+    if(needsTransport&&!transport){showToast('이동 수단을 선택해 주세요');return false}
+    if(tp.needsVehicle&&!vehicleId){showToast('차량을 선택해 주세요');return false}
+    return true
+  }
+
+  // 계획 한 건의 본문. 새 장소를 먼저 등록해 둔 뒤 부른다.
+  function buildBody(planDate,placeIdToUse,km,min,force=false){
+    return {
+      worker_id:Number(workerId), plan_date:planDate, slot, use_type:useType,
+      place_id:personal?null:(placeIdToUse?Number(placeIdToUse):null),
+      purpose:personal?null:purpose,
+      transport:atOffice?'office':transport,   // 사무실 내근은 장소·차량 없이 office 로만 남는다
+      vehicle_id:(!atOffice&&tp.needsVehicle)?Number(vehicleId):null,
+      est_distance_km:personal?null:km, est_travel_min:personal?null:min,
+      round_trip:atOffice?false:roundTrip, force,
+    }
+  }
+
+  async function submit(){
+    if(!validate())return
 
     // 새 장소를 적어 둔 채 「계획 등록」을 누르는 것이 자연스러운 흐름이다.
-    // 예전에는 「장소 등록」을 따로 누르지 않으면 적은 내용이 버려지고
-    // 장소 없는 계획만 들어갔다 — 사용자는 아무 것도 안 된 것처럼 느낀다.
+    // 「장소 등록」을 따로 누르지 않으면 적은 내용이 버려지던 문제를 막는다.
     let usePlaceId=atOffice?null:placeId
     let useKm=estKm, useMin=estMin
     if(!personal&&newPlace){
@@ -1736,35 +1876,66 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
       useMin=created.travel_min??null
     }
 
-    // 사무실 내근은 장소·차량·거리 없이 transport='office' 로만 남는다
-    const useTransport=atOffice?'office':transport
-    const body={
-      worker_id:Number(workerId), plan_date:date, slot, use_type:useType,
-      place_id:personal?null:(usePlaceId?Number(usePlaceId):null),
-      purpose:personal?null:purpose,
-      transport:useTransport,
-      vehicle_id:(!atOffice&&tp.needsVehicle)?Number(vehicleId):null,
-      est_distance_km:personal?null:useKm, est_travel_min:personal?null:useMin,
-      round_trip:atOffice?false:roundTrip, force,
-    }
     try{
       setBusy(true)
-      await addPlan(body)
-      // 등록한 날짜로 달력을 옮겨 준다. 보고 있는 기간 밖에 등록되면
-      // 화면에 나타나지 않아 «등록이 안 됐다» 고 오해하게 된다.
-      showToast(`${date} 계획을 등록했습니다`)
-      await onSaved({focusDate:date})
-      onClose()
-    }catch(e){
-      // 차량이 겹치면 409. 먼저 등록한 사람이 우선이고, 그래도 넣을지 물어본다.
-      if(e.status===409&&e.conflicts?.length&&!force){
-        const who=e.conflicts.map(c=>`· ${c.worker_name} (${SLOT_MAP[c.slot]||c.slot})`).join('\n')
-        if(confirm(`이 차량은 그 날 이미 예약돼 있습니다.\n\n${who}\n\n그래도 등록할까요?`)){
-          await submit(true)
-          return
+
+      // ── 고치는 경우 ──
+      if(!isNew){
+        await updatePlan(editing.id,buildBody(date,usePlaceId,useKm,useMin))
+        showToast('계획을 수정했습니다')
+        await onSaved({focusDate:date})
+        onClose()
+        return
+      }
+
+      // ── 새로 넣는 경우 — 고른 날짜만큼 넣는다 ──
+      const targets=[...dates].sort()
+      const conflicts=[]   // 차량이 겹친 날짜
+      let done=0
+      for(const d of targets){
+        try{
+          await addPlan(buildBody(d,usePlaceId,useKm,useMin))
+          done++
+        }catch(e){
+          if(e.status===409&&e.conflicts?.length){
+            conflicts.push({date:d,names:e.conflicts.map(c=>c.worker_name)})
+          }else throw e
         }
-      }else showToast('등록 실패: '+e.message)
+      }
+
+      // 겹친 날짜는 «모아서 한 번만» 물어본다. 날짜마다 확인창이 뜨면 쓰기 어렵다.
+      if(conflicts.length>0){
+        const lines=conflicts.map(c=>`· ${c.date} — ${c.names.join('·')}`).join('\n')
+        if(confirm(`아래 날짜는 그 차량이 이미 예약돼 있습니다.\n\n${lines}\n\n그래도 등록할까요?`)){
+          for(const c of conflicts){
+            await addPlan(buildBody(c.date,usePlaceId,useKm,useMin,true))
+            done++
+          }
+        }
+      }
+
+      if(done>0){
+        showToast(done===1?`${targets[0]} 계획을 등록했습니다`:`${done}건을 등록했습니다 (${targets[0]} 외)`)
+        await onSaved({focusDate:targets[0]})
+        onClose()
+      }else{
+        showToast('등록된 계획이 없습니다')
+      }
+    }catch(e){
+      showToast('등록 실패: '+e.message)
     }finally{setBusy(false)}
+  }
+
+  // 날짜 태그 조작 — 새 계획에서만 쓴다
+  function addDate(d){
+    if(!d)return
+    setDates(prev=>prev.includes(d)?prev:[...prev,d].sort())
+  }
+  function removeDate(d){ setDates(prev=>prev.filter(x=>x!==d)) }
+  // 그 날짜가 속한 주의 평일(월~금)을 한 번에 넣는다
+  function addWeekdays(){
+    const week=calWeekDays(date).slice(0,5)
+    setDates(prev=>[...new Set([...prev,...week])].sort())
   }
 
   async function handleDelete(){
@@ -1797,21 +1968,32 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
         style={{background:'#fff',borderRadius:12,width:'100%',maxWidth:520,padding:22,
           boxShadow:'0 20px 50px rgba(0,0,0,.25)'}}>
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:16}}>
-          <strong style={{fontSize:16}}>{isNew?'계획 추가':'계획 상세'}</strong>
+          <strong style={{fontSize:16}}>
+            {isNew?(copyFrom?'계획 복사':'계획 추가'):(locked?'계획 상세':'계획 수정')}
+          </strong>
           <button onClick={onClose} style={{border:'none',background:'none',fontSize:20,cursor:'pointer',color:'#6b7280'}}>×</button>
         </div>
 
-        {!isNew&&editing.actual_id&&(
+        {copyFrom&&(
+          <div style={{background:'#eff6ff',border:'1px solid #93c5fd',borderRadius:8,padding:'8px 12px',
+            marginBottom:14,fontSize:12,color:'#1e40af'}}>
+            「{copyFrom.place_name||copyFrom.place_text||(copyFrom.transport==='office'?'사무실':'개인 사용')}」
+            내용을 그대로 가져왔습니다. <strong>넣을 날짜만 고르면 됩니다.</strong>
+          </div>
+        )}
+
+        {locked&&(
           <div style={{background:'#ecfdf5',border:'1px solid #6ee7b7',borderRadius:8,padding:'8px 12px',
             marginBottom:14,fontSize:12,color:'#065f46'}}>
-            실적이 등록된 계획입니다{editing.as_planned===false?' (계획과 달랐음)':''}.
-            {editing.actual_distance_km!=null&&` 주행 ${editing.actual_distance_km}km`}
+            <strong>실적이 등록된 계획입니다</strong>{editing.as_planned===false?' (계획과 달랐음)':''}.
+            {editing.actual_distance_km!=null&&` 주행 ${editing.actual_distance_km}km.`}
+            <br/>정산 근거와 어긋나지 않도록 계획은 고칠 수 없습니다 — 고쳐야 하면 실적을 먼저 지워 주십시오.
           </div>
         )}
 
         <div style={rowS}>
           <label style={labelS}>이름</label>
-          <select value={workerId} onChange={e=>setWorkerId(e.target.value)} disabled={!isNew} style={inputS}>
+          <select value={workerId} onChange={e=>setWorkerId(e.target.value)} disabled={!canEdit} style={inputS}>
             <option value="">선택</option>
             {workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
           </select>
@@ -1820,22 +2002,54 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,...rowS}}>
           <div>
             <label style={labelS}>날짜</label>
-            <input type="date" value={date} onChange={e=>setDate(e.target.value)} disabled={!isNew} style={inputS}/>
+            <input type="date" value={date} onChange={e=>{setDate(e.target.value);if(isNew)addDate(e.target.value)}}
+              disabled={!canEdit} style={inputS}/>
           </div>
           <div>
             <label style={labelS}>시간대</label>
-            <select value={slot} onChange={e=>setSlot(e.target.value)} disabled={!isNew} style={inputS}>
+            <select value={slot} onChange={e=>setSlot(e.target.value)} disabled={!canEdit} style={inputS}>
               {SLOTS.map(s=><option key={s.v} value={s.v}>{s.label}</option>)}
             </select>
           </div>
         </div>
 
+        {/* 같은 일정을 여러 날 넣는 일이 잦다. 고른 날짜가 태그로 쌓인다. */}
+        {isNew&&(
+          <div style={{...rowS,background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,padding:'10px 12px'}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8,flexWrap:'wrap'}}>
+              <strong style={{fontSize:12}}>넣을 날짜 {dates.length}개</strong>
+              <button onClick={()=>addDate(date)}
+                style={{padding:'4px 10px',borderRadius:6,border:'1px solid #1a56db',background:'#eff6ff',
+                  color:'#1a56db',cursor:'pointer',fontSize:11,fontWeight:600}}>+ 위 날짜 추가</button>
+              <button onClick={addWeekdays}
+                style={{padding:'4px 10px',borderRadius:6,border:'1px solid #1a56db',background:'#eff6ff',
+                  color:'#1a56db',cursor:'pointer',fontSize:11,fontWeight:600}}>그 주 평일(월~금)</button>
+              {dates.length>0&&(
+                <button onClick={()=>setDates([])}
+                  style={{padding:'4px 10px',borderRadius:6,border:'1px solid #e5e7eb',background:'#fff',
+                    color:'#6b7280',cursor:'pointer',fontSize:11}}>모두 지우기</button>
+              )}
+            </div>
+            {dates.length===0
+              ?<div style={{fontSize:11,color:'#92400e'}}>날짜를 하나 이상 골라 주세요.</div>
+              :<div style={{display:'flex',gap:5,flexWrap:'wrap'}}>
+                {dates.map(d=>(
+                  <span key={d} onClick={()=>removeDate(d)} title="누르면 제외됩니다"
+                    style={{display:'inline-flex',alignItems:'center',gap:4,cursor:'pointer',
+                      background:'#1a56db',color:'#fff',borderRadius:5,padding:'3px 8px',fontSize:11,fontWeight:600}}>
+                    {mdLabel(d)} ({dayName(d)}) <span style={{opacity:.8}}>×</span>
+                  </span>
+                ))}
+              </div>}
+          </div>
+        )}
+
         <div style={rowS}>
           <label style={labelS}>구분</label>
           <div style={{display:'flex',gap:8}}>
             {[{v:'business',label:'업무'},{v:'personal',label:'개인 사용'}].map(o=>(
-              <button key={o.v} onClick={()=>isNew&&setUseType(o.v)} disabled={!isNew}
-                style={{flex:1,padding:'8px',borderRadius:7,cursor:isNew?'pointer':'default',fontSize:13,
+              <button key={o.v} onClick={()=>canEdit&&setUseType(o.v)} disabled={!canEdit}
+                style={{flex:1,padding:'8px',borderRadius:7,cursor:canEdit?'pointer':'default',fontSize:13,
                   fontWeight:useType===o.v?700:500,
                   border:`1px solid ${useType===o.v?'#1a56db':'#e5e7eb'}`,
                   background:useType===o.v?'#eff6ff':'#fff',
@@ -1894,7 +2108,7 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
                       // 외부 장소로 바꾸면 이동 수단을 «미선택» 으로 두고 사용자가 고르게 한다.
                       if(v===OFFICE_PLACE){setTransport('office');setVehicleId('')}
                       else if(transport==='office'){setTransport('');setVehicleId('')}
-                    }} disabled={!isNew} style={inputS}>
+                    }} disabled={!canEdit} style={inputS}>
                     <option value={OFFICE_PLACE}>🏢 사무실 (내근)</option>
                     <option value="">— 외부 장소 선택 —</option>
                     {places.map(p=>(
@@ -1919,7 +2133,7 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
 
             <div style={rowS}>
               <label style={labelS}>업무 {atOffice&&<span style={{fontWeight:500}}>(선택)</span>}</label>
-              <input value={purpose} onChange={e=>setPurpose(e.target.value)} disabled={!isNew}
+              <input value={purpose} onChange={e=>setPurpose(e.target.value)} disabled={!canEdit}
                 placeholder="무엇을 할 계획인지 한 줄로" style={inputS}/>
             </div>
           </>
@@ -1931,9 +2145,9 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
             <label style={labelS}>이동 수단</label>
             <div style={{display:'flex',gap:6}}>
               {OUT_TRANSPORTS.map(t=>(
-                <button key={t.v} onClick={()=>{if(isNew){setTransport(t.v);if(!t.needsVehicle)setVehicleId('')}}}
-                  disabled={!isNew}
-                  style={{flex:1,padding:'8px 4px',borderRadius:7,cursor:isNew?'pointer':'default',fontSize:12,
+                <button key={t.v} onClick={()=>{if(canEdit){setTransport(t.v);if(!t.needsVehicle)setVehicleId('')}}}
+                  disabled={!canEdit}
+                  style={{flex:1,padding:'8px 4px',borderRadius:7,cursor:canEdit?'pointer':'default',fontSize:12,
                     fontWeight:transport===t.v?700:500,
                     border:`1px solid ${transport===t.v?'#1a56db':'#e5e7eb'}`,
                     background:transport===t.v?'#eff6ff':'#fff',
@@ -1951,7 +2165,7 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
         {!atOffice&&tp.needsVehicle&&(
           <div style={rowS}>
             <label style={labelS}>차량</label>
-            <select value={vehicleId} onChange={e=>setVehicleId(e.target.value)} disabled={!isNew} style={inputS}>
+            <select value={vehicleId} onChange={e=>setVehicleId(e.target.value)} disabled={!canEdit} style={inputS}>
               <option value="">선택</option>
               {vehicles
                 .filter(v=>transport==='company_car'?v.kind==='company':v.kind==='own')
@@ -1971,8 +2185,8 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
 
         {!personal&&!atOffice&&(
           <div style={{...rowS,background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,padding:'10px 12px'}}>
-            <label style={{display:'flex',alignItems:'center',gap:7,fontSize:12,cursor:isNew?'pointer':'default'}}>
-              <input type="checkbox" checked={!!roundTrip} disabled={!isNew}
+            <label style={{display:'flex',alignItems:'center',gap:7,fontSize:12,cursor:canEdit?'pointer':'default'}}>
+              <input type="checkbox" checked={!!roundTrip} disabled={!canEdit}
                 onChange={e=>setRoundTrip(e.target.checked)}/>
               왕복
             </label>
@@ -1986,30 +2200,48 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
           </div>
         )}
 
-        <div style={{display:'flex',gap:8,marginTop:18}}>
-          {isNew
-            ?<>
-              <button onClick={()=>submit(false)} disabled={busy}
-                style={{flex:1,padding:'11px',borderRadius:8,border:'none',background:'#1a56db',
-                  color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
-                {busy?'처리 중…':(newPlace&&!personal?'장소 + 계획 등록':'계획 등록')}
+        {isNew
+          ?<div style={{display:'flex',gap:8,marginTop:18}}>
+            <button onClick={submit} disabled={busy}
+              style={{flex:1,padding:'11px',borderRadius:8,border:'none',background:'#1a56db',
+                color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
+              {busy?'처리 중…'
+                :(newPlace&&!personal?'장소 + 계획 등록'
+                  :dates.length>1?`${dates.length}개 날짜에 등록`:'계획 등록')}
+            </button>
+            <button onClick={onClose} style={{padding:'11px 18px',borderRadius:8,
+              border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:14}}>취소</button>
+          </div>
+          :<>
+            {/* 실적이 없는 계획은 그 자리에서 고칠 수 있다 */}
+            {canEdit&&(
+              <div style={{display:'flex',gap:8,marginTop:18}}>
+                <button onClick={submit} disabled={busy}
+                  style={{flex:1,padding:'11px',borderRadius:8,border:'none',background:'#1a56db',
+                    color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
+                  {busy?'처리 중…':'수정 저장'}
+                </button>
+                {editing.plan_date<=today()&&(
+                  <button onClick={handleAsPlanned} disabled={busy}
+                    style={{padding:'11px 16px',borderRadius:8,border:'none',background:'#059669',
+                      color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>계획대로 완료</button>
+                )}
+              </div>
+            )}
+            <div style={{display:'flex',gap:8,marginTop:8}}>
+              {/* 복사 — 달력에서 붙일 날짜를 골라 여러 날에 넣을 수 있다 */}
+              <button onClick={()=>{onCopy&&onCopy(editing);onClose()}} disabled={busy}
+                style={{flex:1,padding:'10px',borderRadius:8,border:'1px solid #1a56db',
+                  background:'#eff6ff',color:'#1a56db',cursor:'pointer',fontSize:13,fontWeight:700}}>
+                복사 (다른 날짜에 붙이기)
               </button>
-              <button onClick={onClose} style={{padding:'11px 18px',borderRadius:8,
-                border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:14}}>취소</button>
-            </>
-            :<>
-              {!editing.actual_id&&editing.plan_date<=today()&&(
-                <button onClick={handleAsPlanned} disabled={busy}
-                  style={{flex:1,padding:'11px',borderRadius:8,border:'none',background:'#059669',
-                    color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>계획대로 완료</button>
-              )}
               <button onClick={handleDelete} disabled={busy}
-                style={{padding:'11px 18px',borderRadius:8,border:'1px solid #fca5a5',
-                  background:'#fff',color:'#dc2626',cursor:'pointer',fontSize:14}}>삭제</button>
-              <button onClick={onClose} style={{padding:'11px 18px',borderRadius:8,
-                border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:14}}>닫기</button>
-            </>}
-        </div>
+                style={{padding:'10px 16px',borderRadius:8,border:'1px solid #fca5a5',
+                  background:'#fff',color:'#dc2626',cursor:'pointer',fontSize:13}}>삭제</button>
+              <button onClick={onClose} style={{padding:'10px 16px',borderRadius:8,
+                border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:13}}>닫기</button>
+            </div>
+          </>}
       </div>
     </div>
   )
