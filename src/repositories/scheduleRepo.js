@@ -26,6 +26,7 @@ async function request(method, path, body) {
 }
 
 // ── 장소 ──
+// 장소가 수십 개가 되면 콤보로는 고를 수 없어 별도 선택 창에서 검색·관리한다.
 export const getPlaces = (all = false) => request('GET', `/places${all ? '?all=1' : ''}`)
 // force=true 로 다시 부르면 유사 이름 경고를 넘기고 등록한다
 export const addPlace = (place) => request('POST', '/places', place)

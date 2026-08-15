@@ -657,15 +657,22 @@ app.get('/api/schedule/vehicle-usage', async (req, res) => {
   }
 })
 
+// 일정 유형 세 가지 — business(업무) · personal(개인 사용) · vacation(휴가)
+const USE_TYPES = ['business', 'personal', 'vacation']
+
 app.post('/api/schedule/plans', async (req, res) => {
   const b = req.body
   if (!b.worker_id) return res.status(400).json({ error: '이름을 먼저 선택해 주세요.' })
   if (!b.plan_date) return res.status(400).json({ error: '날짜가 필요합니다.' })
-  const useType = b.use_type === 'personal' ? 'personal' : 'business'
-  // 개인 사용은 장소·용무를 받지 않는다 (설계서 5.2절 — 사적인 행선지를 남기지 않는다)
-  const placeId   = useType === 'personal' ? null : (b.place_id ?? null)
-  const placeText = useType === 'personal' ? null : (b.place_text || null)
-  const purpose   = useType === 'personal' ? null : (b.purpose || null)
+  const useType = USE_TYPES.includes(b.use_type) ? b.use_type : 'business'
+  // 개인 사용·휴가는 장소·용무를 받지 않는다.
+  // 개인 사용은 사적인 행선지를 남기지 않기 위함이고(설계서 5.2절),
+  // 휴가는 애초에 «어디서 일하는가» 가 없다.
+  const keepPlace = useType === 'business'
+  const placeId   = keepPlace ? (b.place_id ?? null) : null
+  const placeText = keepPlace ? (b.place_text || null) : null
+  const purpose   = keepPlace ? (b.purpose || null) : null
+  const vacationType = useType === 'vacation' ? (b.vacation_type || null) : null
   try {
     // 차량 겹침 검사 — 먼저 등록한 사람이 우선이고, 겹치면 경고만 한다.
     // force=true 로 다시 부르면 그대로 등록된다 (승인 절차를 두지 않는다)
@@ -688,12 +695,12 @@ app.post('/api/schedule/plans', async (req, res) => {
       `INSERT INTO schedule_plans
          (worker_id, plan_date, slot, start_time, end_time, use_type,
           place_id, place_text, purpose, transport, vehicle_id,
-          est_distance_km, est_travel_min, round_trip)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+          est_distance_km, est_travel_min, round_trip, vacation_type)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
       [b.worker_id, b.plan_date, b.slot || 'allday', b.start_time || null, b.end_time || null,
        useType, placeId, placeText, purpose, b.transport || 'office', b.vehicle_id ?? null,
        b.est_distance_km ?? null, b.est_travel_min ?? null,
-       b.round_trip === undefined ? true : !!b.round_trip]
+       b.round_trip === undefined ? true : !!b.round_trip, vacationType]
     )
     res.json(rows[0])
   } catch (e) {
@@ -707,7 +714,7 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
     const { rows: cur } = await pool.query('SELECT * FROM schedule_plans WHERE id = $1', [req.params.id])
     if (cur.length === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
     const useType = b.use_type ?? cur[0].use_type
-    const personal = useType === 'personal'
+    const keepPlace = useType === 'business'
     const { rowCount } = await pool.query(
       `UPDATE schedule_plans
           SET plan_date = COALESCE($1, plan_date), slot = COALESCE($2, slot),
@@ -716,17 +723,19 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
               transport = COALESCE($9, transport), vehicle_id = $10,
               est_distance_km = $11, est_travel_min = $12,
               round_trip = COALESCE($13, round_trip),
-              status = COALESCE($14, status), updated_at = now()
-        WHERE id = $15`,
+              status = COALESCE($14, status), vacation_type = $15, updated_at = now()
+        WHERE id = $16`,
       [b.plan_date || null, b.slot || null, b.start_time || null, b.end_time || null, useType,
-       personal ? null : (b.place_id ?? cur[0].place_id),
-       personal ? null : (b.place_text ?? cur[0].place_text),
-       personal ? null : (b.purpose ?? cur[0].purpose),
+       keepPlace ? (b.place_id ?? cur[0].place_id) : null,
+       keepPlace ? (b.place_text ?? cur[0].place_text) : null,
+       keepPlace ? (b.purpose ?? cur[0].purpose) : null,
        b.transport || null, b.vehicle_id ?? cur[0].vehicle_id,
        b.est_distance_km ?? cur[0].est_distance_km,
        b.est_travel_min ?? cur[0].est_travel_min,
        b.round_trip === undefined ? null : !!b.round_trip,
-       b.status || null, req.params.id]
+       b.status || null,
+       useType === 'vacation' ? (b.vacation_type ?? cur[0].vacation_type) : null,
+       req.params.id]
     )
     if (rowCount === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
     res.json({ ok: true })
@@ -800,7 +809,7 @@ app.post('/api/schedule/actuals', async (req, res) => {
       return res.status(400).json({ error: '직원과 날짜가 필요합니다.' })
     }
     const useType  = b.use_type ?? base.use_type ?? 'business'
-    const personal = useType === 'personal'
+    const keepPlace = useType === 'business'
     // 왕복이면 거리를 2배로 잡아 기본값을 만든다 (사용자가 고칠 수 있다)
     const estimated = base.est_distance_km != null
       ? (base.round_trip ? base.est_distance_km * 2 : base.est_distance_km)
@@ -814,9 +823,9 @@ app.post('/api/schedule/actuals', async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
       [b.plan_id ?? null, workerId, workDate,
        b.as_planned === undefined ? true : !!b.as_planned, useType,
-       personal ? null : (b.place_id ?? base.place_id ?? null),
-       personal ? null : (b.place_text ?? base.place_text ?? null),
-       personal ? null : (b.purpose ?? base.purpose ?? null),
+       keepPlace ? (b.place_id ?? base.place_id ?? null) : null,
+       keepPlace ? (b.place_text ?? base.place_text ?? null) : null,
+       keepPlace ? (b.purpose ?? base.purpose ?? null) : null,
        b.transport ?? base.transport ?? 'office',
        b.vehicle_id ?? base.vehicle_id ?? null,
        b.distance_km ?? estimated,
@@ -846,7 +855,7 @@ app.patch('/api/schedule/actuals/:id', async (req, res) => {
       return res.status(409).json({ error: '정산이 완료된 달의 기록입니다. 수정하려면 대표이사가 잠금을 해제해야 합니다.' })
     }
     const useType  = b.use_type ?? cur[0].use_type
-    const personal = useType === 'personal'
+    const keepPlace = useType === 'business'
     await pool.query(
       `UPDATE schedule_actuals
           SET as_planned = COALESCE($1, as_planned), use_type = $2,
@@ -857,9 +866,9 @@ app.patch('/api/schedule/actuals/:id', async (req, res) => {
               memo = $12, updated_at = now()
         WHERE id = $13`,
       [b.as_planned === undefined ? null : !!b.as_planned, useType,
-       personal ? null : (b.place_id ?? cur[0].place_id),
-       personal ? null : (b.place_text ?? cur[0].place_text),
-       personal ? null : (b.purpose ?? cur[0].purpose),
+       keepPlace ? (b.place_id ?? cur[0].place_id) : null,
+       keepPlace ? (b.place_text ?? cur[0].place_text) : null,
+       keepPlace ? (b.purpose ?? cur[0].purpose) : null,
        b.transport || null, b.vehicle_id ?? cur[0].vehicle_id,
        b.distance_km ?? cur[0].distance_km,
        b.toll_fee ?? null, b.transit_fee ?? null, b.fuel_fee ?? null,

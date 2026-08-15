@@ -5,8 +5,8 @@ import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, L
 import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates, updateWorkerEmail } from './repositories/workerRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
 import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
-import { getPlaces, addPlace, getVehicles, getPlans, addPlan, updatePlan, removePlan,
-         getActuals, addActual } from './repositories/scheduleRepo'
+import { getPlaces, addPlace, updatePlace, hidePlace, getVehicles, getPlans, addPlan, updatePlan,
+         removePlan, getActuals, addActual } from './repositories/scheduleRepo'
 
 const WORK_HOURS=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
 // 정규 근무시간 (09:00 시작 ~ 18:00 종료 → 17:00 행까지 포함) — 입력표에서 노랗게 강조
@@ -27,18 +27,31 @@ const OUT_TRANSPORTS=[
   {v:'own_car',     label:'자차',   icon:'🚙', needsVehicle:true},
   {v:'transit',     label:'대중교통', icon:'🚌', needsVehicle:false},
 ]
-// 표시용에는 사무실도 필요하다(달력 배지·일 뷰)
+// 표시용에는 사무실과 «이동 없음» 도 필요하다(달력 배지·일 뷰).
+// none 을 빼 두면 휴가 배지가 fallback 으로 🏢(사무실) 처럼 보인다.
 const TRANSPORT_MAP=Object.fromEntries([
   ...OUT_TRANSPORTS,
-  {v:'office', label:'사무실', icon:'🏢', needsVehicle:false},
+  {v:'office', label:'사무실',   icon:'🏢', needsVehicle:false},
+  {v:'none',   label:'이동 없음', icon:'🌴', needsVehicle:false},
 ].map(t=>[t.v,t]))
-// 장소 콤보 맨 위의 고정 항목. 장소 목록(DB)에 넣지 않는다 —
+// 장소 목록 맨 위의 고정 항목. 장소 목록(DB)에 넣지 않는다 —
 // 사무실은 회사 자체이고 거리가 0 이라 관리 대상을 늘릴 이유가 없다.
 const OFFICE_PLACE='office'
+
+// 일정 유형 — 무엇을 등록하는가. 이것을 먼저 고르면 그 뒤에 «필요한 것만» 나온다.
+// (예전에는 「업무/개인 사용」이 차량과 무관한 자리에 먼저 나와 순서가 어긋났다)
+const PLAN_KINDS=[
+  {v:'work',    label:'업무',      icon:'📋', desc:'장소에서 하는 일'},
+  {v:'vehicle', label:'차량 예약', icon:'🚗', desc:'차량만 쓰는 경우'},
+  {v:'vacation',label:'휴가',      icon:'🌴', desc:'연차·병가 등'},
+]
+// 휴가 종류. 값이 늘거나 바뀔 수 있으므로 여기 한 곳에서만 관리한다.
+const VACATION_TYPES=['연차','병가','포상','기타']
+// 장소 분류 — 「현장」과 「고객사」를 굳이 나눌 이유가 없어 합쳤다.
+const PLACE_CATEGORIES=['고객사','기타']
 const SLOTS=[{v:'allday',label:'종일'},{v:'am',label:'오전'},{v:'pm',label:'오후'},{v:'time',label:'시각 지정'}]
 const SLOT_MAP=Object.fromEntries(SLOTS.map(s=>[s.v,s.label]))
 const SCHEDULE_VIEWS=[{v:'month',label:'월'},{v:'week',label:'주'},{v:'day',label:'일'},{v:'year',label:'연'}]
-const PLACE_CATEGORIES=['사무실','고객사','현장','기타']
 // 표 머리글은 데이터 행과 확실히 구분되는 진한 남색으로.
 // 연한 회색(#f9fafb)이던 때는 첫 데이터 행과 같은 색이라 머리글이 붙어 보였다.
 // 오늘 업무 입력표 머리글과 같은 색이라 화면 전체가 일관된다.
@@ -1300,10 +1313,16 @@ function workerColor(workerId,workers){
 }
 // 배지에 넣을 짧은 장소 이름. 달력 칸이 좁아 긴 이름은 잘라야 한다.
 function shortPlace(plan){
+  if(plan.use_type==='vacation') return plan.vacation_type||'휴가'
   if(plan.use_type==='personal') return '개인 사용'
   if(plan.transport==='office') return '사무실'
   const nm=plan.place_name||plan.place_text||''
   return nm.length>9?nm.slice(0,9)+'…':nm
+}
+// 배지에 붙는 아이콘 — 휴가는 이동 수단이 없으므로 따로 잡는다
+function planIcon(plan){
+  if(plan.use_type==='vacation') return '🌴'
+  return (TRANSPORT_MAP[plan.transport]||TRANSPORT_MAP.office).icon
 }
 // 계획 한 건이 어떤 상태인지 — 달력 표시와 「확인 필요」 판단에 쓴다
 function planState(plan,todayStr){
@@ -1317,20 +1336,20 @@ const PLAN_STATE_MARK={done:'',changed:'↺',needCheck:'●',planned:'',canceled
 function PlanBadge({plan,workers,onClick,todayStr,compact=false}){
   const color=workerColor(plan.worker_id,workers)
   const st=planState(plan,todayStr)
-  const tp=TRANSPORT_MAP[plan.transport]||TRANSPORT_MAP.office
   const personal=plan.use_type==='personal'
+  const vacation=plan.use_type==='vacation'
   return(
     <div data-badge onClick={e=>{e.stopPropagation();onClick()}}
-      title={`${plan.worker_name} · ${SLOT_MAP[plan.slot]} · ${personal?'개인 사용':(plan.place_name||plan.place_text||'장소 미정')}${plan.purpose?' · '+plan.purpose:''}${plan.vehicle_name?' · '+plan.vehicle_name:''}`}
+      title={`${plan.worker_name} · ${SLOT_MAP[plan.slot]} · ${vacation?('휴가 · '+(plan.vacation_type||'')):personal?'개인 사용':(plan.place_name||plan.place_text||'장소 미정')}${plan.purpose?' · '+plan.purpose:''}${plan.vehicle_name?' · '+plan.vehicle_name:''}`}
       style={{display:'flex',alignItems:'center',gap:3,cursor:'pointer',
         background:st==='planned'||st==='needCheck'?color+'22':color+'dd',
         color:st==='planned'||st==='needCheck'?'#111827':'#fff',
-        border:`1px solid ${color}`,borderStyle:personal?'dashed':'solid',
+        border:`1px solid ${color}`,borderStyle:(personal||vacation)?'dashed':'solid',
         borderRadius:4,padding:compact?'1px 4px':'2px 5px',fontSize:compact?10:11,
         marginBottom:2,whiteSpace:'nowrap',overflow:'hidden',
         opacity:st==='canceled'?.45:1,
         textDecoration:st==='canceled'?'line-through':'none'}}>
-      <span>{tp.icon}</span>
+      <span>{planIcon(plan)}</span>
       <strong style={{fontSize:compact?10:11}}>{plan.worker_name}</strong>
       {!compact&&<span style={{opacity:.9,overflow:'hidden',textOverflow:'ellipsis'}}>{shortPlace(plan)}</span>}
       {st==='needCheck'&&<span style={{color:'#c2410c',fontWeight:700}}>{PLAN_STATE_MARK.needCheck}</span>}
@@ -1496,7 +1515,7 @@ function TabSchedule({workers,places,vehicles,plans,loading,onReload,onOpenNew,o
         onPickMonth={m=>{setYm(m);setView('month')}}/>}
 
       <div style={{marginTop:14,fontSize:11,color:'#6b7280',display:'flex',gap:14,flexWrap:'wrap'}}>
-        <span>🏢 사무실</span><span>🚗 법인차량</span><span>🚙 자차</span><span>🚌 대중교통</span>
+        <span>🏢 사무실</span><span>🚗 법인차량</span><span>🚙 자차</span><span>🚌 대중교통</span><span>🌴 휴가</span>
         <span style={{color:'#c2410c'}}>● 확인 필요(지난 날짜인데 실적 없음)</span>
         <span>↺ 계획과 달랐음</span>
         <span style={{borderBottom:'1px dashed #6b7280'}}>점선 = 개인 사용</span>
@@ -1658,14 +1677,16 @@ function ScheduleDay({date,byDate,workers,vehicles,todayStr,onOpenPlan,onOpenCel
                     </td>
                     <td style={tdS}>{SLOT_MAP[p.slot]}</td>
                     <td style={{...tdS,textAlign:'left'}}>
-                      {personal
-                        ?<em style={{color:'#6b7280'}}>개인 사용</em>
-                        :p.transport==='office'
-                          ?'사무실'
-                          :(p.place_name||p.place_text||'-')}
+                      {p.use_type==='vacation'
+                        ?<em style={{color:'#047857'}}>🌴 휴가 · {p.vacation_type||''}</em>
+                        :personal
+                          ?<em style={{color:'#6b7280'}}>개인 사용</em>
+                          :p.transport==='office'
+                            ?'사무실'
+                            :(p.place_name||p.place_text||'-')}
                     </td>
                     <td style={{...tdS,textAlign:'left'}}>{personal?'-':(p.purpose||'-')}</td>
-                    <td style={tdS}>{tp.icon} {p.vehicle_name||tp.label}</td>
+                    <td style={tdS}>{p.use_type==='vacation'?'-':`${tp.icon} ${p.vehicle_name||tp.label}`}</td>
                     <td style={tdS}>{dist!=null?`${dist}km`:'-'}</td>
                   </tr>
                 )
@@ -1715,8 +1736,9 @@ function ScheduleYear({year,plans,workers,onPickMonth}){
   const months=Array.from({length:12},(_,i)=>`${year}-${String(i+1).padStart(2,'0')}`)
   const stat=months.map(m=>{
     const rows=plans.filter(p=>p.plan_date.slice(0,7)===m)
-    const out=rows.filter(p=>p.transport!=='office')
-    return {m, total:rows.length, out:out.length,
+    const out=rows.filter(p=>p.transport!=='office'&&p.use_type!=='vacation')
+    const vac=rows.filter(p=>p.use_type==='vacation')
+    return {m, total:rows.length, out:out.length, vac:vac.length,
             people:new Set(rows.map(p=>p.worker_id)).size,
             car:rows.filter(p=>p.vehicle_id).length}
   })
@@ -1726,7 +1748,7 @@ function ScheduleYear({year,plans,workers,onPickMonth}){
       <table style={{width:'100%',borderCollapse:'collapse'}}>
         <thead><tr>
           <th style={thS}>월</th><th style={thS}>일정</th><th style={thS}>외근</th>
-          <th style={thS}>차량 사용</th><th style={thS}>인원</th><th style={{...thS,width:'34%'}}>외근 분포</th>
+          <th style={thS}>차량 사용</th><th style={thS}>휴가</th><th style={thS}>인원</th><th style={{...thS,width:'34%'}}>외근 분포</th>
         </tr></thead>
         <tbody>
           {stat.map(s=>(
@@ -1735,6 +1757,7 @@ function ScheduleYear({year,plans,workers,onPickMonth}){
               <td style={tdS}>{s.total?`${s.total}건`:'-'}</td>
               <td style={tdS}>{s.out?`${s.out}건`:'-'}</td>
               <td style={tdS}>{s.car?`${s.car}건`:'-'}</td>
+              <td style={tdS}>{s.vac?`${s.vac}일`:'-'}</td>
               <td style={tdS}>{s.people?`${s.people}명`:'-'}</td>
               <td style={{...tdS,padding:'6px 10px'}}>
                 <div style={{background:'#f1f5f9',borderRadius:4,height:12,overflow:'hidden'}}>
@@ -1749,6 +1772,183 @@ function ScheduleYear({year,plans,workers,onPickMonth}){
         💡 읽는 법 — 「외근」은 사무실이 아닌 일정입니다. 월을 누르면 그 달 달력으로 갑니다.
       </div>
     </Card>
+  )
+}
+
+// 장소 선택 창.
+// 장소가 수십 개가 되면 콤보 상자로는 고를 수 없다. 검색과 관리를 함께 둔다.
+function PlacePicker({places,onPick,onClose,onChanged,showToast}){
+  const [q,setQ]=useState('')
+  const [editing,setEditing]=useState(null)   // 수정 중인 장소
+  const [adding,setAdding]=useState(null)     // 새 장소
+  const [busy,setBusy]=useState(false)
+
+  const norm=(s)=>String(s||'').toLowerCase().replace(/\s/g,'')
+  const key=norm(q)
+  const list=places.filter(p=>!key||norm(p.name).includes(key)||norm(p.address).includes(key))
+
+  const inputS={padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,width:'100%'}
+  const smallBtn={padding:'4px 9px',borderRadius:6,fontSize:11,cursor:'pointer',fontWeight:600}
+
+  async function saveEdit(){
+    if(!editing.name?.trim()){showToast('장소 이름을 입력해 주세요');return}
+    try{
+      setBusy(true)
+      await updatePlace(editing.id,{
+        name:editing.name.trim(), address:editing.address||null,
+        distance_km:editing.distance_km===''?null:editing.distance_km,
+        travel_min:editing.travel_min===''?null:editing.travel_min,
+        category:editing.category||null,
+      })
+      showToast('장소를 수정했습니다')
+      setEditing(null); await onChanged()
+    }catch(e){showToast('수정 실패: '+e.message)}
+    finally{setBusy(false)}
+  }
+
+  async function hide(p){
+    if(!confirm(`「${p.name}」을 목록에서 숨길까요?\n\n지난 계획·실적은 그대로 남습니다.`))return
+    try{ setBusy(true); await hidePlace(p.id); showToast('숨겼습니다'); await onChanged() }
+    catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
+  async function addNew(force=false){
+    if(!adding?.name?.trim()){showToast('장소 이름을 입력해 주세요');return}
+    try{
+      setBusy(true)
+      const created=await addPlace({...adding,name:adding.name.trim(),force})
+      showToast(`장소 「${created.name}」 등록`)
+      setAdding(null); await onChanged(); onPick(created)
+    }catch(e){
+      if(e.status===409&&e.similar?.length&&!force){
+        const names=e.similar.map(s=>`· ${s.name}${s.distance_km!=null?` (${s.distance_km}km)`:''}`).join('\n')
+        if(confirm(`비슷한 이름의 장소가 이미 있습니다.\n\n${names}\n\n같은 곳이면 「취소」를 누르고 위 장소를 골라 주세요.\n다른 곳이면 「확인」을 눌러 새로 등록합니다.`)){
+          await addNew(true)
+        }
+      }else showToast('등록 실패: '+e.message)
+    }finally{setBusy(false)}
+  }
+
+  return(
+    <div onClick={onClose}
+      style={{position:'fixed',inset:0,background:'rgba(17,24,39,.5)',zIndex:9500,
+        display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'40px 16px',overflowY:'auto'}}>
+      <div onClick={e=>e.stopPropagation()}
+        style={{background:'#fff',borderRadius:12,width:'100%',maxWidth:640,padding:20,
+          boxShadow:'0 20px 50px rgba(0,0,0,.3)'}}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
+          <strong style={{fontSize:16}}>장소 선택</strong>
+          <button onClick={onClose} style={{border:'none',background:'none',fontSize:20,cursor:'pointer',color:'#6b7280'}}>×</button>
+        </div>
+
+        {/* 사무실은 고정 항목 — 장소 목록에 넣지 않는다 */}
+        <button onClick={()=>onPick({id:OFFICE_PLACE,name:'사무실 (내근)'})}
+          style={{width:'100%',padding:'12px',borderRadius:8,marginBottom:12,cursor:'pointer',
+            border:'1px solid #1a56db',background:'#eff6ff',color:'#1a56db',
+            fontSize:14,fontWeight:700,textAlign:'left'}}>
+          🏢 사무실 (내근) <span style={{fontWeight:500,fontSize:12,opacity:.8}}>— 이동 없음</span>
+        </button>
+
+        <div style={{display:'flex',gap:8,marginBottom:12}}>
+          <input value={q} onChange={e=>setQ(e.target.value)} autoFocus
+            placeholder="장소 이름·주소로 검색" style={inputS}/>
+          <button onClick={()=>setAdding({name:q,category:'고객사'})}
+            style={{...smallBtn,padding:'7px 14px',fontSize:12,border:'1px solid #1a56db',
+              background:'#fff',color:'#1a56db',whiteSpace:'nowrap'}}>+ 새 장소</button>
+        </div>
+
+        {adding&&(
+          <div style={{border:'1px dashed #93c5fd',borderRadius:8,padding:12,marginBottom:12,background:'#f8fbff'}}>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+              <input placeholder="장소 이름" value={adding.name}
+                onChange={e=>setAdding({...adding,name:e.target.value})} style={inputS}/>
+              <select value={adding.category||''} onChange={e=>setAdding({...adding,category:e.target.value})} style={inputS}>
+                {PLACE_CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
+              </select>
+              <input placeholder="주소 (선택)" value={adding.address||''}
+                onChange={e=>setAdding({...adding,address:e.target.value})}
+                style={{...inputS,gridColumn:'1 / -1'}}/>
+              <input type="number" step="0.1" placeholder="편도 거리(km)" value={adding.distance_km||''}
+                onChange={e=>setAdding({...adding,distance_km:e.target.value})} style={inputS}/>
+              <input type="number" placeholder="편도 시간(분)" value={adding.travel_min||''}
+                onChange={e=>setAdding({...adding,travel_min:e.target.value})} style={inputS}/>
+            </div>
+            <div style={{fontSize:11,color:'#6b7280',margin:'8px 0'}}>
+              거리·시간은 한 번만 넣으면 다음부터 자동으로 채워집니다.
+            </div>
+            <div style={{display:'flex',gap:8}}>
+              <button onClick={()=>addNew(false)} disabled={busy}
+                style={{flex:1,...smallBtn,padding:'8px',border:'none',background:'#1a56db',color:'#fff',fontSize:12}}>
+                등록하고 고르기
+              </button>
+              <button onClick={()=>setAdding(null)}
+                style={{...smallBtn,padding:'8px 14px',border:'1px solid #e5e7eb',background:'#fff',color:'#6b7280',fontSize:12}}>취소</button>
+            </div>
+          </div>
+        )}
+
+        <div style={{maxHeight:340,overflowY:'auto',border:'1px solid #e5e7eb',borderRadius:8}}>
+          {list.length===0
+            ?<div style={{padding:'22px 14px',textAlign:'center',fontSize:12,color:'#6b7280'}}>
+              {places.length===0?'등록된 장소가 없습니다. 「+ 새 장소」로 넣어 주세요.':'검색 결과가 없습니다.'}
+            </div>
+            :<table style={{width:'100%',borderCollapse:'collapse'}}>
+              <thead><tr>
+                <th style={{...thS,textAlign:'left'}}>장소</th>
+                <th style={{...thS,width:70}}>거리</th>
+                <th style={{...thS,width:60}}>시간</th>
+                <th style={{...thS,width:110}}>관리</th>
+              </tr></thead>
+              <tbody>
+                {list.map(p=>(
+                  editing?.id===p.id
+                    ?<tr key={p.id}><td colSpan={4} style={{padding:10,background:'#f8fbff'}}>
+                      <div style={{display:'grid',gridTemplateColumns:'2fr 1fr 1fr',gap:6,marginBottom:6}}>
+                        <input value={editing.name} onChange={e=>setEditing({...editing,name:e.target.value})} style={inputS}/>
+                        <input type="number" step="0.1" placeholder="km" value={editing.distance_km??''}
+                          onChange={e=>setEditing({...editing,distance_km:e.target.value})} style={inputS}/>
+                        <input type="number" placeholder="분" value={editing.travel_min??''}
+                          onChange={e=>setEditing({...editing,travel_min:e.target.value})} style={inputS}/>
+                      </div>
+                      <div style={{display:'grid',gridTemplateColumns:'2fr 1fr',gap:6,marginBottom:8}}>
+                        <input placeholder="주소" value={editing.address||''}
+                          onChange={e=>setEditing({...editing,address:e.target.value})} style={inputS}/>
+                        <select value={editing.category||''} onChange={e=>setEditing({...editing,category:e.target.value})} style={inputS}>
+                          {PLACE_CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
+                        </select>
+                      </div>
+                      <div style={{display:'flex',gap:6}}>
+                        <button onClick={saveEdit} disabled={busy}
+                          style={{...smallBtn,border:'none',background:'#1a56db',color:'#fff'}}>저장</button>
+                        <button onClick={()=>setEditing(null)}
+                          style={{...smallBtn,border:'1px solid #e5e7eb',background:'#fff',color:'#6b7280'}}>취소</button>
+                      </div>
+                    </td></tr>
+                    :<tr key={p.id} style={{cursor:'pointer'}}>
+                      <td onClick={()=>onPick(p)} style={{...tdS,textAlign:'left'}}>
+                        <strong style={{fontSize:12}}>{p.name}</strong>
+                        {p.category&&<span style={{fontSize:10,color:'#6b7280',marginLeft:6}}>{p.category}</span>}
+                        {p.address&&<div style={{fontSize:10,color:'#9ca3af'}}>{p.address}</div>}
+                      </td>
+                      <td onClick={()=>onPick(p)} style={tdS}>{p.distance_km!=null?`${p.distance_km}km`:'-'}</td>
+                      <td onClick={()=>onPick(p)} style={tdS}>{p.travel_min!=null?`${p.travel_min}분`:'-'}</td>
+                      <td style={{...tdS,whiteSpace:'nowrap'}}>
+                        <button onClick={()=>setEditing({...p})}
+                          style={{...smallBtn,border:'1px solid #e5e7eb',background:'#fff',color:'#374151',marginRight:4}}>수정</button>
+                        <button onClick={()=>hide(p)}
+                          style={{...smallBtn,border:'1px solid #fca5a5',background:'#fff',color:'#dc2626'}}>숨김</button>
+                      </td>
+                    </tr>
+                ))}
+              </tbody>
+            </table>}
+        </div>
+        <div style={{marginTop:10,fontSize:11,color:'#6b7280'}}>
+          줄을 누르면 그 장소가 선택됩니다. 「숨김」은 목록에서만 감추고 지난 기록은 그대로 남습니다.
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -1770,6 +1970,12 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,workers,places
   const [dates,setDates]=useState(isNew?(defaultDate?[defaultDate]:[today()]):[])
   const [slot,setSlot]=useState(src?.slot||'allday')
   const [useType,setUseType]=useState(src?.use_type||'business')
+  // 유형 — 무엇을 등록하는가. 이것이 최상위이고 뒤 칸은 여기에 따라 달라진다.
+  const [kind,setKind]=useState(
+    src ? (src.use_type==='vacation'?'vacation':(src.use_type==='personal'?'vehicle':
+          (src.place_id||src.transport==='office'?'work':'vehicle'))) : 'work')
+  const [vacationType,setVacationType]=useState(src?.vacation_type||VACATION_TYPES[0])
+  const [pickerOpen,setPickerOpen]=useState(false)   // 장소 선택 창
   // 장소가 상위 값이다. 사무실이면 이동 수단·차량·거리를 묻지 않는다.
   const [placeId,setPlaceId]=useState(
     src ? (src.transport==='office'?OFFICE_PLACE:(src.place_id||'')) : OFFICE_PLACE)
@@ -1778,103 +1984,70 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,workers,places
   const [vehicleId,setVehicleId]=useState(src?.vehicle_id||'')
   const [roundTrip,setRoundTrip]=useState(src?src.round_trip:true)
   const [busy,setBusy]=useState(false)
-  // 새 장소 등록
-  const [newPlace,setNewPlace]=useState(null)   // {name,address,distance_km,travel_min,category}
 
-  const personal=useType==='personal'
+  const isWork=kind==='work'
+  const isVehicleOnly=kind==='vehicle'
+  const isVacation=kind==='vacation'
+  const personal=isVehicleOnly&&useType==='personal'
   // 사무실 내근 — 장소가 「사무실」이면 이동이 없으므로 뒤 칸이 전부 필요 없다
-  const atOffice=!personal&&placeId===OFFICE_PLACE&&!newPlace
+  const atOffice=isWork&&placeId===OFFICE_PLACE
   const tp=TRANSPORT_MAP[atOffice?'office':transport]||TRANSPORT_MAP.office
   const place=places.find(p=>String(p.id)===String(placeId))
   // 장소를 고르면 거리·시간이 자동으로 들어온다 (한 번 입력해 두면 계속 재사용)
-  const estKm=atOffice?null:(place?.distance_km??null)
-  const estMin=atOffice?null:(place?.travel_min??null)
+  const estKm=(atOffice||!isWork)?null:(place?.distance_km??null)
+  const estMin=(atOffice||!isWork)?null:(place?.travel_min??null)
   const showKm=estKm!=null?(roundTrip?estKm*2:estKm):null
   const showMin=estMin!=null?(roundTrip?estMin*2:estMin):null
   // 외부 장소를 골랐는지 (이동 수단을 물어야 하는 상태)
-  const needsTransport=!personal&&!atOffice&&(!!placeId||!!newPlace)
+  const needsTransport=isWork&&!atOffice&&!!placeId
+  // 차량 예약은 이동 수단이 «법인차량 또는 자차» 뿐이다(대중교통은 차량이 아니다)
+  const vehicleTransports=OUT_TRANSPORTS.filter(t=>t.needsVehicle)
 
   const inputS={padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,width:'100%'}
   const labelS={fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:4,display:'block'}
   const rowS={marginBottom:12}
 
-  // 새 장소를 실제로 등록하고 만들어진 장소를 돌려준다.
-  // 실패하거나 사용자가 취소하면 null — 부르는 쪽에서 계획 등록도 멈춘다.
-  async function ensureNewPlace(){
-    const np=newPlace
-    if(!np?.name?.trim()){showToast('장소 이름을 입력해 주세요');return null}
-    const payload={...np,name:np.name.trim(),created_by:workerId||null}
-    try{
-      setBusy(true)
-      const created=await addPlace(payload)
-      setNewPlace(null); setPlaceId(created.id)
-      await onSaved({})
-      return created
-    }catch(e){
-      // 비슷한 이름이 있으면 서버가 409 + 후보를 준다. 사용자에게 물어본다.
-      if(e.status===409&&e.similar?.length){
-        const names=e.similar.map(s=>`· ${s.name}${s.distance_km!=null?` (${s.distance_km}km)`:''}`).join('\n')
-        if(!confirm(`비슷한 이름의 장소가 이미 있습니다.\n\n${names}\n\n같은 곳이면 「취소」를 누르고 위 장소를 골라 주세요.\n다른 곳이면 「확인」을 눌러 새로 등록합니다.`)){
-          return null
-        }
-        try{
-          const created=await addPlace({...payload,force:true})
-          setNewPlace(null); setPlaceId(created.id)
-          await onSaved({})
-          return created
-        }catch(e2){showToast('장소 등록 실패: '+e2.message);return null}
-      }
-      showToast('장소 등록 실패: '+e.message)
-      return null
-    }finally{setBusy(false)}
-  }
-
-  // 「장소만 먼저 등록」 버튼 — 계획은 그대로 두고 장소만 목록에 넣는다
-  async function saveNewPlaceOnly(){
-    const created=await ensureNewPlace()
-    if(created) showToast(`장소 「${created.name}」 등록`)
-  }
-
-  // 입력값 검사 — 새로 넣을 때와 고칠 때 모두 쓴다
+  // 입력값 검사 — 유형에 따라 필요한 것만 본다
   function validate(){
     if(!workerId){showToast('이름을 선택해 주세요');return false}
     if(isNew&&dates.length===0){showToast('날짜를 하나 이상 골라 주세요');return false}
-    if(!personal&&!placeId&&!newPlace){showToast('장소를 선택해 주세요');return false}
+    if(isWork&&!placeId){showToast('장소를 선택해 주세요');return false}
     // 외부 장소면 이동 수단을 반드시 고르게 한다. 기본값을 넣어 두면
     // 실제와 다른 수단으로 정산될 수 있다.
     if(needsTransport&&!transport){showToast('이동 수단을 선택해 주세요');return false}
-    if(tp.needsVehicle&&!vehicleId){showToast('차량을 선택해 주세요');return false}
+    if(isVehicleOnly&&!vehicleId){showToast('차량을 선택해 주세요');return false}
+    if(isWork&&tp.needsVehicle&&!vehicleId){showToast('차량을 선택해 주세요');return false}
+    if(isVacation&&!vacationType){showToast('휴가 종류를 선택해 주세요');return false}
     return true
   }
 
-  // 계획 한 건의 본문. 새 장소를 먼저 등록해 둔 뒤 부른다.
+  // 계획 한 건의 본문. 유형에 따라 담는 값이 다르다.
+  //   업무      장소 + (사무실이면 office / 외부면 이동수단·차량) + 업무 내용
+  //   차량 예약  차량 + 용도(업무/개인). 장소·업무 없음
+  //   휴가      종류만. 장소·차량·이동 없음(transport='none')
   function buildBody(planDate,placeIdToUse,km,min,force=false){
+    const ut=isVacation?'vacation':(isVehicleOnly?(personal?'personal':'business'):'business')
     return {
-      worker_id:Number(workerId), plan_date:planDate, slot, use_type:useType,
-      place_id:personal?null:(placeIdToUse?Number(placeIdToUse):null),
-      purpose:personal?null:purpose,
-      transport:atOffice?'office':transport,   // 사무실 내근은 장소·차량 없이 office 로만 남는다
-      vehicle_id:(!atOffice&&tp.needsVehicle)?Number(vehicleId):null,
-      est_distance_km:personal?null:km, est_travel_min:personal?null:min,
-      round_trip:atOffice?false:roundTrip, force,
+      worker_id:Number(workerId), plan_date:planDate, slot, use_type:ut,
+      place_id:isWork&&!atOffice&&placeIdToUse?Number(placeIdToUse):null,
+      purpose:isWork?purpose:null,
+      transport:isVacation?'none':(atOffice?'office':transport),
+      vehicle_id:(isVehicleOnly||(isWork&&!atOffice&&tp.needsVehicle))?Number(vehicleId):null,
+      est_distance_km:isWork?km:null, est_travel_min:isWork?min:null,
+      round_trip:(isWork&&!atOffice)?roundTrip:false,
+      vacation_type:isVacation?vacationType:null,
+      force,
     }
   }
 
   async function submit(){
     if(!validate())return
 
-    // 새 장소를 적어 둔 채 「계획 등록」을 누르는 것이 자연스러운 흐름이다.
-    // 「장소 등록」을 따로 누르지 않으면 적은 내용이 버려지던 문제를 막는다.
-    let usePlaceId=atOffice?null:placeId
-    let useKm=estKm, useMin=estMin
-    if(!personal&&newPlace){
-      if(!newPlace.name?.trim()){showToast('장소 이름을 입력해 주세요');return}
-      const created=await ensureNewPlace()
-      if(!created) return              // 등록 실패·사용자 취소 → 계획도 넣지 않는다
-      usePlaceId=created.id
-      useKm=created.distance_km??null
-      useMin=created.travel_min??null
-    }
+    // 새 장소는 «장소 선택 창» 에서 등록하고 곧바로 선택된다.
+    // 예전에는 이 창 안에 새 장소 입력칸이 있어, 「계획 등록」을 누르면 적은
+    // 내용이 버려지는 문제가 있었다.
+    const usePlaceId=atOffice?null:placeId
+    const useKm=estKm, useMin=estMin
 
     try{
       setBusy(true)
@@ -2044,86 +2217,53 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,workers,places
           </div>
         )}
 
+        {/* ── 유형 — 무엇을 등록하는가. 이것을 먼저 고르면 뒤에 필요한 것만 나온다 ── */}
         <div style={rowS}>
-          <label style={labelS}>구분</label>
-          <div style={{display:'flex',gap:8}}>
-            {[{v:'business',label:'업무'},{v:'personal',label:'개인 사용'}].map(o=>(
-              <button key={o.v} onClick={()=>canEdit&&setUseType(o.v)} disabled={!canEdit}
-                style={{flex:1,padding:'8px',borderRadius:7,cursor:canEdit?'pointer':'default',fontSize:13,
-                  fontWeight:useType===o.v?700:500,
-                  border:`1px solid ${useType===o.v?'#1a56db':'#e5e7eb'}`,
-                  background:useType===o.v?'#eff6ff':'#fff',
-                  color:useType===o.v?'#1a56db':'#6b7280'}}>{o.label}</button>
+          <label style={labelS}>유형</label>
+          <div style={{display:'flex',gap:6}}>
+            {PLAN_KINDS.map(k=>(
+              <button key={k.v} onClick={()=>{
+                  if(!canEdit)return
+                  setKind(k.v)
+                  // 유형을 바꾸면 그 유형에 없는 값은 비운다
+                  if(k.v==='work'){ setPlaceId(OFFICE_PLACE); setTransport('office'); setVehicleId('') }
+                  if(k.v==='vehicle'){ setPlaceId(''); setTransport('company_car'); setUseType('business') }
+                  if(k.v==='vacation'){ setPlaceId(''); setTransport('none'); setVehicleId('') }
+                }} disabled={!canEdit}
+                style={{flex:1,padding:'10px 4px',borderRadius:7,cursor:canEdit?'pointer':'default',
+                  border:'1px solid '+(kind===k.v?'#1a56db':'#e5e7eb'),
+                  background:kind===k.v?'#eff6ff':'#fff',
+                  color:kind===k.v?'#1a56db':'#6b7280'}}>
+                <div style={{fontSize:13,fontWeight:kind===k.v?700:500}}>{k.icon} {k.label}</div>
+                <div style={{fontSize:10,opacity:.8,marginTop:2}}>{k.desc}</div>
+              </button>
             ))}
           </div>
-          {personal&&(
-            <div style={{fontSize:11,color:'#92400e',marginTop:6}}>
-              개인 사용은 장소·업무를 적지 않습니다. 정산에 쓰이는 차량과 거리만 기록합니다.
-            </div>
-          )}
         </div>
 
-        {!personal&&(
+        {/* ── 업무 — 장소를 먼저 고른다. 목록이 수십 개가 되므로 별도 창에서 검색한다 ── */}
+        {isWork&&(
           <>
             <div style={rowS}>
               <label style={labelS}>장소</label>
-              {newPlace
-                ?<div style={{border:'1px dashed #93c5fd',borderRadius:8,padding:12,background:'#f8fbff'}}>
-                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
-                    <input placeholder="장소 이름" value={newPlace.name}
-                      onChange={e=>setNewPlace({...newPlace,name:e.target.value})} style={inputS}/>
-                    <select value={newPlace.category||''}
-                      onChange={e=>setNewPlace({...newPlace,category:e.target.value})} style={inputS}>
-                      <option value="">분류 선택</option>
-                      {PLACE_CATEGORIES.map(c=><option key={c} value={c}>{c}</option>)}
-                    </select>
-                    <input placeholder="주소 (선택)" value={newPlace.address||''}
-                      onChange={e=>setNewPlace({...newPlace,address:e.target.value})}
-                      style={{...inputS,gridColumn:'1 / -1'}}/>
-                    <input type="number" step="0.1" placeholder="편도 거리(km)" value={newPlace.distance_km||''}
-                      onChange={e=>setNewPlace({...newPlace,distance_km:e.target.value})} style={inputS}/>
-                    <input type="number" placeholder="편도 시간(분)" value={newPlace.travel_min||''}
-                      onChange={e=>setNewPlace({...newPlace,travel_min:e.target.value})} style={inputS}/>
-                  </div>
-                  <div style={{fontSize:11,color:'#6b7280',margin:'8px 0'}}>
-                    거리·시간은 한 번만 넣으면 다음부터 자동으로 채워집니다.
-                    아래 <strong>「계획 등록」</strong>을 누르면 이 장소도 함께 등록됩니다.
-                  </div>
-                  <div style={{display:'flex',gap:8}}>
-                    <button onClick={saveNewPlaceOnly} disabled={busy}
-                      style={{flex:1,padding:'7px',borderRadius:7,border:'1px solid #1a56db',
-                        background:'#fff',color:'#1a56db',cursor:'pointer',fontSize:12,fontWeight:700}}>
-                      장소만 먼저 등록
-                    </button>
-                    <button onClick={()=>setNewPlace(null)}
-                      style={{padding:'7px 14px',borderRadius:7,border:'1px solid #e5e7eb',
-                        background:'#fff',cursor:'pointer',fontSize:12}}>취소</button>
-                  </div>
+              <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                <div style={{flex:1,padding:'9px 12px',border:'1px solid #e5e7eb',borderRadius:7,
+                  fontSize:13,background:canEdit?'#fff':'#f9fafb',
+                  color:placeId?'#111827':'#9ca3af'}}>
+                  {atOffice
+                    ?'🏢 사무실 (내근)'
+                    :place
+                      ?<>{place.name}
+                        {place.distance_km!=null&&<span style={{color:'#6b7280'}}> · {place.distance_km}km</span>}</>
+                      :'장소를 선택해 주세요'}
                 </div>
-                :<div style={{display:'flex',gap:8}}>
-                  <select value={placeId} onChange={e=>{
-                      const v=e.target.value
-                      setPlaceId(v)
-                      // 사무실을 고르면 이동 수단·차량을 비운다 (이동이 없다).
-                      // 외부 장소로 바꾸면 이동 수단을 «미선택» 으로 두고 사용자가 고르게 한다.
-                      if(v===OFFICE_PLACE){setTransport('office');setVehicleId('')}
-                      else if(transport==='office'){setTransport('');setVehicleId('')}
-                    }} disabled={!canEdit} style={inputS}>
-                    <option value={OFFICE_PLACE}>🏢 사무실 (내근)</option>
-                    <option value="">— 외부 장소 선택 —</option>
-                    {places.map(p=>(
-                      <option key={p.id} value={p.id}>
-                        {p.name}{p.distance_km!=null?` (${p.distance_km}km)`:''}
-                      </option>
-                    ))}
-                  </select>
-                  {isNew&&(
-                    <button onClick={()=>{setNewPlace({name:'',category:'현장'});if(transport==='office')setTransport('')}}
-                      style={{padding:'7px 12px',borderRadius:7,border:'1px solid #1a56db',
-                        background:'#eff6ff',color:'#1a56db',cursor:'pointer',fontSize:12,
-                        fontWeight:600,whiteSpace:'nowrap'}}>새 장소</button>
-                  )}
-                </div>}
+                {canEdit&&(
+                  <button onClick={()=>setPickerOpen(true)}
+                    style={{padding:'9px 14px',borderRadius:7,border:'1px solid #1a56db',
+                      background:'#eff6ff',color:'#1a56db',cursor:'pointer',fontSize:12,
+                      fontWeight:700,whiteSpace:'nowrap'}}>장소 선택</button>
+                )}
+              </div>
               {atOffice&&(
                 <div style={{fontSize:11,color:'#6b7280',marginTop:6}}>
                   사무실 내근은 이동이 없어 차량·거리를 입력하지 않습니다.
@@ -2139,8 +2279,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,workers,places
           </>
         )}
 
-        {/* 이동 수단은 «외부 장소일 때만» 묻는다. 사무실이면 이동 자체가 없다. */}
-        {(needsTransport||personal)&&(
+        {/* ── 업무: 외부 장소일 때만 이동 수단을 묻는다 ── */}
+        {needsTransport&&(
           <div style={rowS}>
             <label style={labelS}>이동 수단</label>
             <div style={{display:'flex',gap:6}}>
@@ -2149,20 +2289,81 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,workers,places
                   disabled={!canEdit}
                   style={{flex:1,padding:'8px 4px',borderRadius:7,cursor:canEdit?'pointer':'default',fontSize:12,
                     fontWeight:transport===t.v?700:500,
-                    border:`1px solid ${transport===t.v?'#1a56db':'#e5e7eb'}`,
+                    border:'1px solid '+(transport===t.v?'#1a56db':'#e5e7eb'),
                     background:transport===t.v?'#eff6ff':'#fff',
                     color:transport===t.v?'#1a56db':'#6b7280'}}>
                   {t.icon} {t.label}
                 </button>
               ))}
             </div>
-            {isNew&&!transport&&(
+            {canEdit&&!transport&&(
               <div style={{fontSize:11,color:'#92400e',marginTop:6}}>이동 수단을 선택해 주세요.</div>
             )}
           </div>
         )}
 
-        {!atOffice&&tp.needsVehicle&&(
+        {/* ── 차량 예약 — 차량과 용도만 묻는다 ── */}
+        {isVehicleOnly&&(
+          <>
+            <div style={rowS}>
+              <label style={labelS}>차량 구분</label>
+              <div style={{display:'flex',gap:6}}>
+                {vehicleTransports.map(t=>(
+                  <button key={t.v} onClick={()=>{if(canEdit){setTransport(t.v);setVehicleId('')}}}
+                    disabled={!canEdit}
+                    style={{flex:1,padding:'8px 4px',borderRadius:7,cursor:canEdit?'pointer':'default',fontSize:12,
+                      fontWeight:transport===t.v?700:500,
+                      border:'1px solid '+(transport===t.v?'#1a56db':'#e5e7eb'),
+                      background:transport===t.v?'#eff6ff':'#fff',
+                      color:transport===t.v?'#1a56db':'#6b7280'}}>
+                    {t.icon} {t.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={rowS}>
+              <label style={labelS}>용도</label>
+              <div style={{display:'flex',gap:8}}>
+                {[{v:'business',label:'업무'},{v:'personal',label:'개인 사용'}].map(o=>(
+                  <button key={o.v} onClick={()=>canEdit&&setUseType(o.v)} disabled={!canEdit}
+                    style={{flex:1,padding:'8px',borderRadius:7,cursor:canEdit?'pointer':'default',fontSize:13,
+                      fontWeight:useType===o.v?700:500,
+                      border:'1px solid '+(useType===o.v?'#1a56db':'#e5e7eb'),
+                      background:useType===o.v?'#eff6ff':'#fff',
+                      color:useType===o.v?'#1a56db':'#6b7280'}}>{o.label}</button>
+                ))}
+              </div>
+              {personal&&(
+                <div style={{fontSize:11,color:'#92400e',marginTop:6}}>
+                  개인 사용은 월 정산 대상입니다 (주행거리 × 차량 단가 + 하이패스). 행선지는 적지 않습니다.
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* ── 휴가 — 종류만 묻는다 ── */}
+        {isVacation&&(
+          <div style={rowS}>
+            <label style={labelS}>휴가 종류</label>
+            <div style={{display:'flex',gap:6}}>
+              {VACATION_TYPES.map(v=>(
+                <button key={v} onClick={()=>canEdit&&setVacationType(v)} disabled={!canEdit}
+                  style={{flex:1,padding:'9px 4px',borderRadius:7,cursor:canEdit?'pointer':'default',fontSize:13,
+                    fontWeight:vacationType===v?700:500,
+                    border:'1px solid '+(vacationType===v?'#1a56db':'#e5e7eb'),
+                    background:vacationType===v?'#eff6ff':'#fff',
+                    color:vacationType===v?'#1a56db':'#6b7280'}}>{v}</button>
+              ))}
+            </div>
+            <div style={{fontSize:11,color:'#6b7280',marginTop:6}}>
+              휴가는 장소·차량을 적지 않습니다. 달력에 🌴 로 표시됩니다.
+            </div>
+          </div>
+        )}
+
+        {/* ── 차량 (업무의 외부 이동 · 차량 예약 공용) ── */}
+        {((isWork&&!atOffice&&tp.needsVehicle)||isVehicleOnly)&&(
           <div style={rowS}>
             <label style={labelS}>차량</label>
             <select value={vehicleId} onChange={e=>setVehicleId(e.target.value)} disabled={!canEdit} style={inputS}>
@@ -2171,7 +2372,7 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,workers,places
                 .filter(v=>transport==='company_car'?v.kind==='company':v.kind==='own')
                 .map(v=>(
                   <option key={v.id} value={v.id}>
-                    {v.name}{v.plate?` ${v.plate}`:''}{v.owner_name?` (${v.owner_name})`:''}
+                    {v.name}{v.plate?' '+v.plate:''}{v.owner_name?' ('+v.owner_name+')':''}
                   </option>
                 ))}
             </select>
@@ -2183,7 +2384,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,workers,places
           </div>
         )}
 
-        {!personal&&!atOffice&&(
+        {/* ── 왕복·예상 거리 (외부 업무일 때만) ── */}
+        {isWork&&!atOffice&&(
           <div style={{...rowS,background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,padding:'10px 12px'}}>
             <label style={{display:'flex',alignItems:'center',gap:7,fontSize:12,cursor:canEdit?'pointer':'default'}}>
               <input type="checkbox" checked={!!roundTrip} disabled={!canEdit}
@@ -2206,8 +2408,7 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,workers,places
               style={{flex:1,padding:'11px',borderRadius:8,border:'none',background:'#1a56db',
                 color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
               {busy?'처리 중…'
-                :(newPlace&&!personal?'장소 + 계획 등록'
-                  :dates.length>1?`${dates.length}개 날짜에 등록`:'계획 등록')}
+                :(dates.length>1?`${dates.length}개 날짜에 등록`:'계획 등록')}
             </button>
             <button onClick={onClose} style={{padding:'11px 18px',borderRadius:8,
               border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:14}}>취소</button>
@@ -2243,6 +2444,21 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,workers,places
             </div>
           </>}
       </div>
+
+      {/* 장소 선택 창 — 검색·수정·숨김·새 장소를 한곳에서 */}
+      {pickerOpen&&(
+        <PlacePicker places={places} showToast={showToast}
+          onClose={()=>setPickerOpen(false)}
+          onChanged={onSaved}
+          onPick={p=>{
+            setPlaceId(p.id)
+            // 사무실을 고르면 이동이 없으므로 이동 수단·차량을 비운다.
+            // 외부 장소면 이동 수단을 «미선택» 으로 두고 사용자가 고르게 한다.
+            if(p.id===OFFICE_PLACE){ setTransport('office'); setVehicleId('') }
+            else if(transport==='office'||transport==='none'){ setTransport(''); setVehicleId('') }
+            setPickerOpen(false)
+          }}/>
+      )}
     </div>
   )
 }
