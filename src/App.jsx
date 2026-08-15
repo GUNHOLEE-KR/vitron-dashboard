@@ -17,14 +17,24 @@ const TABS=['today','daily','weekly','monthly','yearly','schedule','settings']
 const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'월간',yearly:'연간',schedule:'스케줄',settings:'설정'}
 
 // ── 스케줄 상수 ──────────────────────────────────────────
-// 이동 수단. 사무실 근무는 차량·거리 입력이 필요 없다.
-const TRANSPORTS=[
-  {v:'office',      label:'사무실', icon:'🏢', needsVehicle:false},
+// 이동 수단.
+// ⚠ 「사무실」은 이 목록에 넣지 않는다. 장소가 사무실이면 이동 자체가 없어
+//   이동 수단을 물을 일이 없다 — 장소 선택으로 결정된다(place = OFFICE_PLACE).
+//   예전에는 사무실이 법인차량과 같은 줄에 섞여 있어, 내근을 넣으려 해도
+//   장소를 강제로 골라야 해서 등록이 막혔다.
+const OUT_TRANSPORTS=[
   {v:'company_car', label:'법인차량', icon:'🚗', needsVehicle:true},
   {v:'own_car',     label:'자차',   icon:'🚙', needsVehicle:true},
   {v:'transit',     label:'대중교통', icon:'🚌', needsVehicle:false},
 ]
-const TRANSPORT_MAP=Object.fromEntries(TRANSPORTS.map(t=>[t.v,t]))
+// 표시용에는 사무실도 필요하다(달력 배지·일 뷰)
+const TRANSPORT_MAP=Object.fromEntries([
+  ...OUT_TRANSPORTS,
+  {v:'office', label:'사무실', icon:'🏢', needsVehicle:false},
+].map(t=>[t.v,t]))
+// 장소 콤보 맨 위의 고정 항목. 장소 목록(DB)에 넣지 않는다 —
+// 사무실은 회사 자체이고 거리가 0 이라 관리 대상을 늘릴 이유가 없다.
+const OFFICE_PLACE='office'
 const SLOTS=[{v:'allday',label:'종일'},{v:'am',label:'오전'},{v:'pm',label:'오후'},{v:'time',label:'시각 지정'}]
 const SLOT_MAP=Object.fromEntries(SLOTS.map(s=>[s.v,s.label]))
 const SCHEDULE_VIEWS=[{v:'month',label:'월'},{v:'week',label:'주'},{v:'day',label:'일'},{v:'year',label:'연'}]
@@ -1249,6 +1259,7 @@ function workerColor(workerId,workers){
 // 배지에 넣을 짧은 장소 이름. 달력 칸이 좁아 긴 이름은 잘라야 한다.
 function shortPlace(plan){
   if(plan.use_type==='personal') return '개인 사용'
+  if(plan.transport==='office') return '사무실'
   const nm=plan.place_name||plan.place_text||''
   return nm.length>9?nm.slice(0,9)+'…':nm
 }
@@ -1538,7 +1549,9 @@ function ScheduleDay({date,byDate,workers,vehicles,todayStr,onOpenPlan}){
                     <td style={{...tdS,textAlign:'left'}}>
                       {personal
                         ?<em style={{color:'#6b7280'}}>개인 사용</em>
-                        :(p.place_name||p.place_text||'-')}
+                        :p.transport==='office'
+                          ?'사무실'
+                          :(p.place_name||p.place_text||'-')}
                     </td>
                     <td style={{...tdS,textAlign:'left'}}>{personal?'-':(p.purpose||'-')}</td>
                     <td style={tdS}>{tp.icon} {p.vehicle_name||tp.label}</td>
@@ -1636,7 +1649,9 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
   const [date,setDate]=useState(editing?.plan_date||defaultDate||today())
   const [slot,setSlot]=useState(editing?.slot||'allday')
   const [useType,setUseType]=useState(editing?.use_type||'business')
-  const [placeId,setPlaceId]=useState(editing?.place_id||'')
+  // 장소가 상위 값이다. 사무실이면 이동 수단·차량·거리를 묻지 않는다.
+  const [placeId,setPlaceId]=useState(
+    editing ? (editing.transport==='office'?OFFICE_PLACE:(editing.place_id||'')) : OFFICE_PLACE)
   const [purpose,setPurpose]=useState(editing?.purpose||'')
   const [transport,setTransport]=useState(editing?.transport||'office')
   const [vehicleId,setVehicleId]=useState(editing?.vehicle_id||'')
@@ -1646,13 +1661,17 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
   const [newPlace,setNewPlace]=useState(null)   // {name,address,distance_km,travel_min,category}
 
   const personal=useType==='personal'
-  const tp=TRANSPORT_MAP[transport]||TRANSPORT_MAP.office
+  // 사무실 내근 — 장소가 「사무실」이면 이동이 없으므로 뒤 칸이 전부 필요 없다
+  const atOffice=!personal&&placeId===OFFICE_PLACE&&!newPlace
+  const tp=TRANSPORT_MAP[atOffice?'office':transport]||TRANSPORT_MAP.office
   const place=places.find(p=>String(p.id)===String(placeId))
   // 장소를 고르면 거리·시간이 자동으로 들어온다 (한 번 입력해 두면 계속 재사용)
-  const estKm=place?.distance_km??null
-  const estMin=place?.travel_min??null
+  const estKm=atOffice?null:(place?.distance_km??null)
+  const estMin=atOffice?null:(place?.travel_min??null)
   const showKm=estKm!=null?(roundTrip?estKm*2:estKm):null
   const showMin=estMin!=null?(roundTrip?estMin*2:estMin):null
+  // 외부 장소를 골랐는지 (이동 수단을 물어야 하는 상태)
+  const needsTransport=!personal&&!atOffice&&(!!placeId||!!newPlace)
 
   const inputS={padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,width:'100%'}
   const labelS={fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:4,display:'block'}
@@ -1698,12 +1717,15 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
   async function submit(force=false){
     if(!workerId){showToast('이름을 선택해 주세요');return}
     if(!personal&&!placeId&&!newPlace){showToast('장소를 선택해 주세요');return}
+    // 외부 장소면 이동 수단을 반드시 고르게 한다. 기본값을 넣어 두면
+    // 실제와 다른 수단으로 정산될 수 있다.
+    if(needsTransport&&!transport){showToast('이동 수단을 선택해 주세요');return}
     if(tp.needsVehicle&&!vehicleId){showToast('차량을 선택해 주세요');return}
 
     // 새 장소를 적어 둔 채 「계획 등록」을 누르는 것이 자연스러운 흐름이다.
     // 예전에는 「장소 등록」을 따로 누르지 않으면 적은 내용이 버려지고
     // 장소 없는 계획만 들어갔다 — 사용자는 아무 것도 안 된 것처럼 느낀다.
-    let usePlaceId=placeId
+    let usePlaceId=atOffice?null:placeId
     let useKm=estKm, useMin=estMin
     if(!personal&&newPlace){
       if(!newPlace.name?.trim()){showToast('장소 이름을 입력해 주세요');return}
@@ -1714,13 +1736,16 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
       useMin=created.travel_min??null
     }
 
+    // 사무실 내근은 장소·차량·거리 없이 transport='office' 로만 남는다
+    const useTransport=atOffice?'office':transport
     const body={
       worker_id:Number(workerId), plan_date:date, slot, use_type:useType,
       place_id:personal?null:(usePlaceId?Number(usePlaceId):null),
       purpose:personal?null:purpose,
-      transport, vehicle_id:tp.needsVehicle?Number(vehicleId):null,
+      transport:useTransport,
+      vehicle_id:(!atOffice&&tp.needsVehicle)?Number(vehicleId):null,
       est_distance_km:personal?null:useKm, est_travel_min:personal?null:useMin,
-      round_trip:roundTrip, force,
+      round_trip:atOffice?false:roundTrip, force,
     }
     try{
       setBusy(true)
@@ -1862,8 +1887,16 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
                   </div>
                 </div>
                 :<div style={{display:'flex',gap:8}}>
-                  <select value={placeId} onChange={e=>setPlaceId(e.target.value)} disabled={!isNew} style={inputS}>
-                    <option value="">선택</option>
+                  <select value={placeId} onChange={e=>{
+                      const v=e.target.value
+                      setPlaceId(v)
+                      // 사무실을 고르면 이동 수단·차량을 비운다 (이동이 없다).
+                      // 외부 장소로 바꾸면 이동 수단을 «미선택» 으로 두고 사용자가 고르게 한다.
+                      if(v===OFFICE_PLACE){setTransport('office');setVehicleId('')}
+                      else if(transport==='office'){setTransport('');setVehicleId('')}
+                    }} disabled={!isNew} style={inputS}>
+                    <option value={OFFICE_PLACE}>🏢 사무실 (내근)</option>
+                    <option value="">— 외부 장소 선택 —</option>
                     {places.map(p=>(
                       <option key={p.id} value={p.id}>
                         {p.name}{p.distance_km!=null?` (${p.distance_km}km)`:''}
@@ -1871,40 +1904,51 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
                     ))}
                   </select>
                   {isNew&&(
-                    <button onClick={()=>setNewPlace({name:'',category:'현장'})}
+                    <button onClick={()=>{setNewPlace({name:'',category:'현장'});if(transport==='office')setTransport('')}}
                       style={{padding:'7px 12px',borderRadius:7,border:'1px solid #1a56db',
                         background:'#eff6ff',color:'#1a56db',cursor:'pointer',fontSize:12,
                         fontWeight:600,whiteSpace:'nowrap'}}>새 장소</button>
                   )}
                 </div>}
+              {atOffice&&(
+                <div style={{fontSize:11,color:'#6b7280',marginTop:6}}>
+                  사무실 내근은 이동이 없어 차량·거리를 입력하지 않습니다.
+                </div>
+              )}
             </div>
 
             <div style={rowS}>
-              <label style={labelS}>업무</label>
+              <label style={labelS}>업무 {atOffice&&<span style={{fontWeight:500}}>(선택)</span>}</label>
               <input value={purpose} onChange={e=>setPurpose(e.target.value)} disabled={!isNew}
                 placeholder="무엇을 할 계획인지 한 줄로" style={inputS}/>
             </div>
           </>
         )}
 
-        <div style={rowS}>
-          <label style={labelS}>이동 수단</label>
-          <div style={{display:'flex',gap:6}}>
-            {TRANSPORTS.map(t=>(
-              <button key={t.v} onClick={()=>{if(isNew){setTransport(t.v);if(!t.needsVehicle)setVehicleId('')}}}
-                disabled={!isNew}
-                style={{flex:1,padding:'8px 4px',borderRadius:7,cursor:isNew?'pointer':'default',fontSize:12,
-                  fontWeight:transport===t.v?700:500,
-                  border:`1px solid ${transport===t.v?'#1a56db':'#e5e7eb'}`,
-                  background:transport===t.v?'#eff6ff':'#fff',
-                  color:transport===t.v?'#1a56db':'#6b7280'}}>
-                {t.icon} {t.label}
-              </button>
-            ))}
+        {/* 이동 수단은 «외부 장소일 때만» 묻는다. 사무실이면 이동 자체가 없다. */}
+        {(needsTransport||personal)&&(
+          <div style={rowS}>
+            <label style={labelS}>이동 수단</label>
+            <div style={{display:'flex',gap:6}}>
+              {OUT_TRANSPORTS.map(t=>(
+                <button key={t.v} onClick={()=>{if(isNew){setTransport(t.v);if(!t.needsVehicle)setVehicleId('')}}}
+                  disabled={!isNew}
+                  style={{flex:1,padding:'8px 4px',borderRadius:7,cursor:isNew?'pointer':'default',fontSize:12,
+                    fontWeight:transport===t.v?700:500,
+                    border:`1px solid ${transport===t.v?'#1a56db':'#e5e7eb'}`,
+                    background:transport===t.v?'#eff6ff':'#fff',
+                    color:transport===t.v?'#1a56db':'#6b7280'}}>
+                  {t.icon} {t.label}
+                </button>
+              ))}
+            </div>
+            {isNew&&!transport&&(
+              <div style={{fontSize:11,color:'#92400e',marginTop:6}}>이동 수단을 선택해 주세요.</div>
+            )}
           </div>
-        </div>
+        )}
 
-        {tp.needsVehicle&&(
+        {!atOffice&&tp.needsVehicle&&(
           <div style={rowS}>
             <label style={labelS}>차량</label>
             <select value={vehicleId} onChange={e=>setVehicleId(e.target.value)} disabled={!isNew} style={inputS}>
@@ -1925,7 +1969,7 @@ function PlanDialog({editing,defaultDate,workers,places,vehicles,onClose,onSaved
           </div>
         )}
 
-        {!personal&&(
+        {!personal&&!atOffice&&(
           <div style={{...rowS,background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,padding:'10px 12px'}}>
             <label style={{display:'flex',alignItems:'center',gap:7,fontSize:12,cursor:isNew?'pointer':'default'}}>
               <input type="checkbox" checked={!!roundTrip} disabled={!isNew}
