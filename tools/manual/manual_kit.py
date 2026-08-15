@@ -69,8 +69,9 @@ BOXBG_WARN = "FDF3E7"  # 주의 상자 배경(연한 주황)
 # 뭉개진다. 그래서 «폭·높이·확대배율» 세 가지로 함께 묶는다.
 PX_PER_CM = 37.795     # 96 DPI 기준 — 원본을 화면과 같은 크기로 볼 때의 환산값
 FIG_W_CM = 12.5        # 기본 폭
-FIG_MAX_H_CM = 7.5     # 높이 상한 — 본문 높이(25.7cm)의 3할. 이보다 크면 쪽에 못 들어가
-                       # 통째로 밀리면서 앞 쪽에 큰 빈 공간이 남는다(실측으로 정한 값)
+FIG_MAX_H_CM = 5.9     # 높이 상한 — 실측으로 정한 값. 7.5cm 로 두면 «그림+설명» 이 8.3cm 라
+                       # 쪽 끝 여유(보통 7cm 안팎)에 못 들어가고, 통째로 밀리면서 앞 쪽에
+                       # 4~8cm 빈 공간이 남았다(빈 쪽 원인의 대부분이 이것이었다)
 FIG_MAX_UPSCALE = 1.6  # 확대 상한 — 작은 캡처를 이 배율 이상으로 늘리지 않는다
 
 
@@ -119,6 +120,25 @@ def _border(par, color=NAVY, size=6, sides=("left",)):
         e.set(qn("w:color"), color)
         bdr.append(e)
     pPr.append(bdr)
+
+
+def _cell_format(cell, center=False):
+    """표 칸의 세로 가운데 정렬.
+
+    ⚠ `vertical_alignment` 만 주면 «보이는 결과»는 가운데가 아니다.
+      본문 스타일의 문단 아래 여백(6pt)이 칸 안에도 걸리고, 세로 가운데는
+      «글자 + 여백» 덩어리를 기준으로 맞추므로 여백만큼 글자가 위로 밀린다.
+      그래서 칸 안 문단의 위·아래 여백을 0 으로 없앤 뒤 가운데를 준다.
+      (2026-08-13 — 속성만 확인하고 넘겼다가 실제 문서에서 어긋난 것을 지적받음)
+    """
+    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    for par in cell.paragraphs:
+        pf = par.paragraph_format
+        pf.space_before = Pt(0)
+        pf.space_after = Pt(0)
+        pf.line_spacing = 1.0
+        if center:
+            par.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
 
 def _split_bold(text):
@@ -320,12 +340,10 @@ class ManualDoc:
         hdr = t.rows[0].cells
         for i, h in enumerate(header):
             hdr[i].text = ""
-            par = hdr[i].paragraphs[0]
-            par.alignment = WD_ALIGN_PARAGRAPH.CENTER      # 제목 행 = 가로 가운데
-            r = par.add_run(h)
+            r = hdr[i].paragraphs[0].add_run(h)
             _apply_font(r, size=10, bold=True, color="FFFFFF")
             _shade(hdr[i], NAVY)
-            hdr[i].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+            _cell_format(hdr[i], center=True)   # 제목 행 = 가로·세로 가운데
         for row in rows:
             cells = t.add_row().cells
             for i, v in enumerate(row):
@@ -335,21 +353,18 @@ class ManualDoc:
                 for txt, bold in _split_bold(str(v)):
                     r = cells[i].paragraphs[0].add_run(txt)
                     _apply_font(r, size=10, bold=(base or bold))
-                cells[i].vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+                _cell_format(cells[i])          # 본문 = 세로만 가운데
         if widths:
             for i, w in enumerate(widths):
                 for row in t.rows:
                     row.cells[i].width = Cm(w)
-        # 표가 쪽 경계에서 쪼개지면 마지막 한 줄만 다음 장에 남아 보기 흉하다.
-        # 행 자체의 분할을 막고(cantSplit), 마지막 행 앞까지 붙여 둔다(keep_with_next).
-        for idx, row in enumerate(t.rows):
+        # 한 행이 두 쪽에 걸쳐 갈라지지 않게 한다(cantSplit).
+        # ⚠ 칸 안 문단에 keep_with_next 를 걸지 않는다. 표 전체가 한 덩어리로 묶여
+        #   긴 표가 통째로 밀리고, 서식 표시를 켜면 칸마다 검은 사각형이 보인다.
+        for row in t.rows:
             trPr = row._tr.get_or_add_trPr()
             cant = OxmlElement("w:cantSplit")
             trPr.append(cant)
-            if idx < len(t.rows) - 1:
-                for cell in row.cells:
-                    for par in cell.paragraphs:
-                        par.paragraph_format.keep_with_next = True
         # 긴 표가 쪽을 넘어갈 때 제목 행을 다시 보여 준다(넘어간 쪽에서 열 뜻을 알 수 있게).
         hdr_trPr = t.rows[0]._tr.get_or_add_trPr()
         th = OxmlElement("w:tblHeader")
@@ -397,7 +412,8 @@ class ManualDoc:
         cap.paragraph_format.line_spacing = 1.0
         r = cap.add_run(caption)
         _apply_font(r, size=9, color=CAPTION)
-        cap.paragraph_format.space_after = Pt(10)
+        # 설명 아래 여백 — 넉넉히 주면 «그림+설명» 덩어리가 커져 쪽 끝에 못 들어간다.
+        cap.paragraph_format.space_after = Pt(7)
 
     def toc(self, entries):
         """목차 — Word 필드가 아니라 직접 쓴 목록(필드는 갱신 안 하면 쪽번호가 어긋난다)."""
