@@ -1,5 +1,14 @@
 const BASE = '/api'
 
+// { tree, done } 을 돌려준다.
+//   tree = { 상위업무 전체이름: [하위업무 전체이름, …] }
+//   done = 이미 종료된 업무의 전체이름 Set
+//
+// 🔑 완료 업무를 tree 에서 «빼지 않는» 것이 중요하다. 지난 기록은 이 트리를 타고
+//    복원되므로 여기서 빼면 과거 날짜를 조회했을 때 적어 둔 업무가 사라진다.
+//    감추는 일은 화면이 «고르는 목록»에서만 한다.
+// ⚠ 판정은 status_category('done') 로 한다. 표시 이름(「완료」)은 프로젝트마다 다르다.
+// ⚠ 수동 추가 업무(MANUAL-…)는 상태가 NULL 이라 자동으로 «완료 아님» 이 된다 — 고정업무가 그것이다.
 export async function getJiraTree() {
   const res = await fetch(`${BASE}/jira-issues`)
   if (!res.ok) throw new Error(await res.text())
@@ -14,7 +23,10 @@ export async function getJiraTree() {
       .filter(c => c.parent_key === p.jira_key)
       .map(c => c.full_text)
   })
-  return tree
+  const done = new Set(
+    data.filter(i => i.status_category === 'done').map(i => i.full_text)
+  )
+  return { tree, done }
 }
 
 export async function syncJira() {

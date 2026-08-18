@@ -16,6 +16,10 @@ const WORK_HOURS=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
 const BUSINESS_START_HOUR=9, BUSINESS_END_HOUR=17
 const isBusinessHour=h=>h>=BUSINESS_START_HOUR&&h<=BUSINESS_END_HOUR
 const COLORS=['#3b82f6','#10b981','#f59e0b','#8b5cf6','#06b6d4','#ec4899','#84cc16','#f97316']
+// Jira 에 넣기 애매한 «끝이 없는» 반복 업무(주간회의 등)를 모아 두는 상위업무 이름.
+// 내부적으로는 수동 추가(MANUAL-…)와 같은 것이라 Jira 동기화가 지우지 않는다.
+const FIXED_PARENT='고정업무'
+
 const TABS=['today','daily','weekly','monthly','yearly','schedule','settings']
 const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'월간',yearly:'연간',schedule:'스케줄',settings:'설정'}
 
@@ -740,6 +744,7 @@ export default function App(){
   const [history,setHistory]=useState([])
   const [absences,setAbsences]=useState([])   // 장기출장·휴직·파견 기간
   const [jiraTree,setJiraTree]=useState({})
+  const [jiraDone,setJiraDone]=useState(()=>new Set())   // 종료된 업무 (고르는 목록에서만 감춘다)
   const [grid,setGrid]=useState({})
   const [parentSel,setParentSel]=useState({})
   const [selWorkerId,setSelWorkerId]=useState(null)   // 이름이 아니라 id 로 선택 대상을 잡는다
@@ -794,14 +799,23 @@ export default function App(){
   useEffect(()=>{
     Promise.all([getWorkers(),getHistory(),getJiraTree(),getAbsences().catch(()=>[])])
       .then(([w,h,j,ab])=>{
-        setWorkers(w);setHistory(withDisplayNames(h,w));setJiraTree(j);setAbsences(ab||[])
+        setWorkers(w);setHistory(withDisplayNames(h,w))
+        setJiraTree(j.tree);setJiraDone(j.done);setAbsences(ab||[])
         const tr=h.filter(r=>r.work_date===today())
         const g={}; tr.forEach(r=>{g[cellKey(r.work_hour,r.worker_id)]=r.work_text})
-        setGrid(g); setParentSel(buildParentSel(tr,j))
+        setGrid(g); setParentSel(buildParentSel(tr,j.tree))
       }).finally(()=>setLoading(false))
     // 토큰 만료 안내는 본 데이터 로딩을 막지 않도록 따로 조회한다
     getJiraTokenStatus().then(setTokenStatus)
   },[])
+
+  // 업무 목록을 다시 읽는다. 트리와 «완료 목록» 은 늘 같은 시점의 것이어야 하므로
+  // 둘을 따로 갱신하지 않고 여기 한 곳에서만 세팅한다.
+  async function reloadJira(){
+    const j=await getJiraTree()
+    setJiraTree(j.tree); setJiraDone(j.done)
+    return j
+  }
 
   // 고르고 있던 사람이 「집계 제외」로 등록되면 선택을 비운다.
   // 안 비우면 입력표에 없는 열을 가리킨 채로 저장 버튼이 살아 있다.
@@ -931,7 +945,7 @@ export default function App(){
       </nav>
       <main style={{padding:'16px 20px'}}>
         {tab==='today'   &&<TabToday   workers={inputWorkers} dupNames={dupNames} grid={grid} setGrid={setGrid}
-          jiraTree={jiraTree} selWorkerId={selWorkerId} setSelWorkerId={setSelWorkerId}
+          jiraTree={jiraTree} jiraDone={jiraDone} selWorkerId={selWorkerId} setSelWorkerId={setSelWorkerId}
           onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}/>}
         {tab==='daily'   &&<TabDaily   history={historyForStats} workers={workersLabeled} absences={absences} viewDate={viewDate} setViewDate={setViewDate}/>}
         {tab==='weekly'  &&<TabWeekly  history={historyForStats} workers={workersLabeled} absences={absences} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
@@ -950,7 +964,7 @@ export default function App(){
             setMe(null); showToast('로그아웃했습니다') }}
           clipboard={clipboard} onPaste={handlePaste} onCancelCopy={()=>setClipboard(null)}/>}
         {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers} dupNames={dupNames}
-          jiraTree={jiraTree} setJiraTree={setJiraTree} showToast={showToast} tokenStatus={tokenStatus}
+          jiraTree={jiraTree} jiraDone={jiraDone} reloadJira={reloadJira} showToast={showToast} tokenStatus={tokenStatus}
           vehicles={vehicles} onVehiclesChanged={loadSchedule}
           absences={absences} setAbsences={setAbsences}/>}
       </main>
@@ -988,9 +1002,20 @@ export default function App(){
 }
 
 // ── 오늘 업무 탭 ─────────────────────────────────────────
-function TabToday({workers,dupNames,grid,setGrid,jiraTree,selWorkerId,setSelWorkerId,onSave,onLoadDate,parentSel,setParentSel}){
+function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),selWorkerId,setSelWorkerId,onSave,onLoadDate,parentSel,setParentSel}){
   const [ldDate,setLdDate]=useState(today())
+  // 끝난 업무는 기본으로 감춘다. 다만 «완료 처리한 뒤에도 보완 작업이 이어지는» 경우가
+  // 실제로 있어(최근 30일에도 완료 업무에 76건이 적혔다) 체크 한 번으로 꺼낼 수 있게 둔다.
+  const [showDone,setShowDone]=useState(false)
   const jiraParents=Object.keys(jiraTree)
+  // 목록에서만 감춘다. 🔑 «지금 골라져 있는 값» 은 완료여도 남겨야 한다 —
+  // 빼 버리면 과거 날짜를 조회했을 때 적어 둔 업무가 빈칸으로 보인다.
+  const visible=(list,cur)=>list.filter(t=>showDone||!jiraDone.has(t)||t===cur)
+  // 표시 전용 이름. 🔴 저장되는 값(option 의 value)은 «원본 그대로» 여야 한다 —
+  // 화면 문구를 저장하면 상태가 바뀔 때마다 같은 업무가 두 종류로 갈라진다.
+  const label=t=>jiraDone.has(t)?'(완료) '+t:t
+  const doneCount=jiraParents.filter(p=>jiraDone.has(p)).length
+    +Object.values(jiraTree).flat().filter(s=>jiraDone.has(s)).length
   const selWorker=workers.find(w=>w.id===selWorkerId)||null
   // 다중 시간 선택
   const [selHours,setSelHours]=useState(new Set())
@@ -1020,6 +1045,13 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,selWorkerId,setSelWork
           <input type="date" value={ldDate} onChange={e=>setLdDate(e.target.value)} style={{padding:'6px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
           <button onClick={()=>{setLdDate(today());onLoadDate(today())}} style={{padding:'6px 12px',borderRadius:7,border:'1px solid #1a56db',background:'#eff6ff',color:'#1a56db',cursor:'pointer',fontSize:13,fontWeight:600}}>오늘</button>
           <button onClick={()=>onLoadDate(ldDate)} style={{padding:'6px 14px',borderRadius:7,border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:13}}>조회</button>
+          {doneCount>0&&(
+            <label title="Jira 에서 종료 처리한 업무를 목록에 함께 보여 줍니다"
+              style={{display:'inline-flex',alignItems:'center',gap:5,padding:'6px 10px',borderRadius:7,border:'1px solid #e5e7eb',background:showDone?'#f1f5f9':'#fff',fontSize:12,color:'#6b7280',cursor:'pointer'}}>
+              <input type="checkbox" checked={showDone} onChange={e=>setShowDone(e.target.checked)} style={{cursor:'pointer'}}/>
+              완료 포함 <span style={{color:'#9ca3af'}}>({doneCount})</span>
+            </label>
+          )}
         </div>
         <div style={{display:'flex',gap:8}}>
           <button onClick={()=>{if(!selWorker)return;const g={...grid};WORK_HOURS.forEach(h=>delete g[cellKey(h,selWorker.id)]);setGrid(g);const ps={...parentSel};WORK_HOURS.forEach(h=>delete ps[cellKey(h,selWorker.id)]);setParentSel(ps)}}
@@ -1080,17 +1112,18 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,selWorkerId,setSelWork
                 {workers.map(w=>{
                   const key=cellKey(h,w.id),val=grid[key]||'',isMe=selWorkerId===w.id
                   const pVal=parentSel[key]||'',subs=pVal?(jiraTree[pVal]||[]):[]
+                  const pOpts=visible(jiraParents,pVal),sOpts=visible(subs,val)
                   return isMe?(
                     <td key={w.id} style={{border:'1px solid #e5e7eb',padding:4,verticalAlign:'top',minWidth:155}}>
                       <div style={{display:'flex',flexDirection:'column',gap:3}}>
                         <select value={pVal} onChange={e=>onParentChange(h,w.id,e.target.value)} style={{width:'100%',fontSize:11,padding:'3px 5px',border:'1px solid #93c5fd',borderRadius:5,background:'#eff6ff'}}>
                           <option value="">① 상위업무 선택</option>
-                          {jiraParents.map(p=><option key={p} value={p}>{p}</option>)}
+                          {pOpts.map(p=><option key={p} value={p}>{label(p)}</option>)}
                         </select>
-                        <select value={subs.includes(val)?val:''} onChange={e=>onSubChange(h,w.id,e.target.value)} disabled={subs.length===0}
-                          style={{width:'100%',fontSize:11,padding:'3px 5px',borderRadius:5,border:'1px solid #6ee7b7',background:subs.length===0?'#f9fafb':'#f0fdf4',color:subs.length===0?'#9ca3af':'#111827'}}>
-                          <option value="">{subs.length===0?'② 하위업무 없음':'② 하위업무 선택'}</option>
-                          {subs.map(s=><option key={s} value={s}>{s}</option>)}
+                        <select value={subs.includes(val)?val:''} onChange={e=>onSubChange(h,w.id,e.target.value)} disabled={sOpts.length===0}
+                          style={{width:'100%',fontSize:11,padding:'3px 5px',borderRadius:5,border:'1px solid #6ee7b7',background:sOpts.length===0?'#f9fafb':'#f0fdf4',color:sOpts.length===0?'#9ca3af':'#111827'}}>
+                          <option value="">{sOpts.length===0?'② 하위업무 없음':'② 하위업무 선택'}</option>
+                          {sOpts.map(s=><option key={s} value={s}>{label(s)}</option>)}
                         </select>
                         <input value={(!pVal&&!subs.includes(val))?val:''} onChange={e=>onDirectInput(h,w.id,e.target.value)} placeholder="③ 직접 입력"
                           style={{width:'100%',fontSize:11,padding:'3px 5px',border:'1px dashed #fcd34d',borderRadius:5,background:'#fffbeb'}}/>
@@ -3595,7 +3628,7 @@ function AbsenceManager({absences,setAbsences,workers,dupNames,showToast}){
   )
 }
 
-function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree,showToast,
+function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,jiraDone=new Set(),reloadJira,showToast,
                       tokenStatus={configured:false},vehicles=[],onVehiclesChanged,
                       absences=[],setAbsences=()=>{}}){
   const [newWorker,setNewWorker]=useState('')
@@ -3609,7 +3642,9 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree
   const [editEmail,setEditEmail]=useState('')
   const [newJira,setNewJira]=useState('')
   const [newJiraParent,setNewJiraParent]=useState('')
+  const [newFixed,setNewFixed]=useState('')
   const jiraParents=Object.keys(jiraTree)
+  const fixedTasks=jiraTree[FIXED_PARENT]||[]
   const nameOf=id=>{const w=workers.find(x=>x.id===id);return w?workerLabel(w,dupNames):''}
 
   function startEdit(w) {
@@ -3676,20 +3711,32 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree
   showToast('동기화 중...', 0)
   try{
       await syncJira()
-      const tree=await getJiraTree()
-      setJiraTree(tree)
-      showToast('✅ Jira 동기화 완료 ('+Object.keys(tree).length+'건)', 4000)
+      const j=await reloadJira()
+      showToast('✅ Jira 동기화 완료 ('+Object.keys(j.tree).length+'건)', 4000)
     }
     catch(e){showToast('❌ 동기화 실패: '+e.message, 4000)}
   }
   async function handleAddJira(){
     if(!newJira.trim())return
-    try{await addJiraIssue(newJira.trim(),newJiraParent||null);const tree=await getJiraTree();setJiraTree(tree);setNewJira('');showToast('추가 완료')}
+    try{await addJiraIssue(newJira.trim(),newJiraParent||null);await reloadJira();setNewJira('');showToast('추가 완료')}
     catch(e){showToast('추가 실패')}
   }
   async function handleDelJira(text){
-    try{await removeJiraIssue(text);const tree=await getJiraTree();setJiraTree(tree)}
+    try{await removeJiraIssue(text);await reloadJira()}
     catch(e){showToast('삭제 실패')}
+  }
+
+  // ── 고정업무 (Jira 에 없는 반복 업무) ────────────────────────
+  // 상위업무 「고정업무」 아래에 모아 둔다. 내부적으로는 수동 추가(MANUAL-…)와 같은 것이라
+  // Jira 동기화가 지우지 않는다. 상위가 아직 없으면 처음 추가할 때 함께 만든다.
+  async function handleAddFixed(){
+    const name=newFixed.trim()
+    if(!name)return
+    try{
+      if(jiraTree[FIXED_PARENT]===undefined) await addJiraIssue(FIXED_PARENT,null)
+      await addJiraIssue(name,FIXED_PARENT)
+      await reloadJira(); setNewFixed(''); showToast(name+' 추가 완료')
+    }catch(e){showToast('추가 실패: '+e.message)}
   }
 
   return(
@@ -3816,6 +3863,30 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree
         </Card>
       </div>
 
+      <Card title="고정업무 — Jira 에 없는 반복 업무" style={{marginBottom:16}}>
+        <div style={{background:'#fffbeb',border:'1px solid #fde68a',borderRadius:8,padding:'10px 12px',fontSize:12,color:'#92400e',marginBottom:10}}>
+          주간회의처럼 <b>끝이 없어 Jira 일감으로 만들기 애매한 업무</b>를 여기에 등록합니다.
+          <br />업무 입력 화면의 상위업무에서 <b>「{FIXED_PARENT}」</b> 를 고르면 하위에 나옵니다.
+          <br /><b>Jira 동기화를 해도 지워지지 않습니다.</b>
+        </div>
+        <div style={{display:'flex',gap:8,marginBottom:10}}>
+          <input value={newFixed} onChange={e=>setNewFixed(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleAddFixed()}
+            placeholder="예: [주간회의]"
+            style={{flex:1,padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
+          <button onClick={handleAddFixed} style={{padding:'7px 14px',borderRadius:7,border:'none',background:'#b45309',color:'#fff',cursor:'pointer',fontWeight:600}}>추가</button>
+        </div>
+        {fixedTasks.length===0
+          ? <p style={{color:'#9ca3af',fontSize:12,padding:'8px 4px'}}>아직 등록된 고정업무가 없습니다.</p>
+          : <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+              {fixedTasks.map(t=>(
+                <span key={t} style={{display:'inline-flex',alignItems:'center',gap:8,padding:'5px 10px',background:'#fef3c7',border:'1px solid #fcd34d',borderRadius:999,fontSize:12,color:'#92400e'}}>
+                  {t}
+                  <span onClick={()=>handleDelJira(t)} style={{cursor:'pointer',color:'#b91c1c',fontWeight:700}}>&times;</span>
+                </span>
+              ))}
+            </div>}
+      </Card>
+
       <Card title="Jira 업무 목록">
         <div style={{display:'flex',gap:8,marginBottom:10}}>
           <input value={newJira} onChange={e=>setNewJira(e.target.value)} placeholder="예: VITRON-11 신규 기능"
@@ -3831,12 +3902,12 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree
             :jiraParents.map(p=>(
               <div key={p} style={{marginBottom:6}}>
                 <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 10px',background:'#eff6ff',borderRadius:6,fontSize:12}}>
-                  <span style={{fontWeight:600,color:'#1e40af'}}>{p}</span>
+                  <span style={{fontWeight:600,color:jiraDone.has(p)?'#6b7280':'#1e40af'}}>{jiraDone.has(p)?'(완료) ':''}{p}</span>
                   <span onClick={()=>handleDelJira(p)} style={{cursor:'pointer',color:'#b91c1c',fontWeight:700}}>&times;</span>
                 </div>
                 {(jiraTree[p]||[]).map(s=>(
                   <div key={s} style={{display:'flex',justifyContent:'space-between',padding:'4px 8px 4px 24px',fontSize:11,background:'#f0fdf4',borderLeft:'2px solid #6ee7b7',margin:'2px 0 2px 8px',borderRadius:'0 4px 4px 0'}}>
-                    <span>↳ {s}</span>
+                    <span style={{color:jiraDone.has(s)?'#9ca3af':'inherit'}}>↳ {jiraDone.has(s)?'(완료) ':''}{s}</span>
                     <span onClick={()=>handleDelJira(s)} style={{cursor:'pointer',color:'#b91c1c',fontWeight:700}}>&times;</span>
                   </div>
                 ))}

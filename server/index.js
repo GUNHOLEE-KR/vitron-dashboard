@@ -432,25 +432,34 @@ app.post('/api/jira-sync', async (req, res) => {
 
   try {
     // 에픽(상위 이슈) 조회
-    const epics = await searchJiraIssues(baseUrl, auth, 'issuetype=Epic', 'summary')
+    const epics = await searchJiraIssues(baseUrl, auth, 'issuetype=Epic', 'summary,status')
 
     // 하위 이슈 조회
     const children = await searchJiraIssues(
-      baseUrl, auth, 'issuetype!=Epic AND parent is not EMPTY', 'summary,parent'
+      baseUrl, auth, 'issuetype!=Epic AND parent is not EMPTY', 'summary,parent,status'
     )
+
+    // 상태는 «분류(statusCategory.key)» 로 판정한다. 표시 이름(「완료」·「검토 중」)은
+    // 프로젝트 설정에 따라 바뀔 수 있어 그것으로 거르면 조용히 어긋난다.
+    const statusOf = i => ({
+      status_name:     i.fields.status?.name ?? null,
+      status_category: i.fields.status?.statusCategory?.key ?? null
+    })
 
     const allIssues = [
       ...epics.map(i => ({
         jira_key:   i.key,
         summary:    i.fields.summary,
         parent_key: null,
-        full_text:  `[${i.key}] ${i.fields.summary}`
+        full_text:  `[${i.key}] ${i.fields.summary}`,
+        ...statusOf(i)
       })),
       ...children.map(i => ({
         jira_key:   i.key,
         summary:    i.fields.summary,
         parent_key: i.fields.parent?.key ?? null,
-        full_text:  `[${i.key}] ${i.fields.summary}`
+        full_text:  `[${i.key}] ${i.fields.summary}`,
+        ...statusOf(i)
       }))
     ]
 
@@ -471,20 +480,24 @@ app.post('/api/jira-sync', async (req, res) => {
 
       // 건별 왕복 대신 500건씩 묶어 INSERT (NAS 환경에서 응답 지연 방지)
       const CHUNK_SIZE = 500
+      const COLS = 6
       for (let start = 0; start < uniqueIssues.length; start += CHUNK_SIZE) {
         const chunk = uniqueIssues.slice(start, start + CHUNK_SIZE)
         const placeholders = chunk.map((_, n) => {
-          const base = n * 4
-          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4})`
+          const base = n * COLS
+          return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`
         })
-        const values = chunk.flatMap(i => [i.jira_key, i.summary, i.parent_key, i.full_text])
+        const values = chunk.flatMap(i =>
+          [i.jira_key, i.summary, i.parent_key, i.full_text, i.status_name, i.status_category])
         await client.query(
-          `INSERT INTO jira_issues (jira_key, summary, parent_key, full_text)
+          `INSERT INTO jira_issues (jira_key, summary, parent_key, full_text, status_name, status_category)
            VALUES ${placeholders.join(', ')}
            ON CONFLICT (jira_key) DO UPDATE
            SET summary = EXCLUDED.summary,
                parent_key = EXCLUDED.parent_key,
-               full_text = EXCLUDED.full_text`,
+               full_text = EXCLUDED.full_text,
+               status_name = EXCLUDED.status_name,
+               status_category = EXCLUDED.status_category`,
           values
         )
       }

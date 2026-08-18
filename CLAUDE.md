@@ -38,7 +38,7 @@ src/
 server/
   index.js                 # Express REST API + Jira 동기화 (단일 파일)
 db/init.sql                # PostgreSQL 스키마 (기존 테이블 3개)
-db/migrations/             # 이후 변경 SQL — 001~006 (003 은 롤백용도 함께 둠)
+db/migrations/             # 이후 변경 SQL — 001~007 (003 은 롤백용도 함께 둠)
 Dockerfile.frontend        # React 빌드 → nginx
 Dockerfile.backend         # Node.js API 서버
 nginx.conf                 # /api/* → backend 프록시, 타임아웃 300초
@@ -49,7 +49,7 @@ deploy.sh                  # NAS 배포 스크립트
 ## PostgreSQL 테이블 (9개)
 - `workers` — 직원 정보 (name, active, hired_at, resigned_at, email)
 - `work_history` — 업무 기록 (worker_name, work_date, work_hour, work_text)
-- `jira_issues` — Jira 이슈 캐시 (jira_key, summary, parent_key, full_text)
+- `jira_issues` — Jira 이슈 캐시 (jira_key, summary, parent_key, full_text, **status_name, status_category**)
 - `worker_absences` — 집계 제외 기간 (아래 절 참고)
 - `schedule_places` / `schedule_vehicles` / `schedule_plans` / `schedule_actuals` /
   `schedule_settlements` — 일정 관리 (아래 절 참고)
@@ -101,6 +101,19 @@ deploy.sh                  # NAS 배포 스크립트
 
 ## Jira 동기화
 - 프론트 → 백엔드 `POST /api/jira-sync` → Jira REST API → PostgreSQL
+- **상태도 함께 받는다** (`status_name`·`status_category`, 마이그레이션 `007`).
+  🔑판정은 **반드시 `status_category`**(`new`/`indeterminate`/`done`) 로 — 표시 이름(「완료」·「검토 중」)은
+  프로젝트 설정에 따라 바뀌어 그것으로 거르면 조용히 어긋난다
+
+### 종료 업무와 고정업무 (업무 입력 화면)
+- 종료(`done`)한 업무는 **고르는 목록에서 기본으로 감춘다.** 「완료 포함」 체크로 다시 꺼낼 수 있다 —
+  완료 처리 뒤에도 보완 작업이 이어지는 일이 실제로 있다(최근 30일에도 완료 업무에 76건이 적혔다)
+- 목록에 보일 때는 앞에 **`(완료) `** 를 붙인다.
+  🔴**저장값은 원본 `full_text` 그대로** — 표시 문구를 저장하면 상태가 바뀔 때마다 같은 업무가 갈라진다
+- 🔑**이미 골라져 있는 값은 완료여도 목록에 남긴다.** 빼면 과거 날짜 조회 시 적어 둔 업무가 빈칸이 된다
+- **고정업무** = Jira 에 넣기 애매한 반복 업무(주간회의 등). 상위업무 **`고정업무`**(상수 `FIXED_PARENT`) 아래에 모은다.
+  내부적으로는 수동 추가(`MANUAL-…`)와 같아 **동기화가 지우지 않는다**. 상태가 NULL 이라 항상 보인다.
+  등록은 [설정] 탭 「고정업무」 카드
 - 토큰은 서버 환경변수에만 있으므로 **로그인 없이 누구나 동기화 가능**
 - 검색은 신형 `/rest/api/3/search/jql` + `nextPageToken` 페이지네이션
   (구형 `/rest/api/3/search` 는 Atlassian 이 제거해 410)
