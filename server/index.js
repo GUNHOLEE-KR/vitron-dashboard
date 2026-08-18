@@ -120,6 +120,89 @@ app.delete('/api/workers/:id', async (req, res) => {
   }
 })
 
+// ─── 장기 부재 (장기출장·휴직·파견) ──────────────────────────
+// 장기 출장자는 업무를 입력할 수 없는데 집계에는 재직자로 들어간다.
+// 그 한 사람 때문에 평균이 내려가고 최소값이 그 사람으로 고정된다.
+// 부재 기간을 등록해 두면 화면이 그 기간을 «가동일»에서 빼고,
+// 그 기간에 남은 기록도 집계에서 제외한다 (2026-08-18 사용자 결정).
+const ABSENCE_KINDS = ['장기출장', '휴직', '파견']
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
+
+app.get('/api/worker-absences', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT a.*, w.name AS worker_name
+       FROM worker_absences a JOIN workers w ON w.id = a.worker_id
+       ORDER BY a.from_date DESC, a.id DESC`
+    )
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/worker-absences', async (req, res) => {
+  const { worker_id, kind, from_date, to_date, note } = req.body
+  if (!worker_id) return res.status(400).json({ error: '대상 직원을 골라 주세요.' })
+  if (!ABSENCE_KINDS.includes(kind)) {
+    return res.status(400).json({ error: `사유는 ${ABSENCE_KINDS.join('/')} 중 하나여야 합니다.` })
+  }
+  if (!DATE_ONLY.test(String(from_date || ''))) {
+    return res.status(400).json({ error: '시작일을 YYYY-MM-DD 형식으로 넣어 주세요.' })
+  }
+  // 종료일은 비울 수 있다 (진행 중). 넣었다면 시작일보다 앞설 수 없다.
+  if (to_date && !DATE_ONLY.test(String(to_date))) {
+    return res.status(400).json({ error: '종료일을 YYYY-MM-DD 형식으로 넣어 주세요.' })
+  }
+  if (to_date && to_date < from_date) {
+    return res.status(400).json({ error: '종료일이 시작일보다 앞설 수 없습니다.' })
+  }
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO worker_absences (worker_id, kind, from_date, to_date, note)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [worker_id, kind, from_date, to_date || null, note || null]
+    )
+    res.json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 돌아왔을 때 종료일만 채우는 일이 잦아 수정도 둔다.
+app.patch('/api/worker-absences/:id', async (req, res) => {
+  const { kind, from_date, to_date, note } = req.body
+  if (kind && !ABSENCE_KINDS.includes(kind)) {
+    return res.status(400).json({ error: `사유는 ${ABSENCE_KINDS.join('/')} 중 하나여야 합니다.` })
+  }
+  if (to_date && from_date && to_date < from_date) {
+    return res.status(400).json({ error: '종료일이 시작일보다 앞설 수 없습니다.' })
+  }
+  try {
+    const { rows } = await pool.query(
+      `UPDATE worker_absences
+       SET kind = COALESCE($1, kind), from_date = COALESCE($2, from_date),
+           to_date = $3, note = COALESCE($4, note)
+       WHERE id = $5 RETURNING *`,
+      [kind || null, from_date || null, to_date || null, note ?? null, req.params.id]
+    )
+    if (!rows.length) return res.status(404).json({ error: '해당 부재 기록을 찾을 수 없습니다.' })
+    res.json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.delete('/api/worker-absences/:id', async (req, res) => {
+  try {
+    const { rowCount } = await pool.query('DELETE FROM worker_absences WHERE id = $1', [req.params.id])
+    if (rowCount === 0) return res.status(404).json({ error: '해당 부재 기록을 찾을 수 없습니다.' })
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 // ─── Work History ────────────────────────────────────────────
 
 app.get('/api/history', async (req, res) => {

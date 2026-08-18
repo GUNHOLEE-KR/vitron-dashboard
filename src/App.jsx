@@ -3,6 +3,7 @@ import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, L
          RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
          ComposedChart, XAxis, YAxis, Tooltip, Legend, ReferenceLine, ResponsiveContainer } from 'recharts'
 import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates, updateWorkerEmail } from './repositories/workerRepo'
+import { getAbsences, addAbsence, removeAbsence } from './repositories/absenceRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
 import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
 import { getPlaces, addPlace, updatePlace, hidePlace, getVehicles, addVehicle, updateVehicle,
@@ -160,12 +161,61 @@ function avgHours(total, count){
 }
 
 // 기간별 직원 필터 헬퍼
+// ⚠ 비활성인데 퇴사일이 비어 있는 사람도 걸러낸다. 그런 행이 있으면 어느 기간을 봐도
+//   계속 재직자로 세어져 평균이 조용히 틀어진다 (서버가 퇴사 시 날짜를 채우지만, DB 를
+//   직접 고친 경우까지 막으려면 화면에도 방어가 있어야 한다).
 function workersForPeriod(workers, periodStart, periodEnd) {
   return workers.filter(w => {
+    if (!w.active && !w.resigned_at) return false
     const hiredOk = !w.hired_at || w.hired_at <= periodEnd
     const resignedOk = !w.resigned_at || w.resigned_at >= periodStart
     return hiredOk && resignedOk
   })
+}
+
+// ── 장기 부재(장기출장·휴직·파견) ────────────────────────────
+// 장기 출장자는 업무를 입력할 수 없는데 집계에는 재직자로 들어간다.
+// 그 한 사람 때문에 평균이 내려가고 최소값이 그 사람으로 고정된다.
+// 규칙(2026-08-18 사용자 결정) — 부재 기간은 «가동일»에서 빼고,
+// 그 기간에 남아 있는 기록도 집계에 넣지 않는다. 평균·최대·최소는 «하루당» 으로 본다.
+const ABSENCE_STYLE = {
+  장기출장: { fg:'#9a3412', bg:'#ffedd5' },
+  휴직:    { fg:'#6b21a8', bg:'#f3e8ff' },
+  파견:    { fg:'#1e40af', bg:'#dbeafe' }
+}
+// 그 날 그 사람이 부재였는가. to_date 가 비어 있으면 «아직 안 돌아옴» 이라 끝이 없다.
+function isAbsentOn(absences, workerId, date) {
+  return absences.some(a => a.worker_id === workerId &&
+    a.from_date <= date && (!a.to_date || a.to_date >= date))
+}
+// 기간과 겹치는 부재만 추린다 (화면 배지용)
+function absencesInPeriod(absences, workerId, from, to) {
+  return absences.filter(a => a.worker_id === workerId &&
+    a.from_date <= to && (!a.to_date || a.to_date >= from))
+}
+// 부재 기간에 남은 기록은 집계에서 뺀다. 원본은 그대로 두고 «보는 것만» 뺀다.
+function excludeAbsentRows(rows, absences) {
+  if (!absences.length) return rows
+  return rows.filter(r => !isAbsentOn(absences, r.worker_id, r.work_date))
+}
+// 그 사람이 이 기간에 실제로 일할 수 있었던 날 수 = 영업일 − (재직 밖) − 부재일
+// 그 기간에 «일할 수 있었던 사람» 만 남긴다. 가동일이 0이면 통째로 부재라
+// 평균·최대·최소 어디에도 넣지 않는다 — 넣으면 0시간이 최소값으로 고정된다.
+function workersAvailable(workers, absences, from, to) {
+  return workersForPeriod(workers, from, to).filter(w => activeDays(w, absences, from, to) > 0)
+}
+
+function activeDays(worker, absences, from, to) {
+  let n = 0
+  const cur = new Date(from + 'T00:00:00'), end = new Date(to + 'T00:00:00')
+  while (cur <= end) {
+    const d = ymd(cur), dow = cur.getDay()
+    const inService = (!worker.hired_at || worker.hired_at <= d) &&
+                      (!worker.resigned_at || worker.resigned_at >= d)
+    if (dow !== 0 && dow !== 6 && inService && !isAbsentOn(absences, worker.id, d)) n++
+    cur.setDate(cur.getDate() + 1)
+  }
+  return n
 }
 function monthEnd(ym) {
   // toISOString() 을 쓰면 UTC 변환 탓에 하루 빨라진다 (8월 → 08-30).
@@ -676,6 +726,7 @@ export default function App(){
   const [tab,setTab]=useState('today')
   const [workers,setWorkers]=useState([])
   const [history,setHistory]=useState([])
+  const [absences,setAbsences]=useState([])   // 장기출장·휴직·파견 기간
   const [jiraTree,setJiraTree]=useState({})
   const [grid,setGrid]=useState({})
   const [parentSel,setParentSel]=useState({})
@@ -715,6 +766,9 @@ export default function App(){
   // 분석 탭은 workers 의 이름으로 기록을 찾는다. history 의 worker_name 이
   // 표시 이름으로 바뀌어 있으므로 workers 쪽도 같은 이름으로 맞춰 넘긴다.
   const workersLabeled=workers.map(w=>({...w,name:workerLabel(w,dupNames),name_raw:w.name}))
+  // 분석 탭에는 부재 기간 기록을 뺀 목록을 넘긴다. 입력 탭은 원본을 그대로 써야
+  // 사용자가 적어 둔 값이 화면에서 사라지지 않는다.
+  const historyForStats=excludeAbsentRows(history,absences)
 
   function showToast(msg, duration=2500){
     if(toastTimerRef.current) clearTimeout(toastTimerRef.current)
@@ -723,9 +777,9 @@ export default function App(){
   }
 
   useEffect(()=>{
-    Promise.all([getWorkers(),getHistory(),getJiraTree()])
-      .then(([w,h,j])=>{
-        setWorkers(w);setHistory(withDisplayNames(h,w));setJiraTree(j)
+    Promise.all([getWorkers(),getHistory(),getJiraTree(),getAbsences().catch(()=>[])])
+      .then(([w,h,j,ab])=>{
+        setWorkers(w);setHistory(withDisplayNames(h,w));setJiraTree(j);setAbsences(ab||[])
         const tr=h.filter(r=>r.work_date===today())
         const g={}; tr.forEach(r=>{g[cellKey(r.work_hour,r.worker_id)]=r.work_text})
         setGrid(g); setParentSel(buildParentSel(tr,j))
@@ -858,10 +912,10 @@ export default function App(){
         {tab==='today'   &&<TabToday   workers={activeWorkers} dupNames={dupNames} grid={grid} setGrid={setGrid}
           jiraTree={jiraTree} selWorkerId={selWorkerId} setSelWorkerId={setSelWorkerId}
           onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}/>}
-        {tab==='daily'   &&<TabDaily   history={history} workers={workersLabeled} viewDate={viewDate} setViewDate={setViewDate}/>}
-        {tab==='weekly'  &&<TabWeekly  history={history} workers={workersLabeled} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
-        {tab==='monthly' &&<TabMonthly history={history} workers={workersLabeled} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
-        {tab==='yearly'  &&<TabYearly  history={history} workers={workersLabeled} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
+        {tab==='daily'   &&<TabDaily   history={historyForStats} workers={workersLabeled} absences={absences} viewDate={viewDate} setViewDate={setViewDate}/>}
+        {tab==='weekly'  &&<TabWeekly  history={historyForStats} workers={workersLabeled} absences={absences} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
+        {tab==='monthly' &&<TabMonthly history={historyForStats} workers={workersLabeled} absences={absences} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
+        {tab==='yearly'  &&<TabYearly  history={historyForStats} workers={workersLabeled} absences={absences} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
         {tab==='schedule'&&<TabSchedule workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
           places={places} vehicles={vehicles} plans={plans} loading={schedLoading}
           onReload={loadSchedule} showToast={showToast} focusDate={schedFocus}
@@ -876,7 +930,8 @@ export default function App(){
           clipboard={clipboard} onPaste={handlePaste} onCancelCopy={()=>setClipboard(null)}/>}
         {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers} dupNames={dupNames}
           jiraTree={jiraTree} setJiraTree={setJiraTree} showToast={showToast} tokenStatus={tokenStatus}
-          vehicles={vehicles} onVehiclesChanged={loadSchedule}/>}
+          vehicles={vehicles} onVehiclesChanged={loadSchedule}
+          absences={absences} setAbsences={setAbsences}/>}
       </main>
       {planDialog&&(
         <PlanDialog editing={planDialog.editing} defaultDate={planDialog.date}
@@ -1062,9 +1117,9 @@ function SectionTitle({children}){
 }
 
 // ── 일간 탭 ───────────────────────────────────────────────
-function TabDaily({history,workers,viewDate,setViewDate}){
+function TabDaily({history,workers,absences=[],viewDate,setViewDate}){
   const rows=history.filter(r=>r.work_date===viewDate)
-  const periodWorkers=workersForPeriod(workers,viewDate,viewDate)
+  const periodWorkers=workersAvailable(workers,absences,viewDate,viewDate)
   const agg=aggByWorker(rows),total=rows.length
   const wNames=periodWorkers.map(w=>w.name)
   const barData=wNames.map(n=>({name:n,업무수:agg[n]?.total||0}))
@@ -1109,11 +1164,11 @@ function TabDaily({history,workers,viewDate,setViewDate}){
 }
 
 // ── 주간 탭 ───────────────────────────────────────────────
-function TabWeekly({history,workers,viewDate,setViewDate,jiraTree}){
+function TabWeekly({history,workers,absences=[],viewDate,setViewDate,jiraTree}){
   const ym=toMonth(viewDate),wk=weekNum(viewDate)
   const wS=weekStart(viewDate),wE=weekEnd(viewDate)
   const rows=history.filter(r=>toMonth(r.work_date)===ym&&weekNum(r.work_date)===wk)
-  const periodWorkers=workersForPeriod(workers,wS,wE)
+  const periodWorkers=workersAvailable(workers,absences,wS,wE)
   const total=rows.length
   const days=[...new Set(rows.map(r=>r.work_date))].sort()
   const wNames=periodWorkers.map(w=>w.name)
@@ -1186,10 +1241,10 @@ function TabWeekly({history,workers,viewDate,setViewDate,jiraTree}){
 }
 
 // ── 월간 탭 ───────────────────────────────────────────────
-function TabMonthly({history,workers,viewMonth,setViewMonth,jiraTree}){
+function TabMonthly({history,workers,absences=[],viewMonth,setViewMonth,jiraTree}){
   const mS=viewMonth+'-01',mE=monthEnd(viewMonth)
   const rows=history.filter(r=>toMonth(r.work_date)===viewMonth)
-  const periodWorkers=workersForPeriod(workers,mS,mE)
+  const periodWorkers=workersAvailable(workers,absences,mS,mE)
   const total=rows.length,agg=aggByWorker(rows)
   const days=[...new Set(rows.map(r=>r.work_date))]
   const wm={}
@@ -1263,10 +1318,10 @@ function TabMonthly({history,workers,viewMonth,setViewMonth,jiraTree}){
 }
 
 // ── 연간 탭 ───────────────────────────────────────────────
-function TabYearly({history,workers,viewYear,setViewYear,jiraTree}){
+function TabYearly({history,workers,absences=[],viewYear,setViewYear,jiraTree}){
   const yS=viewYear+'-01-01',yE=viewYear+'-12-31'
   const rows=history.filter(r=>toYear(r.work_date)===viewYear)
-  const periodWorkers=workersForPeriod(workers,yS,yE)
+  const periodWorkers=workersAvailable(workers,absences,yS,yE)
   const total=rows.length,agg=aggByWorker(rows)
   const days=[...new Set(rows.map(r=>r.work_date))]
   const mm={}
@@ -3425,8 +3480,101 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
 // ── 설정 탭 ───────────────────────────────────────────────
 // 직원 수정·삭제는 모두 id 로 대상을 지정한다 (동명이인 구분).
 // editingWorkerId / resigningWorkerId 도 이름이 아니라 id 를 담는다.
+// ── 장기 부재 관리 (장기출장·휴직·파견) ──────────────────────
+// 등록해 두면 그 기간은 «가동일»에서 빠지고, 그 기간에 남은 기록도 집계에 넣지 않는다.
+// 사람을 지우는 것이 아니라 «그 기간만» 빼는 것이라 과거 통계는 그대로 남는다.
+function AbsenceManager({absences,setAbsences,workers,dupNames,showToast}){
+  const [workerId,setWorkerId]=useState('')
+  const [kind,setKind]=useState('장기출장')
+  const [from,setFrom]=useState(today())
+  const [to,setTo]=useState('')
+  const [note,setNote]=useState('')
+  const [busy,setBusy]=useState(false)
+  const inputS={padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}
+
+  async function handleAdd(){
+    if(!workerId){showToast('대상 직원을 골라 주세요');return}
+    setBusy(true)
+    try{
+      const saved=await addAbsence({worker_id:Number(workerId),kind,from_date:from,
+        to_date:to||null,note:note.trim()||null})
+      const w=workers.find(x=>x.id===Number(workerId))
+      setAbsences([{...saved,worker_name:w?.name},...absences])
+      setNote('');setTo('')
+      showToast('부재 등록 완료 — 집계에서 그 기간이 빠집니다')
+    }catch(e){showToast('등록 실패: '+e.message,4000)}
+    finally{setBusy(false)}
+  }
+  async function handleDel(a){
+    if(!confirm(`${a.worker_name} 의 ${a.kind}(${a.from_date}~${a.to_date||'진행 중'}) 기록을 지울까요?\n지우면 그 기간이 다시 집계에 들어갑니다.`))return
+    try{await removeAbsence(a.id);setAbsences(absences.filter(x=>x.id!==a.id));showToast('삭제 완료')}
+    catch(e){showToast('삭제 실패: '+e.message,4000)}
+  }
+
+  return(
+    <Card title="장기 부재 — 장기출장 · 휴직 · 파견" style={{flex:1,minWidth:320}}>
+      <p style={{fontSize:11,color:'#6b7280',margin:'0 0 10px',lineHeight:1.7}}>
+        입력을 할 수 없는 기간을 등록합니다. 그 기간은 <b>가동일에서 빠지고</b>, 그 기간에 남아 있는
+        기록도 <b>집계에 넣지 않습니다.</b> 평균·최대·최소는 <b>하루당</b>으로 계산되므로
+        한 사람의 부재가 전체 숫자를 흔들지 않습니다. <b>종료일을 비우면 «진행 중»</b> 입니다.
+      </p>
+      <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:10}}>
+        <select value={workerId} onChange={e=>setWorkerId(e.target.value)} style={{...inputS,minWidth:110}}>
+          <option value="">직원 선택</option>
+          {workers.filter(w=>w.active).map(w=>
+            <option key={w.id} value={w.id}>{workerLabel(w,dupNames)}</option>)}
+        </select>
+        <select value={kind} onChange={e=>setKind(e.target.value)} style={inputS}>
+          {Object.keys(ABSENCE_STYLE).map(k=><option key={k} value={k}>{k}</option>)}
+        </select>
+        <input type="date" value={from} onChange={e=>setFrom(e.target.value)} style={inputS}/>
+        <span style={{alignSelf:'center',color:'#9ca3af'}}>~</span>
+        <input type="date" value={to} onChange={e=>setTo(e.target.value)} style={inputS}
+          title="비우면 진행 중"/>
+        <input value={note} onChange={e=>setNote(e.target.value)} placeholder="비고 (선택)"
+          style={{...inputS,flex:'1 1 140px',minWidth:120}}/>
+        <button onClick={handleAdd} disabled={busy}
+          style={{padding:'7px 14px',borderRadius:7,border:'none',background:'#1a56db',color:'#fff',
+            cursor:busy?'default':'pointer',fontWeight:600,opacity:busy?0.6:1}}>등록</button>
+      </div>
+      {!absences.length
+        ?<div style={{fontSize:12,color:'#9ca3af',padding:'10px 0'}}>등록된 부재가 없습니다.</div>
+        :<div style={{overflowX:'auto'}}>
+          <table style={{borderCollapse:'collapse',width:'100%',minWidth:520}}>
+            <thead><tr>{['직원','사유','기간','비고',''].map(h=><th key={h} style={thS}>{h}</th>)}</tr></thead>
+            <tbody>
+              {absences.map(a=>{
+                const st=ABSENCE_STYLE[a.kind]||ABSENCE_STYLE['파견']
+                const ongoing=!a.to_date||a.to_date>=today()
+                return(
+                  <tr key={a.id}>
+                    <td style={{...tdS,fontWeight:600}}>{a.worker_name}</td>
+                    <td style={tdS}>
+                      <span style={{color:st.fg,background:st.bg,padding:'2px 8px',borderRadius:10,
+                        fontSize:11,fontWeight:700,whiteSpace:'nowrap'}}>{a.kind}</span>
+                    </td>
+                    <td style={{...tdS,whiteSpace:'nowrap'}}>
+                      {a.from_date} ~ {a.to_date||<b style={{color:'#b45309'}}>진행 중</b>}
+                      {ongoing&&<span style={{marginLeft:6,fontSize:10,color:'#b45309'}}>●</span>}
+                    </td>
+                    <td style={{...tdS,textAlign:'left',color:'#6b7280',fontSize:11}}>{a.note||''}</td>
+                    <td style={tdS}>
+                      <button onClick={()=>handleDel(a)}
+                        style={{padding:'3px 9px',borderRadius:5,border:'1px solid #fecaca',
+                          background:'#fff',color:'#dc2626',fontSize:11,cursor:'pointer'}}>삭제</button>
+                    </td>
+                  </tr>)
+              })}
+            </tbody>
+          </table>
+        </div>}
+    </Card>
+  )
+}
+
 function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree,showToast,
-                      tokenStatus={configured:false},vehicles=[],onVehiclesChanged}){
+                      tokenStatus={configured:false},vehicles=[],onVehiclesChanged,
+                      absences=[],setAbsences=()=>{}}){
   const [newWorker,setNewWorker]=useState('')
   const [newHiredAt,setNewHiredAt]=useState(today())
   const [newEmail,setNewEmail]=useState('')
@@ -3526,6 +3674,10 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,setJiraTree
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <VehicleManager vehicles={vehicles} workers={workers} dupNames={dupNames}
           onChanged={onVehiclesChanged} showToast={showToast}/>
+      </div>
+      <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
+        <AbsenceManager absences={absences} setAbsences={setAbsences} workers={workers}
+          dupNames={dupNames} showToast={showToast}/>
       </div>
       <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
         <Card title="직원 관리" style={{flex:1,minWidth:300}}>
