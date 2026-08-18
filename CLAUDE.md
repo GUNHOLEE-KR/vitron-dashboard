@@ -38,7 +38,7 @@ src/
 server/
   index.js                 # Express REST API + Jira 동기화 (단일 파일)
 db/init.sql                # PostgreSQL 스키마 (기존 테이블 3개)
-db/migrations/             # 이후 변경 SQL — 001~004 (003 은 롤백용도 함께 둠)
+db/migrations/             # 이후 변경 SQL — 001~006 (003 은 롤백용도 함께 둠)
 Dockerfile.frontend        # React 빌드 → nginx
 Dockerfile.backend         # Node.js API 서버
 nginx.conf                 # /api/* → backend 프록시, 타임아웃 300초
@@ -46,10 +46,11 @@ docker-compose.yml         # 프론트(8082) + 백엔드 2개 컨테이너
 deploy.sh                  # NAS 배포 스크립트
 ```
 
-## PostgreSQL 테이블 (8개)
-- `workers` — 직원 정보 (name, active, hired_at, resigned_at)
+## PostgreSQL 테이블 (9개)
+- `workers` — 직원 정보 (name, active, hired_at, resigned_at, email)
 - `work_history` — 업무 기록 (worker_name, work_date, work_hour, work_text)
 - `jira_issues` — Jira 이슈 캐시 (jira_key, summary, parent_key, full_text)
+- `worker_absences` — 집계 제외 기간 (아래 절 참고)
 - `schedule_places` / `schedule_vehicles` / `schedule_plans` / `schedule_actuals` /
   `schedule_settlements` — 일정 관리 (아래 절 참고)
 
@@ -79,6 +80,20 @@ deploy.sh                  # NAS 배포 스크립트
 - ⚠️ 쿠키에 `Secure` 금지 (사내는 `http` — 붙이면 쿠키가 저장되지 않아 로그인 불가)
 - ⚠️ `.env` 의 `SESSION_SECRET` 이 KPI 와 **같은 값이어야** 세션이 공유된다. 없으면 재시작마다 전원 로그아웃
 - 확정 권한은 등급이 아니라 `kpi_users.can_approve_settlement` 컬럼 (일반 관리자에게 비용 승인 권한을 주지 않는다)
+
+## 집계 제외 (장기 부재·대상 아님)
+장기 출장자는 업무를 입력할 수 없는데 재직자로 세어져 1인 평균을 끌어내리고 최소값·순위를 흔들었다.
+대표이사처럼 애초에 대상이 아닌 사람도 같은 문제다. **사람을 지우지 않고 「그 기간만」 뺀다.**
+
+- 테이블 `worker_absences` (마이그레이션 `005`·`006`), API `GET/POST/PATCH/DELETE /api/worker-absences`
+- 사유 4가지 = 장기출장 / 휴직 / 파견 / **집계 제외**(부재가 아니라 「대상 아님」 — 기간을 열어 둔다)
+- 🔑**가동일 = 영업일 − 재직 기간 밖 − 부재일.** 모든 비율의 분모가 이것이다
+- 부재 기간의 기록도 **집계에서 빼되 원본은 보존**한다 (입력 화면에는 그대로 보인다)
+- ⚠️ **가동일 0인 사람은 평균·최대·최소·순위에서 제외** — 남기면 0시간이 최소값으로 고정된다.
+  비교는 전부 **하루당**(열흘만 있었어도 그 열흘을 남들만큼 했으면 불이익 없음)
+- 등록은 [설정] 탭 「집계 제외」 카드. **KPI 추적 시스템이 사유를 가리지 않고 같은 표를 읽으므로**
+  한 번 등록하면 양쪽(`:8082`·`:8083`) 숫자가 함께 바뀐다
+- 문서 = Confluence 「[대시보드] 11. 집계 제외」(171147281) · 산식 정본은 「[KPI] 4. 점수 계산 규칙」 4.9 절
 
 ## Jira 동기화
 - 프론트 → 백엔드 `POST /api/jira-sync` → Jira REST API → PostgreSQL
@@ -128,7 +143,8 @@ npm run dev                # 프론트 :5173
 
 ## 주의사항
 - `App.jsx`는 의도적으로 단일 파일 구조 유지 (분리 금지)
-- 탭 구성: 오늘 업무 / 일간 / 주간 / 월간 / 연간 / **일정** / 설정
+- 탭 구성 7개: 오늘 업무 / 일간 / 주간 / 월간 / 연간 / **스케줄** / 설정
+  (`TABS` 의 키는 `schedule`, 화면 표기는 「스케줄」 — 문서에서는 「일정」으로도 부른다)
 - 직원 필터는 기간별로 재직 여부를 판단 (`workersForPeriod` 함수)
 - ⚠️ **스키마 변경은 `admin` 계정으로** — 앱 계정(`vitron-dashboard`)은 테이블 소유자가 아니라
   `ALTER TABLE` 이 거부된다. 새 테이블을 만들었으면 앱 계정에 `GRANT` 하는 것을 잊지 말 것
