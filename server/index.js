@@ -125,7 +125,9 @@ app.delete('/api/workers/:id', async (req, res) => {
 // 그 한 사람 때문에 평균이 내려가고 최소값이 그 사람으로 고정된다.
 // 부재 기간을 등록해 두면 화면이 그 기간을 «가동일»에서 빼고,
 // 그 기간에 남은 기록도 집계에서 제외한다 (2026-08-18 사용자 결정).
-const ABSENCE_KINDS = ['장기출장', '휴직', '파견']
+// 「집계 제외」는 부재가 아니라 «애초에 대상이 아닌 사람»(대표이사 등)을 위한 사유다.
+// 처리 방식(그 기간을 빼는 것)이 같아 같은 표를 쓴다. 기간을 열어 두면 계속 제외된다.
+const ABSENCE_KINDS = ['장기출장', '휴직', '파견', '집계 제외']
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
 
 app.get('/api/worker-absences', async (req, res) => {
@@ -241,6 +243,18 @@ app.get('/api/history/range', async (req, res) => {
   }
 })
 
+// 업무명은 «저장할 때» 공백을 다듬는다 — 앞뒤를 떼고 사이 공백을 한 칸으로 누른다.
+//
+// 🔴 같은 업무가 공백 하나 차이로 갈라지면 집계가 나뉜다. 실제로
+//   「[VITRON-231]  설계 화면 구현」(공백 2개) 45건과 공백 1개 16건이 따로 쌓여 있었다.
+//   화면(App.jsx 의 normText)이 같은 규칙으로 묶어 주고 있어 «보이는 결과»는 멀쩡했지만,
+//   DB 를 직접 조회하면 두 갈래로 나온다. 그래서 들어올 때 한 번 다듬어 둔다.
+//
+// ⚠ 공백만 다듬는다. 대소문자·글자는 손대지 않는다 — 업무명은 사람이 적은 그대로가 사실이다.
+function normalizeWorkText(s) {
+  return s == null ? s : String(s).trim().replace(/\s+/g, ' ')
+}
+
 app.post('/api/history/save', async (req, res) => {
   const { worker_id, worker_name, work_date, rows } = req.body
   if (!worker_id) {
@@ -259,7 +273,8 @@ app.post('/api/history/save', async (req, res) => {
         `($${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`
       ).join(', ')
       const params = rows.flatMap(r =>
-        [worker_id, r.worker_name || worker_name, r.work_date, r.work_hour, r.work_text])
+        [worker_id, r.worker_name || worker_name, r.work_date, r.work_hour,
+         normalizeWorkText(r.work_text)])
       await client.query(
         `INSERT INTO work_history (worker_id, worker_name, work_date, work_hour, work_text)
          VALUES ${values}`,

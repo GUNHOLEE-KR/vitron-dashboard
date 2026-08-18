@@ -178,10 +178,13 @@ function workersForPeriod(workers, periodStart, periodEnd) {
 // 그 한 사람 때문에 평균이 내려가고 최소값이 그 사람으로 고정된다.
 // 규칙(2026-08-18 사용자 결정) — 부재 기간은 «가동일»에서 빼고,
 // 그 기간에 남아 있는 기록도 집계에 넣지 않는다. 평균·최대·최소는 «하루당» 으로 본다.
+// 「집계 제외」만 성격이 다르다 — 부재가 아니라 «애초에 집계 대상이 아닌 사람»(대표이사 등).
+// 처리 방식이 같아 같은 표를 쓴다. 종료일을 비워 두면 계속 제외된다.
 const ABSENCE_STYLE = {
-  장기출장: { fg:'#9a3412', bg:'#ffedd5' },
-  휴직:    { fg:'#6b21a8', bg:'#f3e8ff' },
-  파견:    { fg:'#1e40af', bg:'#dbeafe' }
+  장기출장:   { fg:'#9a3412', bg:'#ffedd5' },
+  휴직:      { fg:'#6b21a8', bg:'#f3e8ff' },
+  파견:      { fg:'#1e40af', bg:'#dbeafe' },
+  '집계 제외': { fg:'#374151', bg:'#e5e7eb' }
 }
 // 그 날 그 사람이 부재였는가. to_date 가 비어 있으면 «아직 안 돌아옴» 이라 끝이 없다.
 function isAbsentOn(absences, workerId, date) {
@@ -3512,11 +3515,13 @@ function AbsenceManager({absences,setAbsences,workers,dupNames,showToast}){
   }
 
   return(
-    <Card title="장기 부재 — 장기출장 · 휴직 · 파견" style={{flex:1,minWidth:320}}>
+    <Card title="집계 제외 — 장기출장 · 휴직 · 파견 · 대상 아님" style={{flex:1,minWidth:320}}>
       <p style={{fontSize:11,color:'#6b7280',margin:'0 0 10px',lineHeight:1.7}}>
         입력을 할 수 없는 기간을 등록합니다. 그 기간은 <b>가동일에서 빠지고</b>, 그 기간에 남아 있는
         기록도 <b>집계에 넣지 않습니다.</b> 평균·최대·최소는 <b>하루당</b>으로 계산되므로
         한 사람의 부재가 전체 숫자를 흔들지 않습니다. <b>종료일을 비우면 «진행 중»</b> 입니다.
+        <br />대표이사처럼 <b>애초에 집계 대상이 아닌 사람</b>은 사유를 <b>「집계 제외」</b> 로 두고
+        기간을 열어 두십시오 (KPI 총괄 분석에도 함께 적용됩니다).
       </p>
       <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:10}}>
         <select value={workerId} onChange={e=>setWorkerId(e.target.value)} style={{...inputS,minWidth:110}}>
