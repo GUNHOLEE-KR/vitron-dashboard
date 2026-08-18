@@ -205,15 +205,48 @@ def convert(path):
     return md
 
 
-HEADER = """이 문서는 사용자 매뉴얼 **정본(DOCX)에서 자동 변환**한 것입니다. 매뉴얼을 고치면
+def _page_count():
+    """인쇄용 PDF 의 쪽수를 센다. 못 세면 None.
+
+    ⚠ 예전에는 이 값이 «28쪽» 으로 하드코딩돼 있어, 매뉴얼이 36쪽으로 늘어난 뒤에도
+    다시 돌리면 옛 숫자가 그대로 올라갔다(내용이 같아 Confluence 버전조차 오르지 않아
+    갱신된 줄 알고 넘어갔다). 그래서 파일에서 직접 센다.
+    """
+    pdf = os.path.join(ROOT, "docs", "manual", "업무현황_대시보드_사용자매뉴얼.pdf")
+    try:
+        with open(pdf, "rb") as f:
+            raw = f.read().decode("latin-1")
+        n = len(re.findall(r"/Type\s*/Page[^s]", raw))
+        return n or None
+    except Exception:
+        return None
+
+
+def _capture_count():
+    """캡처 장수를 센다. `_masked` 사본은 같은 화면의 가린 판이라 빼고 센다."""
+    d = os.path.join(ROOT, "docs", "manual", "captures")
+    try:
+        return len([n for n in os.listdir(d)
+                    if n.lower().endswith(".png") and not os.path.splitext(n)[0].endswith("_masked")])
+    except Exception:
+        return None
+
+
+def header():
+    """머리말을 만든다. 쪽수·캡처 수는 «세어서» 넣는다 — 적어 두면 반드시 옛말이 된다."""
+    pages = _page_count()
+    caps = _capture_count()
+    page_txt = f" ({pages}쪽)" if pages else ""
+    cap_txt = f" — {caps}장" if caps else ""
+    return f"""이 문서는 사용자 매뉴얼 **정본(DOCX)에서 자동 변환**한 것입니다. 매뉴얼을 고치면
 `tools/manual/docx_to_confluence.py` 를 다시 돌려 이 쪽을 갱신합니다. 손으로 고치면 정본과 어긋납니다.
 
 | 항목 | 값 |
 | --- | --- |
-| 정본 | `docs/manual/업무현황_대시보드_사용자매뉴얼.docx` (28쪽) |
+| 정본 | `docs/manual/업무현황_대시보드_사용자매뉴얼.docx`{page_txt} |
 | 인쇄용 | 같은 폴더의 `.pdf` |
 | 생성기 | `tools/manual/build_dashboard_manual.py` |
-| 화면 캡처 | `docs/manual/captures/` — 43장 |
+| 화면 캡처 | `docs/manual/captures/`{cap_txt} |
 
 > **화면 그림은 이 쪽에 없습니다**
 > 그림 자리에 「▸ 그림 번호 · 설명」만 남겨 두었습니다. 그림까지 보시려면 위 DOCX 나 PDF 를
@@ -290,7 +323,7 @@ if __name__ == "__main__":
         md_all = convert(DOCX)
         cut = md_all.find("## 목차")
         if cut > 0:
-            md_all = HEADER + "\n" + md_all[cut:]
+            md_all = header() + "\n" +md_all[cut:]
         upload(md_all, page_id)
         sys.exit(0)
 
@@ -298,7 +331,7 @@ if __name__ == "__main__":
     # 표지(제목·버전·작성일)는 Confluence 에서 필요 없다 — 목차부터 싣고 안내를 앞에 붙인다
     cut = md.find("## 목차")
     if cut > 0:
-        md = HEADER + "\n" + md[cut:]
+        md = header() + "\n" +md[cut:]
     dst = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         ROOT, "docs", "manual", "confluence_body.md")
     with open(dst, "w", encoding="utf-8", newline="\n") as f:
