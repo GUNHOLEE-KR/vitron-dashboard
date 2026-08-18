@@ -191,6 +191,15 @@ function isAbsentOn(absences, workerId, date) {
   return absences.some(a => a.worker_id === workerId &&
     a.from_date <= date && (!a.to_date || a.to_date >= date))
 }
+// 「집계 제외」만 따로 본다 — 이것은 부재가 아니라 «애초에 업무 기록 대상이 아닌 사람»
+// (대표이사 등)이다. 집계에서 빼는 것으로 끝내지 않고 «입력표에도 띄우지 않는다» —
+// 적을 사람이 아닌데 열이 있으면 빈 칸이 미입력처럼 보인다.
+// ⚠ 이름을 코드에 박지 않는다. 사유로 거르므로 설정 탭에서 등록·삭제하면 화면이 따라간다.
+// 장기출장·휴직·파견은 여기 걸리지 않는다 — 돌아와 그 기간을 소급 입력할 수 있어야 한다.
+function isExcludedOn(absences, workerId, date) {
+  return absences.some(a => a.worker_id === workerId && a.kind === '집계 제외' &&
+    a.from_date <= date && (!a.to_date || a.to_date >= date))
+}
 // 기간과 겹치는 부재만 추린다 (화면 배지용)
 function absencesInPeriod(absences, workerId, from, to) {
   return absences.filter(a => a.worker_id === workerId &&
@@ -763,6 +772,9 @@ export default function App(){
     (!w.hired_at || w.hired_at<=td) &&
     (!w.resigned_at || w.resigned_at>=td)
   )
+  // 업무 입력표에 세울 사람 — 「집계 제외」 대상은 뺀다. 나머지 화면(스케줄·설정)은
+  // 그대로 activeWorkers 를 쓴다. 대표이사도 일정·차량은 쓰고, 설정에서는 보여야 고칠 수 있다.
+  const inputWorkers=activeWorkers.filter(w=>!isExcludedOn(absences,w.id,td))
   const jiraParents=Object.keys(jiraTree)
   const dupNames=duplicatedNames(workers)
   const selWorker=workers.find(w=>w.id===selWorkerId)||null
@@ -790,6 +802,12 @@ export default function App(){
     // 토큰 만료 안내는 본 데이터 로딩을 막지 않도록 따로 조회한다
     getJiraTokenStatus().then(setTokenStatus)
   },[])
+
+  // 고르고 있던 사람이 「집계 제외」로 등록되면 선택을 비운다.
+  // 안 비우면 입력표에 없는 열을 가리킨 채로 저장 버튼이 살아 있다.
+  useEffect(()=>{
+    if(selWorkerId&&isExcludedOn(absences,selWorkerId,td)) setSelWorkerId(null)
+  },[absences,selWorkerId,td])
 
   async function handleSave(ds=today()){
     if(!selWorker){showToast('이름을 먼저 선택하세요');return}
@@ -912,7 +930,7 @@ export default function App(){
         ))}
       </nav>
       <main style={{padding:'16px 20px'}}>
-        {tab==='today'   &&<TabToday   workers={activeWorkers} dupNames={dupNames} grid={grid} setGrid={setGrid}
+        {tab==='today'   &&<TabToday   workers={inputWorkers} dupNames={dupNames} grid={grid} setGrid={setGrid}
           jiraTree={jiraTree} selWorkerId={selWorkerId} setSelWorkerId={setSelWorkerId}
           onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}/>}
         {tab==='daily'   &&<TabDaily   history={historyForStats} workers={workersLabeled} absences={absences} viewDate={viewDate} setViewDate={setViewDate}/>}
