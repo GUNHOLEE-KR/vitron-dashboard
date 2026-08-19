@@ -31,6 +31,16 @@
 }
 
 
+/* 폭 계산에 테두리·안쪽 여백을 포함한다.
+   없으면 width:100% 인 <input> 이 padding 20 + border 2 만큼, 즉 «정확히 22px»
+   부모를 넘어 옆 칸을 침범한다 (날짜 칸이 「시간대」 라벨을 덮은 원인).
+   <select>·<button> 은 브라우저 기본이 border-box 라 멀쩡했고 <input> 만 어긋났다. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
 body {
   margin: 0;
 }
@@ -40,7 +50,6 @@ body {
   min-height: 100svh;
   display: flex;
   flex-direction: column;
-  box-sizing: border-box;
 }
 
 h1,

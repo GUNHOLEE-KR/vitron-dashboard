@@ -20,6 +20,12 @@ const COLORS=['#3b82f6','#10b981','#f59e0b','#8b5cf6','#06b6d4','#ec4899','#84cc
 // 내부적으로는 수동 추가(MANUAL-…)와 같은 것이라 Jira 동기화가 지우지 않는다.
 const FIXED_PARENT='고정업무'
 
+// 팝업이 화면보다 길어지면 아래(저장·삭제 단추)가 잘려 누를 수 없었다.
+// 여기서 키를 재 두면 넘치는 만큼 «팝업 안쪽»에 스크롤바가 생긴다 —
+// 배경이 스크롤되면 막대가 화면 맨 끝에 붙어 팝업과 떨어져 보이지 않는다.
+// 값 80 = 배경의 위아래 여백 40+40 (여백이 다른 팝업은 제 값을 따로 쓴다).
+const MODAL_MAX_H='calc(100vh - 80px)'
+
 const TABS=['today','daily','weekly','monthly','yearly','schedule','settings']
 const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'월간',yearly:'연간',schedule:'스케줄',settings:'설정'}
 
@@ -2170,6 +2176,7 @@ function PlacePicker({places,onPick,onClose,onChanged,showToast}){
         display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'40px 16px',overflowY:'auto'}}>
       <div onClick={e=>e.stopPropagation()}
         style={{background:'#fff',borderRadius:12,width:'100%',maxWidth:640,padding:20,
+          maxHeight:MODAL_MAX_H,overflowY:'auto',
           boxShadow:'0 20px 50px rgba(0,0,0,.3)'}}>
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
           <strong style={{fontSize:16}}>장소 선택</strong>
@@ -2309,9 +2316,10 @@ function LoginDialog({onClose,onLoggedIn,showToast}){
   return(
     <div onClick={onClose}
       style={{position:'fixed',inset:0,background:'rgba(17,24,39,.5)',zIndex:9600,
-        display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'80px 16px'}}>
+        display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'80px 16px',overflowY:'auto'}}>
       <div onClick={e=>e.stopPropagation()}
         style={{background:'#fff',borderRadius:12,width:'100%',maxWidth:380,padding:24,
+          maxHeight:'calc(100vh - 160px)',overflowY:'auto',
           boxShadow:'0 20px 50px rgba(0,0,0,.3)'}}>
         <strong style={{fontSize:16,display:'block',marginBottom:6}}>정산 화면 로그인</strong>
         <div style={{fontSize:12,color:'#6b7280',marginBottom:16}}>
@@ -2697,6 +2705,7 @@ function ActualDialog({plan,actual,places,vehicles,onClose,onSaved,showToast}){
         display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'40px 16px',overflowY:'auto'}}>
       <div onClick={e=>e.stopPropagation()}
         style={{background:'#fff',borderRadius:12,width:'100%',maxWidth:480,padding:22,
+          maxHeight:MODAL_MAX_H,overflowY:'auto',
           boxShadow:'0 20px 50px rgba(0,0,0,.3)'}}>
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
           <strong style={{fontSize:16}}>{isNew?'실적 기록':'실적 수정'}</strong>
@@ -3021,6 +3030,7 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
         display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'40px 16px',overflowY:'auto'}}>
       <div onClick={e=>e.stopPropagation()}
         style={{background:'#fff',borderRadius:12,width:'100%',maxWidth:520,padding:22,
+          maxHeight:MODAL_MAX_H,overflowY:'auto',
           boxShadow:'0 20px 50px rgba(0,0,0,.25)'}}>
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:16}}>
           <strong style={{fontSize:16}}>
