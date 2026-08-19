@@ -1718,6 +1718,19 @@ function planIcon(plan){
   if(plan.use_type==='vacation') return '🌴'
   return (TRANSPORT_MAP[plan.transport]||TRANSPORT_MAP.office).icon
 }
+// 차량은 모델명만 남긴다. 「Model Y 15도 3955」 를 그대로 쓰면 달력 칸을 다 먹는다.
+const shortVehicle=(name)=>String(name||'').replace(/\s*\d+[가-힣]\s*\d+\s*$/,'').trim()
+// 배지 둘째 줄 — «어디에 · 무엇으로 · 왕복인가». 이름만 있으면 달력만 보고는
+// 어디 갔는지 알 수 없어 매번 눌러 봐야 했다.
+function planDetail(plan){
+  if(plan.use_type==='vacation') return plan.vacation_type||''
+  if(plan.use_type==='personal') return plan.vehicle_name?shortVehicle(plan.vehicle_name):''
+  const parts=[shortPlace(plan)]
+  if(plan.vehicle_name) parts.push(shortVehicle(plan.vehicle_name))
+  // 사무실 내근은 이동이 없어 왕복을 따질 것이 없다
+  if(plan.transport&&plan.transport!=='office') parts.push(plan.round_trip?'왕복':'편도')
+  return parts.filter(Boolean).join(' · ')
+}
 // 계획 한 건이 어떤 상태인지 — 달력 표시와 「확인 필요」 판단에 쓴다
 function planState(plan,todayStr){
   if(plan.status==='canceled') return 'canceled'
@@ -1736,21 +1749,28 @@ function PlanBadge({plan,workers,onClick,todayStr,compact=false,showWorker=true}
   return(
     <div data-badge onClick={e=>{e.stopPropagation();onClick()}}
       title={`${plan.worker_name} · ${SLOT_MAP[plan.slot]} · ${vacation?('휴가 · '+(plan.vacation_type||'')):personal?'개인 사용':(plan.place_name||plan.place_text||'장소 미정')}${plan.purpose?' · '+plan.purpose:''}${plan.vehicle_name?' · '+plan.vehicle_name:''}`}
-      style={{display:'flex',alignItems:'center',gap:3,cursor:'pointer',
+      style={{cursor:'pointer',
         background:st==='planned'||st==='needCheck'?color+'22':color+'dd',
         color:st==='planned'||st==='needCheck'?'#111827':'#fff',
         border:`1px solid ${color}`,borderStyle:(personal||vacation)?'dashed':'solid',
-        borderRadius:4,padding:compact?'1px 4px':'2px 5px',fontSize:compact?10:11,
-        marginBottom:2,whiteSpace:'nowrap',overflow:'hidden',
+        borderRadius:4,padding:compact?'2px 5px':'2px 5px',fontSize:compact?10:11,
+        marginBottom:2,overflow:'hidden',
         opacity:st==='canceled'?.45:1,
         textDecoration:st==='canceled'?'line-through':'none'}}>
-      <span>{planIcon(plan)}</span>
-      <strong style={{fontSize:compact?10:11}}>{plan.worker_name}</strong>
-      {!compact&&<span style={{opacity:.9,overflow:'hidden',textOverflow:'ellipsis'}}>{shortPlace(plan)}</span>}
-      {/* 시간대는 종일이 아닐 때만 — 배차 겹침을 판단할 때 필요하다 */}
-      {plan.slot!=='allday'&&<span style={{opacity:.85,fontSize:compact?9:10}}>{SLOT_MAP[plan.slot]}</span>}
-      {st==='needCheck'&&<span style={{color:'#c2410c',fontWeight:700}}>{PLAN_STATE_MARK.needCheck}</span>}
-      {st==='changed'&&<span>{PLAN_STATE_MARK.changed}</span>}
+      <div style={{display:'flex',alignItems:'center',gap:3,whiteSpace:'nowrap',overflow:'hidden'}}>
+        <span>{planIcon(plan)}</span>
+        <strong style={{fontSize:compact?10:11}}>{plan.worker_name}</strong>
+        {!compact&&<span style={{opacity:.9,overflow:'hidden',textOverflow:'ellipsis'}}>{shortPlace(plan)}</span>}
+        {/* 시간대는 종일이 아닐 때만 — 배차 겹침을 판단할 때 필요하다 */}
+        {plan.slot!=='allday'&&<span style={{opacity:.85,fontSize:compact?9:10}}>{SLOT_MAP[plan.slot]}</span>}
+        {st==='needCheck'&&<span style={{color:'#c2410c',fontWeight:700}}>{PLAN_STATE_MARK.needCheck}</span>}
+        {st==='changed'&&<span>{PLAN_STATE_MARK.changed}</span>}
+      </div>
+      {/* 월 달력은 칸이 넓은 대신 이름만 보였다. 둘째 줄에 «어디에·무엇으로·왕복»을 적는다. */}
+      {compact&&planDetail(plan)&&(
+        <div style={{fontSize:9,opacity:.85,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',
+          paddingLeft:1,lineHeight:1.35}}>{planDetail(plan)}</div>
+      )}
     </div>
   )
 }
