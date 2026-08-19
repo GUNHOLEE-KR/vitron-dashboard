@@ -50,6 +50,11 @@ const TRANSPORT_MAP=Object.fromEntries([
 // 장소 목록 맨 위의 고정 항목. 장소 목록(DB)에 넣지 않는다 —
 // 사무실은 회사 자체이고 거리가 0 이라 관리 대상을 늘릴 이유가 없다.
 const OFFICE_PLACE='office'
+// 편도 일정의 방향. 왕복은 나갔다 돌아오는 하루라 방향을 따질 것이 없어 저장하지 않는다.
+const ONE_WAY_DIRS=[
+  {value:'출발',icon:'🏢→',hint:'사무실에서 그 장소로'},
+  {value:'복귀',icon:'→🏢',hint:'그 장소에서 사무실로'}
+]
 
 // 일정 유형 — 무엇을 등록하는가. 이것을 먼저 고르면 그 뒤에 «필요한 것만» 나온다.
 // (예전에는 「업무/개인 사용」이 차량과 무관한 자리에 먼저 나와 순서가 어긋났다)
@@ -1029,7 +1034,7 @@ export default function App(){
           place_id:src.place_id??null, place_text:src.place_text??null, purpose:src.purpose??null,
           transport:src.transport, vehicle_id:src.vehicle_id??null,
           est_distance_km:src.est_distance_km??null, est_travel_min:src.est_travel_min??null,
-          round_trip:src.round_trip,
+          round_trip:src.round_trip, one_way_dir:src.one_way_dir??null,
         }
         try{ await addPlan(body); done++ }
         catch(e){
@@ -1666,12 +1671,16 @@ function buildGroupRows(groupBy,workers,places,vehicles,plans){
   return rows
 }
 // 배지에 넣을 짧은 장소 이름. 달력 칸이 좁아 긴 이름은 잘라야 한다.
+// 편도면 방향을 화살표로 덧붙인다 — 「→현장」 은 나가는 길, 「현장→」 은 돌아오는 길.
 function shortPlace(plan){
   if(plan.use_type==='vacation') return plan.vacation_type||'휴가'
   if(plan.use_type==='personal') return '개인 사용'
   if(plan.transport==='office') return '사무실'
   const nm=plan.place_name||plan.place_text||''
-  return nm.length>9?nm.slice(0,9)+'…':nm
+  const cut=nm.length>9?nm.slice(0,9)+'…':nm
+  if(plan.one_way_dir==='출발') return '→'+cut
+  if(plan.one_way_dir==='복귀') return cut+'→'
+  return cut
 }
 // 배지에 붙는 아이콘 — 휴가는 이동 수단이 없으므로 따로 잡는다
 function planIcon(plan){
@@ -2868,7 +2877,8 @@ function ActualDialog({plan,actual,places,vehicles,onClose,onSaved,showToast}){
             {plan.vehicle_name&&<span style={{color:'#6b7280'}}> · {plan.vehicle_name} {plan.vehicle_plate||''}</span>}
           </div>
           {plan.purpose&&<div style={{color:'#6b7280'}}>{plan.purpose}</div>}
-          {planned!=null&&<div style={{color:'#6b7280'}}>계획 거리 {planned}km{plan.round_trip?' (왕복)':''}</div>}
+          {planned!=null&&<div style={{color:'#6b7280'}}>계획 거리 {planned}km
+            {plan.round_trip?' (왕복)':plan.one_way_dir?` (편도 · ${plan.one_way_dir})`:' (편도)'}</div>}
         </div>
 
         <div style={rowS}>
@@ -3010,6 +3020,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
     (defaultPlaceId&&defaultPlaceId!==OFFICE_PLACE?'':'office'))
   const [vehicleId,setVehicleId]=useState(src?.vehicle_id||defaultVehicleId||'')
   const [roundTrip,setRoundTrip]=useState(src?src.round_trip:true)
+  // 편도일 때만 쓰는 방향. 기본은 「출발」 — 사무실에서 나가는 쪽이 훨씬 흔하다.
+  const [oneWayDir,setOneWayDir]=useState(src?.one_way_dir||'출발')
   const [busy,setBusy]=useState(false)
 
   const isWork=kind==='work'
@@ -3062,6 +3074,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
       vehicle_id:(isVehicleOnly||(isWork&&!atOffice&&tp.needsVehicle))?Number(vehicleId):null,
       est_distance_km:isWork?km:null, est_travel_min:isWork?min:null,
       round_trip:(isWork&&!atOffice)?roundTrip:false,
+      // 방향은 «편도 외부 업무» 일 때만 뜻이 있다. 그 밖에는 비워 보내 서버가 지우게 한다.
+      one_way_dir:(isWork&&!atOffice&&!roundTrip)?oneWayDir:null,
       vacation_type:isVacation?vacationType:null,
       force,
     }
@@ -3436,6 +3450,24 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
                 onChange={e=>setRoundTrip(e.target.checked)}/>
               왕복
             </label>
+            {/* 편도는 어느 쪽으로 가는 길인지에 따라 하루를 어디서 시작해 어디서 끝내는지가 달라진다.
+                왕복은 나갔다 돌아오는 하루라 물을 것이 없어 이 칸을 감춘다. */}
+            {!roundTrip&&(
+              <div style={{display:'flex',gap:6,marginTop:8}}>
+                {ONE_WAY_DIRS.map(d=>(
+                  <button key={d.value} type="button" disabled={!canEdit}
+                    onClick={()=>setOneWayDir(d.value)}
+                    style={{flex:1,padding:'7px 10px',borderRadius:7,cursor:canEdit?'pointer':'default',
+                      border:`1px solid ${oneWayDir===d.value?'#1a56db':'#e5e7eb'}`,
+                      background:oneWayDir===d.value?'#eff6ff':'#fff',
+                      color:oneWayDir===d.value?'#1a56db':'#374151',
+                      fontWeight:oneWayDir===d.value?700:500,fontSize:12}}>
+                    {d.icon} {d.value}
+                    <div style={{fontSize:10,fontWeight:500,color:'#6b7280',marginTop:2}}>{d.hint}</div>
+                  </button>
+                ))}
+              </div>
+            )}
             <div style={{fontSize:12,color:'#374151',marginTop:6}}>
               {showKm!=null||showMin!=null
                 ?<>예상 {showKm!=null&&<strong>{showKm}km</strong>}

@@ -567,6 +567,14 @@ function findSimilarPlaces(name, places) {
   })
 }
 
+// 편도 일정의 방향(출발/복귀). 왕복이면 방향이 없으므로 «지운다» —
+// 왕복으로 바꿔 놓고 옛 방향이 남아 있으면 달력에 「→ 현장」이 그대로 붙어 거짓말이 된다.
+const ONE_WAY_DIRS = ['출발', '복귀']
+function oneWayDir(roundTrip, value) {
+  if (roundTrip) return null
+  return ONE_WAY_DIRS.includes(value) ? value : null
+}
+
 // 시간대가 겹치는가. 종일은 모든 시간대와 겹치고, 오전과 오후는 겹치지 않는다.
 function slotsOverlap(a, b) {
   if (a === 'allday' || b === 'allday') return true
@@ -802,16 +810,17 @@ app.post('/api/schedule/plans', async (req, res) => {
         })
       }
     }
+    const roundTrip = b.round_trip === undefined ? true : !!b.round_trip
     const { rows } = await pool.query(
       `INSERT INTO schedule_plans
          (worker_id, plan_date, slot, start_time, end_time, use_type,
           place_id, place_text, purpose, transport, vehicle_id,
-          est_distance_km, est_travel_min, round_trip, vacation_type)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+          est_distance_km, est_travel_min, round_trip, vacation_type, one_way_dir)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
       [b.worker_id, b.plan_date, b.slot || 'allday', b.start_time || null, b.end_time || null,
        useType, placeId, placeText, purpose, b.transport || 'office', b.vehicle_id ?? null,
        b.est_distance_km ?? null, b.est_travel_min ?? null,
-       b.round_trip === undefined ? true : !!b.round_trip, vacationType]
+       roundTrip, vacationType, oneWayDir(roundTrip, b.one_way_dir)]
     )
     res.json(rows[0])
   } catch (e) {
@@ -834,7 +843,8 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
               transport = COALESCE($9, transport), vehicle_id = $10,
               est_distance_km = $11, est_travel_min = $12,
               round_trip = COALESCE($13, round_trip),
-              status = COALESCE($14, status), vacation_type = $15, updated_at = now()
+              status = COALESCE($14, status), vacation_type = $15,
+              one_way_dir = $17, updated_at = now()
         WHERE id = $16`,
       [b.plan_date || null, b.slot || null, b.start_time || null, b.end_time || null, useType,
        keepPlace ? (b.place_id ?? cur[0].place_id) : null,
@@ -846,7 +856,10 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
        b.round_trip === undefined ? null : !!b.round_trip,
        b.status || null,
        useType === 'vacation' ? (b.vacation_type ?? cur[0].vacation_type) : null,
-       req.params.id]
+       req.params.id,
+       // 왕복 여부를 안 보냈으면 원래 값을 기준으로 방향을 판정한다.
+       oneWayDir(b.round_trip === undefined ? cur[0].round_trip : !!b.round_trip,
+                 b.one_way_dir === undefined ? cur[0].one_way_dir : b.one_way_dir)]
     )
     if (rowCount === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
     res.json({ ok: true })
