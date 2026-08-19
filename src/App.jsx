@@ -85,6 +85,92 @@ const cleanName=(s)=>String(s||'').replace(/^\s*\[[^\]]*\]\s*/,'').replace(/^\s*
 //    사용자가 적은 원본 그대로여야 한다 (KPI 총괄 분석도 SQL 에서 같은 규칙으로 누른다).
 const normText=(s)=>String(s??'').trim().replace(/\s+/g,' ')
 
+// ── 업무를 «대업무»로 묶기 ────────────────────────────────
+// 기록에는 번호+소업무만 남아(`[VITRON-41] 현장 설치 및 데이터 수집 테스트`)
+// 어느 일에 딸린 것인지 알 수 없었다. jiraTree({대업무:[소업무…]})로 되짚어 묶는다.
+// Jira 에 없는 손입력 업무는 딸릴 곳이 없으니 「기타」로 모으고 늘 «맨 끝»에 둔다.
+const NO_PARENT='기타'
+const parentOfTask=(text,jiraTree)=>{
+  if(!jiraTree)return NO_PARENT
+  const t=normText(text)
+  if(jiraTree[t]!==undefined)return t                 // 대업무에 직접 적은 줄
+  for(const[p,subs]of Object.entries(jiraTree)){
+    if(subs.some(s=>normText(s)===t))return p
+  }
+  return NO_PARENT
+}
+// 상위업무에 «직접» 적은 줄은 이름이 대업무와 같아, 그대로 두면 같은 이름이 두 줄로 보인다.
+const childLabel=(text,parent)=>{
+  const n=cleanName(normText(text))
+  return normText(n)===normText(cleanName(parent))?'(이 업무에 직접)':n
+}
+
+const TASK_SORTS=[
+  {value:'hours-desc',label:'시간 많은 순'},
+  {value:'name-asc',  label:'이름 ㄱ→ㅎ'},
+  {value:'name-desc', label:'이름 ㅎ→ㄱ'},
+  {value:'date-asc',  label:'시작일 오래된 순'},
+  {value:'date-desc', label:'시작일 최근 순'}
+]
+// 대업무 줄과 소업무 줄을 같은 잣대로 다룬다.
+// 대업무는 묶음의 합계 시간과 «가장 이른» 시작일을 대표값으로 쓴다.
+const sortKeyOfTask=x=>({
+  name:x.parent!=null?cleanName(x.parent):cleanName(normText(x.task??x.name??'')),
+  hours:x.hours||0,
+  date:x.first??x.firstDate??''
+})
+function taskComparer(sort){
+  return(a,b)=>{
+    const A=sortKeyOfTask(a),B=sortKeyOfTask(b)
+    switch(sort){
+      case 'name-asc': return A.name.localeCompare(B.name,'ko')
+      case 'name-desc':return B.name.localeCompare(A.name,'ko')
+      // 시작일이 없는 줄은 어느 쪽으로 세우든 «맨 뒤»로 보낸다
+      case 'date-asc': return (A.date||'9999').localeCompare(B.date||'9999')
+      case 'date-desc':return (B.date||'').localeCompare(A.date||'')
+      default:         return B.hours-A.hours||A.name.localeCompare(B.name,'ko')
+    }
+  }
+}
+// 업무 목록(각 항목에 task·hours·firstDate)을 대업무로 묶는다.
+function groupTasksByParent(list,jiraTree,sort){
+  const groups=new Map()
+  list.forEach(t=>{
+    const p=parentOfTask(t.task,jiraTree)
+    if(!groups.has(p))groups.set(p,{parent:p,hours:0,first:'',children:[]})
+    const g=groups.get(p)
+    g.hours+=t.hours||0
+    g.children.push(t)
+    const d=t.firstDate||''
+    if(d&&(!g.first||d<g.first))g.first=d
+  })
+  const cmp=taskComparer(sort)
+  const arr=[...groups.values()]
+  arr.forEach(g=>g.children.sort(cmp))
+  arr.sort(cmp)
+  // 「기타」는 언제나 맨 끝 (sort 는 안정적이라 위 정렬이 유지된다)
+  return arr.sort((a,b)=>(a.parent===NO_PARENT?1:0)-(b.parent===NO_PARENT?1:0))
+}
+// 업무별 «처음 적은 날». 시작일 정렬의 기준이다.
+function firstDateByTask(rows){
+  const m={}
+  rows.forEach(r=>{
+    const t=normText(r.work_text),d=r.work_date
+    if(!d)return
+    if(!m[t]||d<m[t])m[t]=d
+  })
+  return m
+}
+// 정렬 고르개 — 표마다 같은 모양으로 둔다
+function SortPicker({value,onChange}){
+  return(
+    <select value={value} onChange={e=>onChange(e.target.value)}
+      style={{padding:'4px 8px',border:'1px solid #d1d5db',borderRadius:6,fontSize:11,background:'#fff'}}>
+      {TASK_SORTS.map(s=><option key={s.value} value={s.value}>{s.label}</option>)}
+    </select>
+  )
+}
+
 // ── 여러 계열이 겹친 차트용 툴팁 ────────────────────────
 // 누적/다계열 차트는 모든 계열을 같은 데이터 객체에 담기 때문에,
 // 해당 항목을 하지 않은 계열도 0 으로 채워져 툴팁에 전부 나온다.
@@ -327,9 +413,11 @@ function buildParentSel(rows,jiraTree){
 }
 
 // ── 직원별 업무 분석 ──────────────────────────────────
-function WorkerAnalysis({rows,workers}){
+function WorkerAnalysis({rows,workers,jiraTree}){
+  const [sort,setSort]=useState('hours-desc')
   if(!rows.length)return null
   const wNames=workers.map(w=>w.name).filter(n=>rows.some(r=>r.worker_name===n))
+  const firstDates=firstDateByTask(rows)
   const topTasks=Object.entries(aggByWork(rows)).sort((a,b)=>b[1]-a[1]).slice(0,8).map(e=>e[0])
   const taskName=t=>{const nm=cleanName(t);return nm.length>16?nm.slice(0,16)+'…':nm}
   const barData=wNames.map(w=>{
@@ -341,15 +429,26 @@ function WorkerAnalysis({rows,workers}){
   // 직원명은 rowSpan 으로 한 칸에 묶어 표시한다.
   // 줄마다 이름이 반복되면 어디서 사람이 바뀌는지 알아보기 어렵다.
   // first=그 직원의 첫 줄인가, span=묶을 줄 수
+  // 사람 → 대업무 → 소업무. 줄 목록을 미리 펼쳐 두고 rowSpan 으로 사람 칸을 묶는다.
+  // 대업무 줄도 한 줄을 차지하므로 span 에 함께 센다.
   const tableRows=[]
   wNames.forEach(w=>{
     const wRows=rows.filter(r=>r.worker_name===w)
     const total=wRows.length;if(!total)return
     const tg={}; wRows.forEach(r=>{const t=normText(r.work_text);tg[t]=(tg[t]||0)+1})
-    const tasks=Object.entries(tg).sort((a,b)=>b[1]-a[1])
-    tasks.forEach(([task,hours],ti)=>{
-      tableRows.push({worker:w,task,hours,ratio:Math.round(hours/total*100),
-        wi:wNames.indexOf(w),first:ti===0,span:tasks.length,workerTotal:total})
+    const flat=Object.entries(tg).map(([task,hours])=>({task,hours,firstDate:firstDates[task]||''}))
+    const groups=groupTasksByParent(flat,jiraTree,sort)
+    const span=groups.reduce((a,g)=>a+1+g.children.length,0)
+    let idx=0
+    groups.forEach(g=>{
+      tableRows.push({kind:'parent',worker:w,group:g,wi:wNames.indexOf(w),
+        first:idx===0,span,workerTotal:total})
+      idx++
+      g.children.forEach(c=>{
+        tableRows.push({kind:'task',worker:w,parent:g.parent,...c,
+          ratio:Math.round(c.hours/total*100),wi:wNames.indexOf(w),first:false,workerTotal:total})
+        idx++
+      })
     })
   })
   return(
@@ -370,7 +469,10 @@ function WorkerAnalysis({rows,workers}){
         </ResponsiveContainer>
       </div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,minWidth:260,maxWidth:'100%',boxSizing:'border-box',overflowX:'auto'}}>
-        <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>직원별 업무 상세</div>
+        <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:14,flexWrap:'wrap'}}>
+          <div style={{fontSize:14,fontWeight:700}}>직원별 업무 상세</div>
+          <SortPicker value={sort} onChange={setSort}/>
+        </div>
         <table style={{width:'100%',borderCollapse:'collapse'}}>
           <thead><tr>
             <th style={thS}>직원</th><th style={{...thS,textAlign:'left'}}>업무</th>
@@ -382,18 +484,31 @@ function WorkerAnalysis({rows,workers}){
               // 줄 기준이면 한 사람의 여러 줄이 서로 다른 색이 되어 구분이 안 된다.
               const bg=r.wi%2===0?'#fff':'#eff6ff'
               const topBorder=r.first&&i>0?'2px solid #cbd5e1':undefined
+              // 대업무 줄 — 이름과 묶음 합계만 적는다. 비율 막대는 소업무에만 둔다.
+              if(r.kind==='parent')return(
+                <tr key={i} style={{background:bg}}>
+                  {r.first&&(
+                    <td rowSpan={r.span} style={{...tdS,fontWeight:700,color:COLORS[r.wi%COLORS.length],
+                      verticalAlign:'middle',borderTop:topBorder,whiteSpace:'nowrap'}}>
+                      {r.worker}
+                      <div style={{fontSize:10,fontWeight:600,color:'#9ca3af',marginTop:2}}>{r.workerTotal}h</div>
+                    </td>
+                  )}
+                  <td style={{...tdS,textAlign:'left',fontWeight:700,borderTop:topBorder,
+                    color:r.group.parent===NO_PARENT?'#6b7280':'#111827',
+                    maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={r.group.parent}>
+                    {cleanName(r.group.parent)}{r.group.children.length>1&&` · ${r.group.children.length}건`}
+                  </td>
+                  <td style={{...tdS,borderTop:topBorder,fontWeight:700}}>{r.group.hours}h</td>
+                  <td style={{...tdS,borderTop:topBorder}}/>
+                </tr>
+              )
               return(
               <tr key={i} style={{background:bg}}>
-                {r.first&&(
-                  <td rowSpan={r.span} style={{...tdS,fontWeight:700,color:COLORS[r.wi%COLORS.length],
-                    verticalAlign:'middle',borderTop:topBorder,whiteSpace:'nowrap'}}>
-                    {r.worker}
-                    <div style={{fontSize:10,fontWeight:600,color:'#9ca3af',marginTop:2}}>{r.workerTotal}h</div>
-                  </td>
-                )}
-                <td style={{...tdS,textAlign:'left',maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',borderTop:topBorder}} title={cleanName(r.task)}>{cleanName(r.task)}</td>
-                <td style={{...tdS,borderTop:topBorder}}><span style={{background:'#fff',color:'#1a56db',border:'1px solid #bfdbfe',padding:'2px 8px',borderRadius:12,fontWeight:700}}>{r.hours}h</span></td>
-                <td style={{...tdS,borderTop:topBorder}}>
+                <td style={{...tdS,textAlign:'left',paddingLeft:18,maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}
+                  title={cleanName(r.task)}><span style={{color:'#9ca3af'}}>└ </span>{childLabel(r.task,r.parent)}</td>
+                <td style={tdS}><span style={{background:'#fff',color:'#1a56db',border:'1px solid #bfdbfe',padding:'2px 8px',borderRadius:12,fontWeight:700}}>{r.hours}h</span></td>
+                <td style={tdS}>
                   <div style={{display:'flex',alignItems:'center',gap:5}}>
                     <div style={{flex:1,height:7,background:'#e5e7eb',borderRadius:4}}>
                       <div style={{width:r.ratio+'%',height:'100%',background:COLORS[r.wi%COLORS.length],borderRadius:4}}/>
@@ -411,9 +526,11 @@ function WorkerAnalysis({rows,workers}){
 }
 
 // ── 프로젝트 기간 비중 분석 ──────────────────────────────
-function ProjectAnalysis({rows,allHistory}){
+function ProjectAnalysis({rows,allHistory,jiraTree}){
+  const [sort,setSort]=useState('hours-desc')
   if(!rows.length)return null
   const periodAgg=aggByWork(rows),totalAgg=aggByWork(allHistory)
+  const firstDates=firstDateByTask(rows)
   // 업무별 참여자. 한 사람이 여러 시간 기록해도 1명으로 세도록 Set 을 쓴다.
   // 같은 업무를 여러 명이 함께 한 경우도 그대로 모인다.
   const membersByTask={}
@@ -433,16 +550,24 @@ function ProjectAnalysis({rows,allHistory}){
         const mt=allHistory.filter(r=>normText(r.work_text)===name&&r.worker_name===m).length||mp
         return{이름:m,기간:mp,누적:mt,몫:Math.round(mp/ph*100),기간비중:Math.round(mp/mt*100)}
       }).sort((a,b)=>b.기간-a.기간)
-      return{name:nm.length>16?nm.slice(0,16)+'…':nm,fullName:nm,기간:ph,누적:th,
+      return{name:nm.length>16?nm.slice(0,16)+'…':nm,fullName:nm,rawName:name,
+        task:name,hours:ph,firstDate:firstDates[name]||'',
+        기간:ph,누적:th,
         기간비중:Math.round(ph/th*100),인원:members.length,참여자:members,멤버내역}
     })
-  // 표에 뿌릴 줄 목록. 참여자가 2명 이상이면 프로젝트 합계 1줄 + 개인별 줄을 잇는다.
+  // 표에 뿌릴 줄 목록. 대업무 한 줄로 묶고, 그 아래로 소업무를 늘어놓는다.
+  // 소업무마다 참여자가 2명 이상이면 합계 1줄 + 개인별 줄을 잇는다.
   // 1명이면 개인 줄이 합계와 같아지므로 합계 1줄만 둔다.
   const tableRows=[]
-  data.forEach((d,pi)=>{
-    const 개인줄=d.멤버내역.length>1?d.멤버내역:[]
-    tableRows.push({kind:'total',d,pi,span:1+개인줄.length})
-    개인줄.forEach(m=>tableRows.push({kind:'member',d,pi,m}))
+  let pi=0
+  groupTasksByParent(data,jiraTree,sort).forEach(g=>{
+    tableRows.push({kind:'group',g})
+    g.children.forEach(d=>{
+      const 개인줄=d.멤버내역.length>1?d.멤버내역:[]
+      tableRows.push({kind:'total',d,pi,span:1+개인줄.length,parent:g.parent})
+      개인줄.forEach(m=>tableRows.push({kind:'member',d,pi,m}))
+      pi++
+    })
   })
   return(
     <div style={{display:'flex',flexDirection:'column',gap:16,marginBottom:16}}>
@@ -471,7 +596,10 @@ function ProjectAnalysis({rows,allHistory}){
         </div>
       </div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,minWidth:260,maxWidth:'100%',boxSizing:'border-box',overflowX:'auto'}}>
-        <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>프로젝트 기간 비중 상세</div>
+        <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:14,flexWrap:'wrap'}}>
+          <div style={{fontSize:14,fontWeight:700}}>프로젝트 기간 비중 상세</div>
+          <SortPicker value={sort} onChange={setSort}/>
+        </div>
         {/* 폭은 고정 px 이 아니라 비율로 나눈다.
             프로젝트에 px 를 몰아주면 화면이 넓을 때 가운데가 텅 비고
             나머지 칸이 오른쪽에 몰려 답답해진다. */}
@@ -492,9 +620,22 @@ function ProjectAnalysis({rows,allHistory}){
           <tbody>
             {tableRows.map((row,i)=>{
               const {kind,d,pi,m}=row
+              // 대업무 줄 — 칸을 나누지 않고 한 줄을 통째로 쓴다.
+              // 아래 소업무 표의 rowSpan 구조를 건드리지 않는 가장 단순한 방법이다.
+              if(kind==='group')return(
+                <tr key={i} style={{background:'#eef2f7'}}>
+                  <td colSpan={5} style={{...tdS,textAlign:'left',fontWeight:700,
+                    borderTop:i>0?'2px solid #cbd5e1':undefined,
+                    color:row.g.parent===NO_PARENT?'#6b7280':'#111827'}}>
+                    {cleanName(row.g.parent)}
+                    {row.g.children.length>1&&<span style={{fontWeight:600,color:'#6b7280'}}> · {row.g.children.length}건</span>}
+                    <span style={{float:'right',color:'#374151'}}>{row.g.hours}h</span>
+                  </td>
+                </tr>
+              )
               // 배경은 프로젝트 단위로 번갈아 칠한다 — 한 프로젝트의 여러 줄이 한 덩어리로 보이게
               const bg=pi%2===0?'#fff':'#f5f8fc'
-              const topBorder=kind==='total'&&i>0?'2px solid #cbd5e1':undefined
+              const topBorder=undefined
               const 시간=kind==='total'?d.기간:m.기간
               const 누적=kind==='total'?d.누적:m.누적
               const 비중=kind==='total'?d.기간비중:m.기간비중
@@ -502,8 +643,9 @@ function ProjectAnalysis({rows,allHistory}){
               <tr key={i} style={{background:bg}}>
                 {/* 프로젝트명은 rowSpan 으로 묶어 세로 가운데 정렬 (참여자 여러 명이면 그 줄 수만큼) */}
                 {kind==='total'&&(
-                  <td rowSpan={row.span} style={{...tdS,textAlign:'left',whiteSpace:'normal',
-                    wordBreak:'break-word',lineHeight:1.45,verticalAlign:'middle',borderTop:topBorder}}>{d.fullName}</td>
+                  <td rowSpan={row.span} style={{...tdS,textAlign:'left',whiteSpace:'normal',paddingLeft:18,
+                    wordBreak:'break-word',lineHeight:1.45,verticalAlign:'middle',borderTop:topBorder}}>
+                    <span style={{color:'#9ca3af'}}>└ </span>{childLabel(d.rawName,row.parent)}</td>
                 )}
                 <td style={{...tdS,borderTop:topBorder}}>
                   {kind==='total'?(
@@ -953,7 +1095,7 @@ export default function App(){
         {tab==='today'   &&<TabToday   workers={inputWorkers} dupNames={dupNames} grid={grid} setGrid={setGrid}
           jiraTree={jiraTree} jiraDone={jiraDone} selWorkerId={selWorkerId} setSelWorkerId={setSelWorkerId}
           onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}/>}
-        {tab==='daily'   &&<TabDaily   history={historyForStats} workers={workersLabeled} absences={absences} viewDate={viewDate} setViewDate={setViewDate}/>}
+        {tab==='daily'   &&<TabDaily   history={historyForStats} workers={workersLabeled} absences={absences} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
         {tab==='weekly'  &&<TabWeekly  history={historyForStats} workers={workersLabeled} absences={absences} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
         {tab==='monthly' &&<TabMonthly history={historyForStats} workers={workersLabeled} absences={absences} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
         {tab==='yearly'  &&<TabYearly  history={historyForStats} workers={workersLabeled} absences={absences} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
@@ -1177,7 +1319,7 @@ function SectionTitle({children}){
 }
 
 // ── 일간 탭 ───────────────────────────────────────────────
-function TabDaily({history,workers,absences=[],viewDate,setViewDate}){
+function TabDaily({history,workers,absences=[],viewDate,setViewDate,jiraTree}){
   const rows=history.filter(r=>r.work_date===viewDate)
   const periodWorkers=workersAvailable(workers,absences,viewDate,viewDate)
   const agg=aggByWorker(rows),total=rows.length
@@ -1216,9 +1358,9 @@ function TabDaily({history,workers,absences=[],viewDate,setViewDate}){
         </Card>}
       </div>
       <SectionTitle>직원별 업무 분석</SectionTitle>
-      <WorkerAnalysis rows={rows} workers={periodWorkers}/>
+      <WorkerAnalysis rows={rows} workers={periodWorkers} jiraTree={jiraTree}/>
       <SectionTitle>프로젝트 기간 비중 분석</SectionTitle>
-      <ProjectAnalysis rows={rows} allHistory={history}/>
+      <ProjectAnalysis rows={rows} allHistory={history} jiraTree={jiraTree}/>
     </div>
   )
 }
@@ -1293,9 +1435,9 @@ function TabWeekly({history,workers,absences=[],viewDate,setViewDate,jiraTree}){
       <SectionTitle>업무 구성 비율 추이 (100%)</SectionTitle>
       <MixTrend data={mix.data} tasks={mix.topTasks}/>
       <SectionTitle>직원별 업무 분석</SectionTitle>
-      <WorkerAnalysis rows={rows} workers={periodWorkers}/>
+      <WorkerAnalysis rows={rows} workers={periodWorkers} jiraTree={jiraTree}/>
       <SectionTitle>프로젝트 기간 비중 분석</SectionTitle>
-      <ProjectAnalysis rows={rows} allHistory={history}/>
+      <ProjectAnalysis rows={rows} allHistory={history} jiraTree={jiraTree}/>
     </div>
   )
 }
@@ -1370,9 +1512,9 @@ function TabMonthly({history,workers,absences=[],viewMonth,setViewMonth,jiraTree
       <SectionTitle>업무 구성 비율 추이 (100%)</SectionTitle>
       <MixTrend data={mix.data} tasks={mix.topTasks}/>
       <SectionTitle>직원별 업무 분석</SectionTitle>
-      <WorkerAnalysis rows={rows} workers={periodWorkers}/>
+      <WorkerAnalysis rows={rows} workers={periodWorkers} jiraTree={jiraTree}/>
       <SectionTitle>프로젝트 기간 비중 분석</SectionTitle>
-      <ProjectAnalysis rows={rows} allHistory={history}/>
+      <ProjectAnalysis rows={rows} allHistory={history} jiraTree={jiraTree}/>
     </div>
   )
 }
@@ -1446,9 +1588,9 @@ function TabYearly({history,workers,absences=[],viewYear,setViewYear,jiraTree}){
       <SectionTitle>업무 구성 비율 추이 (100%)</SectionTitle>
       <MixTrend data={mix.data} tasks={mix.topTasks}/>
       <SectionTitle>직원별 업무 분석</SectionTitle>
-      <WorkerAnalysis rows={rows} workers={periodWorkers}/>
+      <WorkerAnalysis rows={rows} workers={periodWorkers} jiraTree={jiraTree}/>
       <SectionTitle>프로젝트 기간 비중 분석</SectionTitle>
-      <ProjectAnalysis rows={rows} allHistory={history}/>
+      <ProjectAnalysis rows={rows} allHistory={history} jiraTree={jiraTree}/>
     </div>
   )
 }
