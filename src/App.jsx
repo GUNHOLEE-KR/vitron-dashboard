@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, LabelList, Treemap,
          RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
          ComposedChart, XAxis, YAxis, Tooltip, Legend, ReferenceLine, ResponsiveContainer } from 'recharts'
@@ -510,7 +510,7 @@ function WorkerAnalysis({rows,workers,jiraTree}){
               )
               return(
               <tr key={i} style={{background:bg}}>
-                <td style={{...tdS,textAlign:'left',paddingLeft:18,maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}
+                <td style={{...tdS,textAlign:'left',padding:'6px 10px 6px 18px',maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}
                   title={cleanName(r.task)}><span style={{color:'#9ca3af'}}>└ </span>{childLabel(r.task,r.parent)}</td>
                 <td style={tdS}><span style={{background:'#fff',color:'#1a56db',border:'1px solid #bfdbfe',padding:'2px 8px',borderRadius:12,fontWeight:700}}>{r.hours}h</span></td>
                 <td style={tdS}>
@@ -648,7 +648,7 @@ function ProjectAnalysis({rows,allHistory,jiraTree}){
               <tr key={i} style={{background:bg}}>
                 {/* 프로젝트명은 rowSpan 으로 묶어 세로 가운데 정렬 (참여자 여러 명이면 그 줄 수만큼) */}
                 {kind==='total'&&(
-                  <td rowSpan={row.span} style={{...tdS,textAlign:'left',whiteSpace:'normal',paddingLeft:18,
+                  <td rowSpan={row.span} style={{...tdS,textAlign:'left',whiteSpace:'normal',padding:'6px 10px 6px 18px',
                     wordBreak:'break-word',lineHeight:1.45,verticalAlign:'middle',borderTop:topBorder}}>
                     <span style={{color:'#9ca3af'}}>└ </span>{childLabel(d.rawName,row.parent)}</td>
                 )}
@@ -1099,7 +1099,8 @@ export default function App(){
       <main style={{padding:'16px 20px'}}>
         {tab==='today'   &&<TabToday   workers={inputWorkers} dupNames={dupNames} grid={grid} setGrid={setGrid}
           jiraTree={jiraTree} jiraDone={jiraDone} selWorkerId={selWorkerId} setSelWorkerId={setSelWorkerId}
-          onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}/>}
+          onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}
+          history={historyForStats}/>}
         {tab==='daily'   &&<TabDaily   history={historyForStats} workers={workersLabeled} absences={absences} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
         {tab==='weekly'  &&<TabWeekly  history={historyForStats} workers={workersLabeled} absences={absences} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
         {tab==='monthly' &&<TabMonthly history={historyForStats} workers={workersLabeled} absences={absences} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
@@ -1155,7 +1156,7 @@ export default function App(){
 }
 
 // ── 오늘 업무 탭 ─────────────────────────────────────────
-function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),selWorkerId,setSelWorkerId,onSave,onLoadDate,parentSel,setParentSel}){
+function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),selWorkerId,setSelWorkerId,onSave,onLoadDate,parentSel,setParentSel,history=[]}){
   const [ldDate,setLdDate]=useState(today())
   // 끝난 업무는 기본으로 감춘다. 다만 «완료 처리한 뒤에도 보완 작업이 이어지는» 경우가
   // 실제로 있어(최근 30일에도 완료 업무에 76건이 적혔다) 체크 한 번으로 꺼낼 수 있게 둔다.
@@ -1166,7 +1167,29 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),sel
   const visible=(list,cur)=>list.filter(t=>showDone||!jiraDone.has(t)||t===cur)
   // 표시 전용 이름. 🔴 저장되는 값(option 의 value)은 «원본 그대로» 여야 한다 —
   // 화면 문구를 저장하면 상태가 바뀔 때마다 같은 업무가 두 종류로 갈라진다.
-  const label=t=>jiraDone.has(t)?'(완료) '+t:t
+  // 번호를 떼는 것도 여기까지다 — 목록에서만 감추고 저장은 `[VITRON-41] …` 그대로 간다.
+  const label=t=>(jiraDone.has(t)?'(완료) ':'')+(cleanName(t)||t)
+
+  // 목록 차례. 번호가 붙어 있으면 «문자열» 정렬이라 10 → 100 → 11 → 119 처럼 뒤죽박죽이 된다.
+  // 번호를 뗀 이름으로 세우고, 시작일순도 고를 수 있게 한다.
+  const [optSort,setOptSort]=useState('name-asc')
+  const firstDates=useMemo(()=>firstDateByTask(history),[history])
+  // 상위업무의 시작일 = 그 아래 소업무가 처음 적힌 날 중 «가장 이른» 날.
+  // 아무도 아직 적지 않은 업무는 날짜가 없어 맨 뒤로 간다.
+  const firstOf=t=>{
+    const own=firstDates[normText(t)]
+    const kids=(jiraTree[t]||[]).map(s=>firstDates[normText(s)]).filter(Boolean)
+    const all=[own,...kids].filter(Boolean).sort()
+    return all[0]||''
+  }
+  const sortOpts=list=>[...list].sort((a,b)=>{
+    if(optSort.startsWith('date')){
+      const da=firstOf(a)||'9999-99-99',db=firstOf(b)||'9999-99-99'
+      if(da!==db)return optSort==='date-asc'?da.localeCompare(db):db.localeCompare(da)
+    }
+    const na=cleanName(a)||a,nb=cleanName(b)||b
+    return optSort==='name-desc'?nb.localeCompare(na,'ko'):na.localeCompare(nb,'ko')
+  })
   const doneCount=jiraParents.filter(p=>jiraDone.has(p)).length
     +Object.values(jiraTree).flat().filter(s=>jiraDone.has(s)).length
   const selWorker=workers.find(w=>w.id===selWorkerId)||null
@@ -1205,6 +1228,14 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),sel
               완료 포함 <span style={{color:'#9ca3af'}}>({doneCount})</span>
             </label>
           )}
+          <select value={optSort} onChange={e=>setOptSort(e.target.value)}
+            title="상위·하위 업무 목록의 차례"
+            style={{padding:'6px 8px',borderRadius:7,border:'1px solid #e5e7eb',background:'#fff',fontSize:12,color:'#374151'}}>
+            <option value="name-asc">이름 ㄱ→ㅎ</option>
+            <option value="name-desc">이름 ㅎ→ㄱ</option>
+            <option value="date-asc">시작일 오래된 순</option>
+            <option value="date-desc">시작일 최근 순</option>
+          </select>
         </div>
         <div style={{display:'flex',gap:8}}>
           <button onClick={()=>{if(!selWorker)return;const g={...grid};WORK_HOURS.forEach(h=>delete g[cellKey(h,selWorker.id)]);setGrid(g);const ps={...parentSel};WORK_HOURS.forEach(h=>delete ps[cellKey(h,selWorker.id)]);setParentSel(ps)}}
@@ -1265,7 +1296,7 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),sel
                 {workers.map(w=>{
                   const key=cellKey(h,w.id),val=grid[key]||'',isMe=selWorkerId===w.id
                   const pVal=parentSel[key]||'',subs=pVal?(jiraTree[pVal]||[]):[]
-                  const pOpts=visible(jiraParents,pVal),sOpts=visible(subs,val)
+                  const pOpts=sortOpts(visible(jiraParents,pVal)),sOpts=sortOpts(visible(subs,val))
                   return isMe?(
                     <td key={w.id} style={{border:'1px solid #e5e7eb',padding:4,verticalAlign:'top',minWidth:155}}>
                       <div style={{display:'flex',flexDirection:'column',gap:3}}>

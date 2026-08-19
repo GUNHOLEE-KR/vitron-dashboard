@@ -41,6 +41,17 @@
   box-sizing: border-box;
 }
 
+/* 표의 좁은 칸에서 <input> 만 삐져나왔다 (업무 입력표의 「③ 직접 입력」).
+   <input> 은 size 속성에 따른 «기본 최소 폭»(대략 20글자)을 갖는데,
+   flex·grid·표 칸 안에서는 그 최소 폭이 width:100% 를 이긴다.
+   box-sizing 만으로는 막을 수 없고 min-width 를 풀어 줘야 한다.
+   <select> 는 기본 폭이 작아 같은 자리에서도 멀쩡했다. */
+input,
+select,
+textarea {
+  min-width: 0;
+}
+
 body {
   margin: 0;
 }
