@@ -3859,6 +3859,13 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,jiraDone=ne
   const [newJiraParent,setNewJiraParent]=useState('')
   const [newFixed,setNewFixed]=useState('')
   const jiraParents=Object.keys(jiraTree)
+  // 번호를 뗀 이름으로 세운다. 그냥 두면 «문자열» 정렬이라 10 → 100 → 11 이 된다.
+  const [jiraSort,setJiraSort]=useState('name-asc')
+  const sortJiraList=list=>[...list].sort((a,b)=>{
+    const na=cleanName(a)||a,nb=cleanName(b)||b
+    return jiraSort==='name-desc'?nb.localeCompare(na,'ko'):na.localeCompare(nb,'ko')
+  })
+  const sortedJiraParents=sortJiraList(jiraParents)
   const fixedTasks=jiraTree[FIXED_PARENT]||[]
   const nameOf=id=>{const w=workers.find(x=>x.id===id);return w?workerLabel(w,dupNames):''}
 
@@ -4108,19 +4115,28 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,jiraDone=ne
             style={{flex:1,padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
           <select value={newJiraParent} onChange={e=>setNewJiraParent(e.target.value)} style={{width:200,padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}>
             <option value="">상위업무로 추가</option>
-            {jiraParents.map(p=><option key={p} value={p}>{p}</option>)}
+            {sortedJiraParents.map(p=><option key={p} value={p}>{cleanName(p)||p}</option>)}
           </select>
           <button onClick={handleAddJira} style={{padding:'7px 14px',borderRadius:7,border:'none',background:'#1a56db',color:'#fff',cursor:'pointer',fontWeight:600}}>추가</button>
         </div>
+        {/* 이 표는 «관리» 화면이라 번호를 그대로 둔다 — 지울 업무를 키로 찾는 일이 많다.
+            대신 차례는 고를 수 있게 한다 (그냥 두면 문자열 정렬이라 10 → 100 → 11 이 된다). */}
+        <div style={{display:'flex',justifyContent:'flex-end',marginBottom:8}}>
+          <select value={jiraSort} onChange={e=>setJiraSort(e.target.value)}
+            style={{padding:'5px 8px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:12,background:'#fff'}}>
+            <option value="name-asc">이름 ㄱ→ㅎ</option>
+            <option value="name-desc">이름 ㅎ→ㄱ</option>
+          </select>
+        </div>
         <div style={{maxHeight:320,overflowY:'auto'}}>
           {jiraParents.length===0?<p style={{color:'#9ca3af',fontSize:12,padding:12}}>Jira 동기화 버튼을 눌러주세요.</p>
-            :jiraParents.map(p=>(
+            :sortedJiraParents.map(p=>(
               <div key={p} style={{marginBottom:6}}>
                 <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 10px',background:'#eff6ff',borderRadius:6,fontSize:12}}>
                   <span style={{fontWeight:600,color:jiraDone.has(p)?'#6b7280':'#1e40af'}}>{jiraDone.has(p)?'(완료) ':''}{p}</span>
                   <span onClick={()=>handleDelJira(p)} style={{cursor:'pointer',color:'#b91c1c',fontWeight:700}}>&times;</span>
                 </div>
-                {(jiraTree[p]||[]).map(s=>(
+                {sortJiraList(jiraTree[p]||[]).map(s=>(
                   <div key={s} style={{display:'flex',justifyContent:'space-between',padding:'4px 8px 4px 24px',fontSize:11,background:'#f0fdf4',borderLeft:'2px solid #6ee7b7',margin:'2px 0 2px 8px',borderRadius:'0 4px 4px 0'}}>
                     <span style={{color:jiraDone.has(s)?'#9ca3af':'inherit'}}>↳ {jiraDone.has(s)?'(완료) ':''}{s}</span>
                     <span onClick={()=>handleDelJira(s)} style={{cursor:'pointer',color:'#b91c1c',fontWeight:700}}>&times;</span>
