@@ -279,6 +279,12 @@ app.get('/api/history/range', async (req, res) => {
 //   DB 를 직접 조회하면 두 갈래로 나온다. 그래서 들어올 때 한 번 다듬어 둔다.
 //
 // ⚠ 공백만 다듬는다. 대소문자·글자는 손대지 않는다 — 업무명은 사람이 적은 그대로가 사실이다.
+// 업무명의 «공백 모양» 을 하나로 맞춘다 — 앞뒤를 떼고 연속 공백은 한 칸으로.
+//
+// 🔑 업무 기록을 «저장할 때» 와 Jira 업무명을 «담을 때» 가 반드시 같은 규칙이어야 한다.
+//    한쪽만 누르면 «고르는 값» 과 «저장되는 값» 이 달라져 같은 업무가 두 줄로 갈라진다.
+//    실제로 그랬다 — 수동 추가 업무 이름에 두 칸이 들어가 있었는데 저장만 눌러서,
+//    한 업무가 「한 칸 56건 / 두 칸 45건」 으로 나뉘어 집계됐다 (2026-08-24 정리).
 function normalizeWorkText(s) {
   return s == null ? s : String(s).trim().replace(/\s+/g, ' ')
 }
@@ -332,7 +338,10 @@ app.get('/api/jira-issues', async (req, res) => {
 })
 
 app.post('/api/jira-issues', async (req, res) => {
-  const { full_text, parent_text } = req.body
+  // 손으로 적는 곳이라 공백이 겹치기 가장 쉽다. 실제로 여기서 들어간 두 칸 때문에
+  // 한 업무가 두 줄로 갈라졌다 (normalizeWorkText 주석 참고).
+  const full_text = normalizeWorkText(req.body?.full_text)
+  const parent_text = normalizeWorkText(req.body?.parent_text)
   try {
     let parentKey = null
     if (parent_text) {
@@ -476,18 +485,20 @@ app.post('/api/jira-sync', async (req, res) => {
     })
 
     const allIssues = [
+      // full_text 는 업무 기록에 그대로 저장되는 값이다. 기록을 저장할 때와 «같은 규칙» 으로
+      // 공백을 눌러야 고르는 값과 저장되는 값이 어긋나지 않는다 (normalizeWorkText 주석 참고).
       ...epics.map(i => ({
         jira_key:   i.key,
         summary:    i.fields.summary,
         parent_key: null,
-        full_text:  `[${i.key}] ${i.fields.summary}`,
+        full_text:  normalizeWorkText(`[${i.key}] ${i.fields.summary}`),
         ...statusOf(i)
       })),
       ...children.map(i => ({
         jira_key:   i.key,
         summary:    i.fields.summary,
         parent_key: i.fields.parent?.key ?? null,
-        full_text:  `[${i.key}] ${i.fields.summary}`,
+        full_text:  normalizeWorkText(`[${i.key}] ${i.fields.summary}`),
         ...statusOf(i)
       }))
     ]
