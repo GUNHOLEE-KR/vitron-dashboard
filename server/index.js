@@ -25,6 +25,34 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
+// ─── 로그인 게이트 ───────────────────────────────────────────
+// 2026-08-21 부터 «화면 전체» 가 로그인 뒤에 있다. 그 전에는 정산 화면만 막았다.
+//
+// 🔑 라우트마다 requireLogin 을 붙이지 않고 «전부 막고 예외만 여는» 방식을 쓴다.
+//    붙이는 방식은 새 API 를 하나 더할 때 조용히 빠뜨리기 쉽고, 빠뜨려도
+//    아무 증상이 없어 알아차릴 방법이 없다.
+const OPEN_PATHS = new Set([
+  '/api/health',        // 컨테이너 상태 확인 — 로그인 없이 답해야 한다
+  '/api/auth/login',
+  '/api/auth/logout',
+  '/api/auth/me',       // 「지금 로그인 상태인가」 를 묻는 곳이라 막으면 안 된다
+])
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/') || OPEN_PATHS.has(req.path)) return next()
+  const session = sessionOf(req)
+  if (!session) return res.status(401).json({ error: '로그인이 필요합니다.' })
+  // 임시 비밀번호 계정은 들여보내지 않는다 — KPI 와 같은 규칙이다.
+  // 비밀번호를 다루는 코드를 두 벌로 만들지 않으려고 «바꾸는 곳» 은 KPI 하나로 둔다.
+  if (session.mustChange) {
+    return res.status(403).json({
+      code: 'MUST_CHANGE_PASSWORD',
+      error: '임시 비밀번호입니다. KPI 추적 시스템에서 비밀번호를 먼저 정해 주십시오.',
+    })
+  }
+  req.session = session
+  next()
+})
+
 const pool = new Pool({
   host:     process.env.DB_HOST,
   port:     parseInt(process.env.DB_PORT || '5432'),
@@ -260,6 +288,7 @@ app.post('/api/history/save', async (req, res) => {
   if (!worker_id) {
     return res.status(400).json({ error: 'worker_id 가 필요합니다.' })
   }
+  if (!canEditWorker(req.session, worker_id)) return denyOther(res)
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -782,6 +811,7 @@ const USE_TYPES = ['business', 'personal', 'vacation']
 app.post('/api/schedule/plans', async (req, res) => {
   const b = req.body
   if (!b.worker_id) return res.status(400).json({ error: '이름을 먼저 선택해 주세요.' })
+  if (!canEditWorker(req.session, b.worker_id)) return denyOther(res)
   if (!b.plan_date) return res.status(400).json({ error: '날짜가 필요합니다.' })
   const useType = USE_TYPES.includes(b.use_type) ? b.use_type : 'business'
   // 개인 사용·휴가는 장소·용무를 받지 않는다.
@@ -833,6 +863,7 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
   try {
     const { rows: cur } = await pool.query('SELECT * FROM schedule_plans WHERE id = $1', [req.params.id])
     if (cur.length === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
+    if (!canEditWorker(req.session, cur[0].worker_id)) return denyOther(res)
     const useType = b.use_type ?? cur[0].use_type
     const keepPlace = useType === 'business'
     const { rowCount } = await pool.query(
@@ -870,6 +901,11 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
 
 app.delete('/api/schedule/plans/:id', async (req, res) => {
   try {
+    const { rows: own } = await pool.query(
+      'SELECT worker_id FROM schedule_plans WHERE id = $1', [req.params.id]
+    )
+    if (own.length === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
+    if (!canEditWorker(req.session, own[0].worker_id)) return denyOther(res)
     const { rows } = await pool.query(
       'SELECT locked FROM schedule_actuals WHERE plan_id = $1', [req.params.id]
     )
@@ -932,6 +968,9 @@ app.post('/api/schedule/actuals', async (req, res) => {
     if (!workerId || !workDate) {
       return res.status(400).json({ error: '직원과 날짜가 필요합니다.' })
     }
+    // 계획에 붙는 실적이면 «계획의 주인» 을 본다. 본문의 worker_id 를 믿으면
+    // 남의 계획에 자기 번호를 붙여 보내는 것으로 통과된다.
+    if (!canEditWorker(req.session, base.worker_id ?? workerId)) return denyOther(res)
     const useType  = b.use_type ?? base.use_type ?? 'business'
     const keepPlace = useType === 'business'
     // 왕복이면 거리를 2배로 잡아 기본값을 만든다 (사용자가 고칠 수 있다)
@@ -973,6 +1012,7 @@ app.patch('/api/schedule/actuals/:id', async (req, res) => {
   try {
     const { rows: cur } = await pool.query('SELECT * FROM schedule_actuals WHERE id = $1', [req.params.id])
     if (cur.length === 0) return res.status(404).json({ error: '해당 실적을 찾을 수 없습니다.' })
+    if (!canEditWorker(req.session, cur[0].worker_id)) return denyOther(res)
     // 정산이 끝난 달은 고칠 수 없다. 승인 금액과 근거가 어긋나기 때문이다.
     // 정정이 필요하면 대표이사가 잠금을 풀고 재승인한다 (설계서 3.3절)
     if (cur[0].locked) {
@@ -1006,8 +1046,9 @@ app.patch('/api/schedule/actuals/:id', async (req, res) => {
 
 app.delete('/api/schedule/actuals/:id', async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT locked, plan_id FROM schedule_actuals WHERE id = $1', [req.params.id])
+    const { rows } = await pool.query('SELECT locked, plan_id, worker_id FROM schedule_actuals WHERE id = $1', [req.params.id])
     if (rows.length === 0) return res.status(404).json({ error: '해당 실적을 찾을 수 없습니다.' })
+    if (!canEditWorker(req.session, rows[0].worker_id)) return denyOther(res)
     if (rows[0].locked) {
       return res.status(409).json({ error: '정산이 완료된 달의 기록은 지울 수 없습니다.' })
     }
@@ -1022,8 +1063,9 @@ app.delete('/api/schedule/actuals/:id', async (req, res) => {
   }
 })
 
-// ─── 로그인 (정산 화면 전용) ──────────────────────────────────
-// 달력·계획 입력에는 로그인이 없다. 금액과 개인 사용 내역이 보이는 «정산 화면» 만 막는다.
+// ─── 로그인 ──────────────────────────────────────────────────
+// 2026-08-21 부터 화면 «전체» 가 로그인 뒤에 있다 (그 전에는 정산 화면만 막았다).
+// 게이트는 파일 맨 위 app.use 에 있고, 여기는 로그인·로그아웃·상태 조회만 둔다.
 //
 // ⚠ 계정과 세션을 KPI 추적 시스템(:8083)과 «그대로 공유» 한다.
 //    - 계정: kpi_users (같은 DB). 새로 만들면 두 벌이 되어 반드시 어긋난다
@@ -1080,6 +1122,25 @@ function requireLogin(req, res, next) {
   if (!session) return res.status(401).json({ error: '로그인이 필요합니다.' })
   req.session = session
   next()
+}
+
+// ─── 「내 것만 수정」 판정 ────────────────────────────────────
+// 2026-08-21 결정. 업무 기록과 스케줄(계획·실적)은 본인만 고칠 수 있다.
+// 관리자(role='admin')는 대신 적어 줄 수 있게 통과시킨다 — 장기 부재자의 기록을
+// 넣어 주거나 잘못 들어간 것을 고칠 길이 없으면 운영이 막힌다.
+//
+// 🔑 수정·삭제는 «본문» 이 아니라 «DB 에 저장된 worker_id» 로 판정해야 한다.
+//    본문 값을 믿으면 남의 계획을 열어 자기 번호를 적어 보내는 것으로 뚫린다.
+function isAdmin(session) { return session?.role === 'admin' }
+
+function canEditWorker(session, workerId) {
+  if (isAdmin(session)) return true
+  if (workerId == null) return false
+  return Number(session?.workerId) === Number(workerId)
+}
+
+function denyOther(res) {
+  return res.status(403).json({ error: '남의 기록은 수정할 수 없습니다.' })
 }
 
 // 정산 승인 권한. kpi_users.role 에 새 등급을 만들지 않고 «허가» 컬럼으로 둔 이유는

@@ -891,7 +891,123 @@ function TokenExpiryBanner({status}){
   )
 }
 
+// ════════════════════════════════════════════════════════════
+// 최상위 — 로그인 관문
+// ════════════════════════════════════════════════════════════
+// 2026-08-21 부터 화면 «전체» 가 로그인 뒤에 있다. 그 전에는 정산 화면만 막았다.
+// 로그인해야 «내가 누구인지» 가 정해지고, 그래야 「내 것만 수정」 이 성립한다.
+//
+// ⚠ 계정·세션을 KPI 추적 시스템(:8083)과 공유하므로, KPI 에서 이미 로그인했다면
+//   이 화면은 뜨지 않고 바로 들어간다.
 export default function App(){
+  const [me,setMe]=useState(null)        // null = 아직 확인 전
+  const [checking,setChecking]=useState(true)
+
+  useEffect(()=>{
+    whoAmI()
+      .then(r=>setMe(r?.logged_in?r:{logged_in:false}))
+      .catch(()=>setMe({logged_in:false}))
+      .finally(()=>setChecking(false))
+  },[])
+
+  if(checking) return <FullScreen text="확인 중..."/>
+  if(!me?.logged_in) return <LoginScreen onDone={setMe}/>
+  // 임시 비밀번호 계정은 들여보내지 않는다. 비밀번호를 다루는 코드가 두 벌이 되면
+  // 반드시 어긋나므로 «바꾸는 곳» 은 KPI 하나로 둔다 (서버도 같은 규칙으로 막는다).
+  if(me.must_change_password) return <NeedPasswordScreen me={me} onBack={()=>setMe({logged_in:false})}/>
+  // key 를 걸어 계정이 바뀌면 화면 상태가 남지 않고 처음부터 다시 그려진다
+  return <Dashboard key={me.login_id} me={me} onLoggedOut={()=>setMe({logged_in:false})}/>
+}
+
+function FullScreen({text}){
+  return(
+    <div style={{position:'fixed',inset:0,display:'flex',alignItems:'center',justifyContent:'center',
+      flexDirection:'column',gap:16,background:'#fff'}}>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      <div style={{width:36,height:36,border:'3px solid #e5e7eb',borderTopColor:'#1a56db',borderRadius:'50%',animation:'spin .8s linear infinite'}}/>
+      <p style={{color:'#6b7280'}}>{text}</p>
+    </div>
+  )
+}
+
+// 로그인 화면 — 창이 아니라 «화면» 이다. 뒤에 아무것도 보이지 않아야
+// 로그인 전에는 남의 기록도 통계도 볼 수 없다는 것이 분명해진다.
+function LoginScreen({onDone}){
+  const [id,setId]=useState('')
+  const [pw,setPw]=useState('')
+  const [busy,setBusy]=useState(false)
+  const [err,setErr]=useState('')
+  const inputS={padding:'11px 12px',border:'1px solid #e5e7eb',borderRadius:8,fontSize:14,width:'100%'}
+
+  async function submit(){
+    if(!id.trim()||!pw){setErr('아이디와 비밀번호를 입력해 주세요.');return}
+    try{
+      setBusy(true); setErr('')
+      const u=await login(id.trim(),pw)
+      onDone({...u,logged_in:true})
+    }catch(e){ setErr(e.message) }
+    finally{ setBusy(false) }
+  }
+
+  return(
+    <div style={{minHeight:'100vh',background:'#f5f5f0',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:12,width:'100%',maxWidth:400,
+        padding:28,boxShadow:'0 10px 30px rgba(0,0,0,.06)'}}>
+        <div style={{fontSize:18,fontWeight:700,marginBottom:4}}>바이트론 이앤에스 업무 현황</div>
+        <div style={{fontSize:12,color:'#6b7280',marginBottom:20}}>
+          KPI 추적 시스템과 <strong>같은 계정</strong>을 씁니다 (회사 메일 주소).
+        </div>
+        <div style={{marginBottom:10}}>
+          <input value={id} onChange={e=>setId(e.target.value)} autoFocus
+            onKeyDown={e=>e.key==='Enter'&&submit()}
+            placeholder="회사 메일 주소" style={inputS}/>
+        </div>
+        <div style={{marginBottom:14}}>
+          <input type="password" value={pw} onChange={e=>setPw(e.target.value)}
+            onKeyDown={e=>e.key==='Enter'&&submit()}
+            placeholder="비밀번호" style={inputS}/>
+        </div>
+        {err&&<div style={{fontSize:12,color:'#b91c1c',marginBottom:12}}>{err}</div>}
+        <button onClick={submit} disabled={busy}
+          style={{width:'100%',padding:'12px',borderRadius:8,border:'none',background:'#1a56db',
+            color:'#fff',cursor:busy?'default':'pointer',fontSize:14,fontWeight:700,opacity:busy?.6:1}}>
+          {busy?'확인 중...':'로그인'}
+        </button>
+        <div style={{fontSize:11,color:'#9ca3af',marginTop:14,lineHeight:1.7}}>
+          비밀번호를 모르시면 관리자에게 재발급을 요청해 주십시오.
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// 임시 비밀번호 계정 안내. 여기서 바꾸게 하지 않고 KPI 로 보낸다.
+function NeedPasswordScreen({me,onBack}){
+  return(
+    <div style={{minHeight:'100vh',background:'#f5f5f0',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:12,width:'100%',maxWidth:440,padding:28}}>
+        <div style={{fontSize:17,fontWeight:700,marginBottom:10}}>비밀번호를 먼저 정해 주십시오</div>
+        <p style={{fontSize:13,color:'#374151',lineHeight:1.9,margin:'0 0 16px'}}>
+          <strong>{me.name}</strong> 님의 계정은 아직 <strong>임시 비밀번호</strong> 상태입니다.
+          두 시스템이 <strong>같은 계정</strong>을 쓰므로, KPI 추적 시스템에서 한 번 바꾸시면
+          이 화면도 함께 열립니다.
+        </p>
+        <a href="http://vitron-nas:8083" target="_blank" rel="noreferrer"
+          style={{display:'block',textAlign:'center',padding:'12px',borderRadius:8,background:'#1a56db',
+            color:'#fff',textDecoration:'none',fontSize:14,fontWeight:700}}>
+          KPI 추적 시스템 열기 (:8083)
+        </a>
+        <button onClick={onBack}
+          style={{width:'100%',marginTop:10,padding:'10px',borderRadius:8,border:'1px solid #e5e7eb',
+            background:'#fff',cursor:'pointer',fontSize:13,color:'#6b7280'}}>
+          다른 계정으로 로그인
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function Dashboard({me,onLoggedOut}){
   const [tab,setTab]=useState('today')
   const [workers,setWorkers]=useState([])
   const [history,setHistory]=useState([])
@@ -900,7 +1016,9 @@ export default function App(){
   const [jiraDone,setJiraDone]=useState(()=>new Set())   // 종료된 업무 (고르는 목록에서만 감춘다)
   const [grid,setGrid]=useState({})
   const [parentSel,setParentSel]=useState({})
-  const [selWorkerId,setSelWorkerId]=useState(null)   // 이름이 아니라 id 로 선택 대상을 잡는다
+  // 입력 대상. 로그인한 본인으로 «시작» 한다 — 예전에는 이름을 눌러 골랐다.
+  // 관리자는 대신 적어 줄 수 있어 바꿀 수 있고, 일반 사용자는 이 값이 고정이다.
+  const [selWorkerId,setSelWorkerId]=useState(me.worker_id??null)
   const [viewDate,setViewDate]=useState(today())
   const [viewMonth,setViewMonth]=useState(toMonth(today()))
   const [viewYear,setViewYear]=useState(toYear(today()))
@@ -918,10 +1036,11 @@ export default function App(){
   const [planDialog,setPlanDialog]=useState(null)   // {editing} | {date} | null
   const [schedFocus,setSchedFocus]=useState('')     // 등록 직후 달력을 옮길 날짜
   const [clipboard,setClipboard]=useState(null)     // 복사한 계획 (달력에서 붙여넣기)
-  // 정산 화면 전용 로그인. 계정·세션을 KPI 추적 시스템과 공유하므로
-  // KPI 에서 이미 로그인했다면 이 화면에서도 그대로 통한다.
-  const [me,setMe]=useState(null)
-  const [loginOpen,setLoginOpen]=useState(false)
+  // 관리자는 남의 기록도 고칠 수 있다 (대리 입력). 서버도 같은 기준으로 판정하므로
+  // 화면에서 막는 것은 «편의» 이고, 실제 방어는 서버에 있다.
+  const canEditOthers=me.role==='admin'
+  // 「이 사람 것을 내가 고쳐도 되는가」 — 달력·입력표가 함께 쓴다.
+  const mayEdit=id=>canEditOthers||Number(id)===Number(me.worker_id)
 
   // 오늘 기준 재직 중인 직원만 (입사일 이후 + 퇴사 전)
   const td=today()
@@ -976,6 +1095,11 @@ export default function App(){
     if(selWorkerId&&isExcludedOn(absences,selWorkerId,td)) setSelWorkerId(null)
   },[absences,selWorkerId,td])
 
+  async function handleLogout(){
+    try{ await logout() }catch{ /* 이미 만료됐을 수 있다 */ }
+    onLoggedOut()
+  }
+
   async function handleSave(ds=today()){
     if(!selWorker){showToast('이름을 먼저 선택하세요');return}
     const label=workerLabel(selWorker,dupNames)
@@ -1008,14 +1132,10 @@ export default function App(){
     finally{ setSchedLoading(false) }
   }
 
-  // 스케줄 탭과 설정 탭(차량 관리)이 같은 데이터를 쓴다
+  // 스케줄 탭과 설정 탭(차량 관리)이 같은 데이터를 쓴다.
+  // 로그인 확인은 최상위 관문에서 이미 끝났으므로 여기서 다시 묻지 않는다.
   useEffect(()=>{
     if((tab==='schedule'||tab==='settings')&&places.length===0&&vehicles.length===0) loadSchedule()
-    // 정산 화면에 들어가기 전에 «조용히» 로그인 상태를 확인한다.
-    // 로그인 안 했으면 401 이 아니라 {logged_in:false} 가 오므로 화면이 깜빡이지 않는다.
-    if(tab==='schedule'&&me===null){
-      whoAmI().then(r=>{ if(r?.logged_in) setMe(r) }).catch(()=>{})
-    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   },[tab])
 
@@ -1028,8 +1148,11 @@ export default function App(){
     let done=0
     try{
       for(const t of targets){
+        // 남의 계획을 복사해 붙이면 «내» 일정이 된다. 원본 주인 그대로 보내면
+        // 서버가 403 으로 막는다 (관리자는 원본 주인을 유지한다).
+        const owner=t.workerId||src.worker_id
         const body={
-          worker_id:t.workerId||src.worker_id,
+          worker_id:mayEdit(owner)?owner:me.worker_id,
           plan_date:t.date, slot:src.slot, use_type:src.use_type,
           place_id:src.place_id??null, place_text:src.place_text??null, purpose:src.purpose??null,
           transport:src.transport, vehicle_id:src.vehicle_id??null,
@@ -1080,10 +1203,19 @@ export default function App(){
           <div style={{fontSize:16,fontWeight:700}}>바이트론 이앤에스 업무 현황</div>
           <div style={{fontSize:12,color:'#6b7280'}}>{new Date().toLocaleDateString('ko-KR')} ({dayName(today())}요일)</div>
         </div>
-        <div style={{display:'flex',gap:16,fontSize:12,color:'#6b7280'}}>
+        <div style={{display:'flex',alignItems:'center',gap:16,fontSize:12,color:'#6b7280'}}>
           <span>재직 <strong style={{color:'#1a56db'}}>{activeWorkers.length}</strong>명</span>
           <span>Jira <strong style={{color:'#1a56db'}}>{jiraParents.length}</strong>건</span>
           <span>누적 <strong style={{color:'#1a56db'}}>{history.length.toLocaleString()}</strong>건</span>
+          <span style={{width:1,height:22,background:'#e5e7eb'}}/>
+          <span style={{color:'#111827',fontWeight:600}}>
+            {me.name}
+            {canEditOthers&&<span style={{marginLeft:6,fontSize:11,fontWeight:600,color:'#7c3aed',
+              background:'#f3e8ff',borderRadius:5,padding:'2px 7px'}}>관리자</span>}
+          </span>
+          <button onClick={handleLogout}
+            style={{padding:'5px 12px',borderRadius:7,border:'1px solid #e5e7eb',background:'#fff',
+              cursor:'pointer',fontSize:12,color:'#6b7280'}}>로그아웃</button>
         </div>
       </header>
       <TokenExpiryBanner status={tokenStatus}/>
@@ -1100,7 +1232,7 @@ export default function App(){
         {tab==='today'   &&<TabToday   workers={inputWorkers} dupNames={dupNames} grid={grid} setGrid={setGrid}
           jiraTree={jiraTree} jiraDone={jiraDone} selWorkerId={selWorkerId} setSelWorkerId={setSelWorkerId}
           onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}
-          history={historyForStats}/>}
+          history={historyForStats} me={me} canEditOthers={canEditOthers}/>}
         {tab==='daily'   &&<TabDaily   history={historyForStats} workers={workersLabeled} absences={absences} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
         {tab==='weekly'  &&<TabWeekly  history={historyForStats} workers={workersLabeled} absences={absences} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
         {tab==='monthly' &&<TabMonthly history={historyForStats} workers={workersLabeled} absences={absences} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
@@ -1113,9 +1245,7 @@ export default function App(){
           onOpenCell={(d)=>setPlanDialog({editing:null,...d})}
           onOpenActual={p=>setActualDialog({plan:p})}
           actuals={actuals}
-          me={me} onNeedLogin={()=>setLoginOpen(true)}
-          onLogout={async()=>{ try{ await logout() }catch{ /* 이미 만료됐을 수 있다 */ }
-            setMe(null); showToast('로그아웃했습니다') }}
+          me={me} mayEdit={mayEdit} onLogout={handleLogout}
           clipboard={clipboard} onPaste={handlePaste} onCancelCopy={()=>setClipboard(null)}/>}
         {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers} dupNames={dupNames}
           jiraTree={jiraTree} jiraDone={jiraDone} reloadJira={reloadJira} showToast={showToast} tokenStatus={tokenStatus}
@@ -1129,20 +1259,17 @@ export default function App(){
           defaultKind={planDialog.kind}
           workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
           places={places} vehicles={vehicles} showToast={showToast}
+          me={me} canEditOthers={canEditOthers}
           onClose={()=>setPlanDialog(null)}
           onCopy={p=>{ setClipboard(p); showToast('복사했습니다 — 달력에서 붙일 칸을 골라 주세요',4000) }}
           onOpenActual={p=>setActualDialog({plan:p})}
           onSaved={async(r={})=>{ await loadSchedule(); if(r.focusDate) setSchedFocus(r.focusDate) }}/>
       )}
-      {loginOpen&&(
-        <LoginDialog showToast={showToast}
-          onClose={()=>setLoginOpen(false)}
-          onLoggedIn={u=>{ setMe(u); setLoginOpen(false) }}/>
-      )}
       {actualDialog&&(
         <ActualDialog plan={actualDialog.plan}
           actual={actuals.find(a=>a.plan_id===actualDialog.plan.id)||null}
           places={places} vehicles={vehicles} showToast={showToast}
+          me={me} canEditOthers={canEditOthers}
           onClose={()=>setActualDialog(null)}
           onSaved={async(r={})=>{ await loadSchedule(); if(r.focusDate) setSchedFocus(r.focusDate) }}/>
       )}
@@ -1156,7 +1283,7 @@ export default function App(){
 }
 
 // ── 오늘 업무 탭 ─────────────────────────────────────────
-function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),selWorkerId,setSelWorkerId,onSave,onLoadDate,parentSel,setParentSel,history=[]}){
+function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),selWorkerId,setSelWorkerId,onSave,onLoadDate,parentSel,setParentSel,history=[],me,canEditOthers=false}){
   const [ldDate,setLdDate]=useState(today())
   // 끝난 업무는 기본으로 감춘다. 다만 «완료 처리한 뒤에도 보완 작업이 이어지는» 경우가
   // 실제로 있어(최근 30일에도 완료 업무에 76건이 적혔다) 체크 한 번으로 꺼낼 수 있게 둔다.
@@ -1245,19 +1372,38 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),sel
           </button>
         </div>
       </div>
+      {/* 입력 대상 — 2026-08-21 부터 «로그인한 본인» 으로 고정된다.
+          관리자만 남의 이름을 골라 대신 적어 줄 수 있다. */}
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'12px 16px',marginBottom:16}}>
-        <div style={{fontSize:12,color:'#6b7280',marginBottom:8}}>내 이름을 선택하면 해당 열만 편집됩니다</div>
-        <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
-          {workers.map(w=>(
-            <button key={w.id} onClick={()=>setSelWorkerId(w.id)}
-              style={{padding:'6px 16px',borderRadius:20,fontSize:13,cursor:'pointer',
-                border:`2px solid ${selWorkerId===w.id?'#1a56db':'#e5e7eb'}`,
-                background:selWorkerId===w.id?'#1a56db':'#fff',
-                color:selWorkerId===w.id?'#fff':'#6b7280',fontWeight:selWorkerId===w.id?700:500}}>
-              {selWorkerId===w.id?'✎ ':''}{workerLabel(w,dupNames)}{selWorkerId===w.id?' (나)':''}
-            </button>
-          ))}
-        </div>
+        {canEditOthers?(
+          <>
+            <div style={{fontSize:12,color:'#6b7280',marginBottom:8}}>
+              <strong style={{color:'#7c3aed'}}>관리자</strong> — 고른 사람의 열만 편집됩니다.
+              다른 분의 기록을 대신 적을 때만 바꿔 주십시오.
+            </div>
+            <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+              {workers.map(w=>(
+                <button key={w.id} onClick={()=>setSelWorkerId(w.id)}
+                  style={{padding:'6px 16px',borderRadius:20,fontSize:13,cursor:'pointer',
+                    border:`2px solid ${selWorkerId===w.id?'#1a56db':'#e5e7eb'}`,
+                    background:selWorkerId===w.id?'#1a56db':'#fff',
+                    color:selWorkerId===w.id?'#fff':'#6b7280',fontWeight:selWorkerId===w.id?700:500}}>
+                  {selWorkerId===w.id?'✎ ':''}{workerLabel(w,dupNames)}
+                  {Number(w.id)===Number(me?.worker_id)?' (나)':''}
+                </button>
+              ))}
+            </div>
+          </>
+        ):selWorker?(
+          <div style={{fontSize:13,color:'#374151'}}>
+            <strong style={{color:'#1a56db'}}>✎ {workerLabel(selWorker,dupNames)}</strong> 님의 열만 편집됩니다.
+            <span style={{fontSize:12,color:'#9ca3af',marginLeft:8}}>다른 분의 기록은 보기만 됩니다.</span>
+          </div>
+        ):(
+          <div style={{fontSize:13,color:'#b91c1c'}}>
+            이 계정에 연결된 직원이 없어 업무를 적을 수 없습니다. 관리자에게 문의해 주십시오.
+          </div>
+        )}
       </div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'12px 0',overflowX:'auto'}}>
         <div style={{fontSize:11,color:'#6b7280',marginBottom:8,display:'flex',gap:16,paddingLeft:12}}>
@@ -1777,7 +1923,16 @@ function PlanBadge({plan,workers,onClick,todayStr,compact=false,showWorker=true}
 
 function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,onOpenNew,onOpenPlan,
                       onOpenCell,onOpenActual,showToast,focusDate,clipboard,onPaste,onCancelCopy,
-                      me,onNeedLogin,onLogout}){
+                      me,mayEdit=()=>true,onLogout}){
+  // 빈 칸을 눌러 계획을 만들 때, 그 칸이 «남의 줄» 이면 막는다.
+  // (주 뷰의 사람 기준 보기에서만 칸에 주인이 있다)
+  const openCell=d=>{
+    if(d?.workerId!=null&&!mayEdit(d.workerId)){
+      showToast('본인 일정만 등록할 수 있습니다')
+      return
+    }
+    onOpenCell(d)
+  }
   // 붙여넣기 모드에서 고른 칸들. 「날짜_직원id」 를 키로 담는다
   // (주 뷰는 사람까지 고를 수 있고, 월·일 뷰는 날짜만 고른다)
   const [picked,setPicked]=useState([])
@@ -1988,17 +2143,17 @@ function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,
 
       {view==='month'&&<ScheduleMonth ym={ym} byDate={byDate} workers={workers} todayStr={todayStr}
         onOpenPlan={onOpenPlan} onPickDate={d=>{setAnchor(d);setView('day')}}
-        onOpenCell={onOpenCell} pasting={pasting} isPicked={isPicked} togglePick={togglePick}/>}
+        onOpenCell={openCell} pasting={pasting} isPicked={isPicked} togglePick={togglePick}/>}
       {view==='week'&&<ScheduleWeek anchor={anchor} shown={shown} workers={workers} todayStr={todayStr}
-        onOpenPlan={onOpenPlan} onOpenCell={onOpenCell}
+        onOpenPlan={onOpenPlan} onOpenCell={openCell}
         pasting={pasting} isPicked={isPicked} togglePick={togglePick}
         rows={groupRows} groupBy={groupBy} sortByGroup={sortByGroup}/>}
       {view==='day'&&<ScheduleDay date={anchor} byDate={byDate} workers={workers} vehicles={vehicles}
-        todayStr={todayStr} onOpenPlan={onOpenPlan} onOpenCell={onOpenCell} onOpenActual={onOpenActual}
+        todayStr={todayStr} onOpenPlan={onOpenPlan} onOpenCell={openCell} onOpenActual={onOpenActual}
         rows={groupRows} groupBy={groupBy} sortByGroup={sortByGroup}/>}
       {view==='year'&&<ScheduleYear year={year} plans={shown} workers={workers}
         onPickMonth={m=>{setYm(m);setView('month')}}/>}
-      {view==='settle'&&<ScheduleSettlement me={me} onNeedLogin={onNeedLogin} onLogout={onLogout}
+      {view==='settle'&&<ScheduleSettlement me={me} onLogout={onLogout}
         onOpenActual={onOpenActual} showToast={showToast}/>}
 
       {!isSettle&&<div style={{marginTop:14,fontSize:11,color:'#6b7280',display:'flex',gap:14,flexWrap:'wrap'}}>
@@ -2495,69 +2650,10 @@ function PlacePicker({places,onPick,onClose,onChanged,showToast}){
   )
 }
 
-// 로그인 창 — 정산 화면에만 필요하다.
-// 계정·세션을 KPI 추적 시스템과 공유하므로, KPI 에서 이미 로그인했다면 이 창이 뜨지 않는다.
-function LoginDialog({onClose,onLoggedIn,showToast}){
-  const [id,setId]=useState('')
-  const [pw,setPw]=useState('')
-  const [busy,setBusy]=useState(false)
-  const [err,setErr]=useState('')
-  const inputS={padding:'9px 11px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,width:'100%'}
-
-  async function submit(){
-    if(!id.trim()||!pw){setErr('아이디와 비밀번호를 입력해 주세요.');return}
-    try{
-      setBusy(true); setErr('')
-      const me=await login(id.trim(),pw)
-      showToast(`${me.name} 님으로 로그인했습니다`)
-      onLoggedIn(me)
-    }catch(e){ setErr(e.message) }
-    finally{ setBusy(false) }
-  }
-
-  return(
-    <div onClick={onClose}
-      style={{position:'fixed',inset:0,background:'rgba(17,24,39,.5)',zIndex:9600,
-        display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'80px 16px',overflowY:'auto'}}>
-      <div onClick={e=>e.stopPropagation()}
-        style={{background:'#fff',borderRadius:12,width:'100%',maxWidth:380,padding:24,
-          maxHeight:'calc(100vh - 160px)',overflowY:'auto',
-          boxShadow:'0 20px 50px rgba(0,0,0,.3)'}}>
-        <strong style={{fontSize:16,display:'block',marginBottom:6}}>정산 화면 로그인</strong>
-        <div style={{fontSize:12,color:'#6b7280',marginBottom:16}}>
-          KPI 추적 시스템과 <strong>같은 계정</strong>을 씁니다 (회사 메일 주소).
-        </div>
-        <div style={{marginBottom:10}}>
-          <input value={id} onChange={e=>setId(e.target.value)} autoFocus
-            onKeyDown={e=>e.key==='Enter'&&submit()}
-            placeholder="회사 메일 주소" style={inputS}/>
-        </div>
-        <div style={{marginBottom:12}}>
-          <input type="password" value={pw} onChange={e=>setPw(e.target.value)}
-            onKeyDown={e=>e.key==='Enter'&&submit()}
-            placeholder="비밀번호" style={inputS}/>
-        </div>
-        {err&&<div style={{fontSize:12,color:'#b91c1c',marginBottom:12}}>{err}</div>}
-        <div style={{display:'flex',gap:8}}>
-          <button onClick={submit} disabled={busy}
-            style={{flex:1,padding:'11px',borderRadius:8,border:'none',background:'#1a56db',
-              color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
-            {busy?'확인 중…':'로그인'}
-          </button>
-          <button onClick={onClose} style={{padding:'11px 16px',borderRadius:8,
-            border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:14}}>취소</button>
-        </div>
-        <div style={{fontSize:11,color:'#9ca3af',marginTop:12}}>
-          달력과 계획 입력에는 로그인이 필요 없습니다. 금액이 보이는 정산 화면만 막습니다.
-        </div>
-      </div>
-    </div>
-  )
-}
 
 // 정산 화면 — 월별로 «직원이 회사에 낼 돈» 과 «회사가 직원에게 줄 것» 을 모아 본다.
 // 계산은 서버가 한다(현행 정산기준 문서를 그대로 따른다). 화면은 보여 주고 승인만 요청한다.
-function ScheduleSettlement({me,onNeedLogin,onLogout,onOpenActual,showToast}){
+function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
   const [ym,setYm]=useState(()=>{
     // 기본은 «지난달» — 익월 초에 정산하는 현행 규칙에 맞춘다
     const d=new Date(); d.setDate(1); d.setMonth(d.getMonth()-1)
@@ -2575,7 +2671,7 @@ function ScheduleSettlement({me,onNeedLogin,onLogout,onOpenActual,showToast}){
     setLoading(true)
     try{ setData(await getSettlement(target)) }
     catch(e){
-      if(e.status===401){ setData(null); onNeedLogin() }
+      if(e.status===401){ setData(null); showToast('로그인이 만료됐습니다. 화면을 새로 고쳐 주십시오.') }
       else showToast('정산 조회 실패: '+e.message)
     }
     finally{ setLoading(false) }
@@ -2599,20 +2695,13 @@ function ScheduleSettlement({me,onNeedLogin,onLogout,onOpenActual,showToast}){
     finally{ setBusy(false) }
   }
 
-  // 로그인 전
+  // 로그인 관문이 최상위로 올라간 뒤로 여기서 로그인을 다시 물을 일은 없다.
+  // 세션이 도중에 만료된 경우만 걸린다.
   if(!me){
     return(
       <Card title="정산">
-        <div style={{textAlign:'center',padding:'30px 10px'}}>
-          <div style={{fontSize:13,color:'#374151',marginBottom:6}}>
-            정산 화면은 <strong>로그인</strong>이 필요합니다.
-          </div>
-          <div style={{fontSize:12,color:'#6b7280',marginBottom:18}}>
-            금액과 개인 사용 내역이 보이기 때문입니다. 달력·계획 입력은 그대로 쓰실 수 있습니다.
-          </div>
-          <button onClick={onNeedLogin}
-            style={{padding:'10px 22px',borderRadius:8,border:'none',background:'#1a56db',
-              color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>로그인</button>
+        <div style={{textAlign:'center',padding:'30px 10px',fontSize:13,color:'#374151'}}>
+          로그인이 필요합니다. 화면을 새로 고쳐 주십시오.
         </div>
       </Card>
     )
@@ -2836,8 +2925,10 @@ function ScheduleSettlement({me,onNeedLogin,onLogout,onOpenActual,showToast}){
 // 월 정산의 근거가 된다(설계서 3장).
 //   plan     대상 계획 (plan.actual_id 가 있으면 이미 실적이 있는 것)
 //   actual   기존 실적 (없으면 새로 만든다)
-function ActualDialog({plan,actual,places,vehicles,onClose,onSaved,showToast}){
+function ActualDialog({plan,actual,places,vehicles,me,canEditOthers=false,onClose,onSaved,showToast}){
   const isNew=!actual
+  // 실적은 «계획의 주인» 것이다. 남의 것은 열어서 보기만 된다 (서버도 같은 기준).
+  const mine=canEditOthers||Number(plan.worker_id)===Number(me?.worker_id)
   // 계획 거리를 기본값으로 채운다. 왕복이면 2배가 실제 주행거리다.
   const planned=plan.est_distance_km!=null
     ?(plan.round_trip?plan.est_distance_km*2:plan.est_distance_km):null
@@ -2932,6 +3023,13 @@ function ActualDialog({plan,actual,places,vehicles,onClose,onSaved,showToast}){
             {plan.round_trip?' (왕복)':plan.one_way_dir?` (편도 · ${plan.one_way_dir})`:' (편도)'}</div>}
         </div>
 
+        {!mine&&(
+          <div style={{background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:8,padding:'8px 12px',
+            marginBottom:14,fontSize:12,color:'#475569'}}>
+            <strong>다른 분의 실적입니다</strong> — 내용만 보실 수 있습니다.
+          </div>
+        )}
+
         <div style={rowS}>
           <label style={labelS}>계획대로 되었습니까</label>
           <div style={{display:'flex',gap:8}}>
@@ -3015,18 +3113,22 @@ function ActualDialog({plan,actual,places,vehicles,onClose,onSaved,showToast}){
         </div>
 
         <div style={{display:'flex',gap:8,marginTop:16}}>
-          <button onClick={save} disabled={busy}
-            style={{flex:1,padding:'11px',borderRadius:8,border:'none',background:'#059669',
-              color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
-            {busy?'처리 중…':(isNew?'실적 기록':'수정 저장')}
-          </button>
-          {!isNew&&(
+          {mine&&(
+            <button onClick={save} disabled={busy}
+              style={{flex:1,padding:'11px',borderRadius:8,border:'none',background:'#059669',
+                color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
+              {busy?'처리 중…':(isNew?'실적 기록':'수정 저장')}
+            </button>
+          )}
+          {mine&&!isNew&&(
             <button onClick={remove} disabled={busy}
               style={{padding:'11px 16px',borderRadius:8,border:'1px solid #fca5a5',
                 background:'#fff',color:'#dc2626',cursor:'pointer',fontSize:14}}>삭제</button>
           )}
-          <button onClick={onClose} style={{padding:'11px 16px',borderRadius:8,
-            border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:14}}>취소</button>
+          <button onClick={onClose} style={{flex:mine?'none':1,padding:'11px 16px',borderRadius:8,
+            border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:14}}>
+            {mine?'취소':'닫기'}
+          </button>
         </div>
       </div>
     </div>
@@ -3040,13 +3142,21 @@ function ActualDialog({plan,actual,places,vehicles,onClose,onSaved,showToast}){
 // 새 계획은 날짜를 «여러 개» 고를 수 있다 — 같은 일정을 여러 날 넣는 일이 잦다.
 function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId,defaultVehicleId,
                      defaultTransport,defaultKind,workers,places,vehicles,
+                     me,canEditOthers=false,
                      onClose,onSaved,onCopy,onOpenActual,showToast}){
   const isNew=!editing
   const src=editing||copyFrom||null        // 값을 가져올 원본
   // 실적이 등록된 계획은 고칠 수 없다. 계획을 바꾸면 실적·정산 근거와 어긋난다.
   const locked=!!editing?.actual_id
-  const canEdit=isNew||!locked
-  const [workerId,setWorkerId]=useState(src?.worker_id||defaultWorkerId||workers[0]?.id||'')
+  // 2026-08-21 — 남의 일정은 열어서 «보기만» 된다. 관리자는 대신 고칠 수 있다.
+  // 서버도 같은 기준으로 막으므로 여기서 잠그는 것은 편의일 뿐이다.
+  const owner=src?.worker_id??defaultWorkerId??me?.worker_id
+  const mine=canEditOthers||Number(owner)===Number(me?.worker_id)
+  const canEdit=(isNew||!locked)&&mine
+  // 새 계획은 본인으로 시작한다. 예전에는 «명단의 첫 사람» 이라 남의 이름으로
+  // 등록되기 쉬웠다.
+  const [workerId,setWorkerId]=useState(
+    src?.worker_id||defaultWorkerId||me?.worker_id||workers[0]?.id||'')
   const [date,setDate]=useState(editing?.plan_date||defaultDate||today())
   // 새 계획에서 고른 날짜들. 수정 모드에서는 쓰지 않는다.
   const [dates,setDates]=useState(isNew?(defaultDate?[defaultDate]:[today()]):[])
@@ -3270,11 +3380,23 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
           </div>
         )}
 
+        {!mine&&(
+          <div style={{background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:8,padding:'8px 12px',
+            marginBottom:14,fontSize:12,color:'#475569'}}>
+            <strong>다른 분의 일정입니다</strong> — 내용만 보실 수 있습니다.
+            고쳐야 할 것이 있으면 본인이나 관리자에게 말씀해 주십시오.
+          </div>
+        )}
+
         <div style={rowS}>
           <label style={labelS}>이름</label>
-          <select value={workerId} onChange={e=>setWorkerId(e.target.value)} disabled={!canEdit} style={inputS}>
+          {/* 일반 사용자는 본인 것만 만들 수 있어 고를 것이 없다. 콤보를 그대로 두면
+              고를 수 있는 것처럼 보여 헷갈린다. */}
+          <select value={workerId} onChange={e=>setWorkerId(e.target.value)}
+            disabled={!canEdit||!canEditOthers} style={inputS}>
             <option value="">선택</option>
-            {workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
+            {(canEditOthers?workers:workers.filter(w=>Number(w.id)===Number(owner)))
+              .map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
           </select>
         </div>
 
@@ -3557,15 +3679,18 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
               </div>
             )}
             <div style={{display:'flex',gap:8,marginTop:8}}>
-              {/* 복사 — 달력에서 붙일 날짜를 골라 여러 날에 넣을 수 있다 */}
+              {/* 복사는 남의 일정에서도 된다 — 붙일 때 «내 이름» 으로 들어가기 때문이다.
+                  삭제는 주인(또는 관리자)만 할 수 있다. */}
               <button onClick={()=>{onCopy&&onCopy(editing);onClose()}} disabled={busy}
                 style={{flex:1,padding:'10px',borderRadius:8,border:'1px solid #1a56db',
                   background:'#eff6ff',color:'#1a56db',cursor:'pointer',fontSize:13,fontWeight:700}}>
                 복사 (다른 날짜에 붙이기)
               </button>
-              <button onClick={handleDelete} disabled={busy}
-                style={{padding:'10px 16px',borderRadius:8,border:'1px solid #fca5a5',
-                  background:'#fff',color:'#dc2626',cursor:'pointer',fontSize:13}}>삭제</button>
+              {mine&&(
+                <button onClick={handleDelete} disabled={busy}
+                  style={{padding:'10px 16px',borderRadius:8,border:'1px solid #fca5a5',
+                    background:'#fff',color:'#dc2626',cursor:'pointer',fontSize:13}}>삭제</button>
+              )}
               <button onClick={onClose} style={{padding:'10px 16px',borderRadius:8,
                 border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:13}}>닫기</button>
             </div>
