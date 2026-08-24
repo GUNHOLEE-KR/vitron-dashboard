@@ -98,10 +98,25 @@ window.__rectCard = title => {
     (n.innerText || '').trim().startsWith(title))
   if (!cards.length) return null
   const r = cards[0].getBoundingClientRect()
-  // ⚠ 좌표는 «문서» 기준으로 준다. 카드가 화면 아래로 넘어가 있으면 화면 기준 좌표로
-  //   잘라 봐야 아랫부분이 흰 여백으로 찍힌다 (captureBeyondViewport 와 함께 쓴다).
   return { x: r.x + scrollX - 6, y: r.y + scrollY - 6,
            width: r.width + 12, height: r.height + 12 }
+}
+// 지표 카드 «줄» 을 잘라 낸다. 카드 한 장을 감싼 상자는 폭이 0 이라(플렉스 래퍼)
+// 그것만으로는 못 자른다 — 형제 카드들의 상자를 «합쳐» 줄 전체를 만든다.
+window.__rectRow = label => {
+  const hit = [...document.querySelectorAll('div,span,p')]
+    .filter(n => (n.textContent || '').includes(label))
+    .sort((a, b) => a.textContent.length - b.textContent.length)[0]
+  if (!hit || !hit.parentElement || !hit.parentElement.parentElement) return null
+  const rs = [...hit.parentElement.parentElement.children]
+    .map(c => c.getBoundingClientRect()).filter(r => r.width > 0 && r.height > 0)
+  if (!rs.length) return null
+  const x1 = Math.min(...rs.map(r => r.left)), y1 = Math.min(...rs.map(r => r.top))
+  const x2 = Math.max(...rs.map(r => r.right)), y2 = Math.max(...rs.map(r => r.bottom))
+  // ⚠ 좌표는 «문서» 기준으로 준다. 화면 아래로 넘어가 있으면 화면 기준 좌표로
+  //   잘라 봐야 아랫부분이 흰 여백으로 찍힌다 (captureBeyondViewport 와 함께 쓴다).
+  return { x: x1 + scrollX - 6, y: y1 + scrollY - 6,
+           width: (x2 - x1) + 12, height: (y2 - y1) + 12 }
 }
 `
 
@@ -120,7 +135,7 @@ const SHOTS = [
   { file: '61_설정_집계제외.png', js: `__click('설정')`, wait: 2400, clipCard: '집계 제외' },
   // 야간·휴일 카드가 들어간 일간 지표 줄
   { file: '62_일간_지표_야간휴일.png', js: `__click('일간')`, wait: 2400,
-    clipText: { text: '야간·휴일', up: 3 } },
+    clipRow: '야간·휴일' },
 ]
 
 class CDP {
@@ -216,9 +231,17 @@ try {
           params.captureBeyondViewport = true   // 화면 아래로 넘어간 카드도 온전히 찍는다
         }
       }
+      if (s.clipRow) {
+        const r = await cdp.send('Runtime.evaluate', {
+          expression: `__rectRow(${JSON.stringify(s.clipRow)})`, returnByValue: true })
+        if (r.result.value) {
+          params.clip = { ...r.result.value, scale: 1 }
+          params.captureBeyondViewport = true
+        }
+      }
       // ⚠ 잘라 낼 상자를 못 찾으면 «0바이트 그림» 이나 엉뚱한 화면이 조용히 저장된다.
       //   조각을 노린 촬영인데 상자가 없으면 여기서 끊는다.
-      if ((s.clip || s.clipText || s.clipCard) && !params.clip) {
+      if ((s.clip || s.clipText || s.clipCard || s.clipRow) && !params.clip) {
         throw new Error(`${s.file}: 잘라 낼 상자를 찾지 못했습니다`)
       }
       const shot = await cdp.send('Page.captureScreenshot', params)
