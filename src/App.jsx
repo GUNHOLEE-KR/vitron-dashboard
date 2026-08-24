@@ -15,6 +15,18 @@ const WORK_HOURS=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
 // 정규 근무시간 (09:00 시작 ~ 18:00 종료 → 17:00 행까지 포함) — 입력표에서 노랗게 강조
 const BUSINESS_START_HOUR=9, BUSINESS_END_HOUR=17
 const isBusinessHour=h=>h>=BUSINESS_START_HOUR&&h<=BUSINESS_END_HOUR
+// 「야간·휴일」 — 정규 근무(평일 09~18) 밖에 적은 기록 (2026-08-24 요청).
+// 평일 이른 아침·늦은 밤 + 주말 전체가 여기 들어간다.
+// ⚠ 공휴일은 아직 못 센다 — 공휴일표가 없어 «평일» 판정이 요일뿐이다.
+//    표가 생기면 여기에 조건을 하나 더 붙인다(그때 가동일 계산도 함께 바뀐다).
+// 🔑 KPI 추적 시스템의 OFF_HOUR_ROW 와 «반드시» 같은 값이어야 한다 —
+//    다르면 두 화면이 같은 사람의 야간 시간을 다르게 말한다.
+const isOffHourRow=r=>{
+  const d=new Date(r.work_date+'T00:00:00').getDay()   // 0=일 6=토
+  if(d===0||d===6)return true
+  return !isBusinessHour(Number(r.work_hour))
+}
+const countOffHours=rows=>rows.filter(isOffHourRow).length
 const COLORS=['#3b82f6','#10b981','#f59e0b','#8b5cf6','#06b6d4','#ec4899','#84cc16','#f97316']
 // Jira 에 넣기 애매한 «끝이 없는» 반복 업무(주간회의 등)를 모아 두는 상위업무 이름.
 // 내부적으로는 수동 추가(MANUAL-…)와 같은 것이라 Jira 동기화가 지우지 않는다.
@@ -1519,6 +1531,7 @@ function TabDaily({history,workers,absences=[],viewDate,setViewDate,jiraTree}){
         {label:'활동 직원',value:Object.keys(agg).length,unit:'명',color:'#0d7a4e'},
         {label:'업무 종류',value:Object.keys(aggByWork(rows)).length,unit:'종',color:'#b45309'},
         {label:'1인 평균',value:avgHours(total,Object.keys(agg).length),unit:'h',color:'#6d28d9'}
+        ,{label:'야간·휴일',value:countOffHours(rows),unit:'h',color:'#b91c1c'}
       ]}/>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <Card title="직원별 업무량 · 단위: 시간(h)" style={{flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
@@ -1594,6 +1607,7 @@ function TabWeekly({history,workers,absences=[],viewDate,setViewDate,jiraTree}){
         {label:'근무일수',value:days.length,unit:'일',color:'#0d7a4e'},
         {label:'일평균',value:avgHours(total,days.length),unit:'h',color:'#b45309'},
         {label:'1인 합계',value:avgHours(total,wNames.length),unit:'h',color:'#6d28d9'}
+        ,{label:'야간·휴일',value:countOffHours(rows),unit:'h',color:'#b91c1c'}
       ]}/>
       <Card title="일별 분포 (누적 영역) · 단위: 시간(h)">
         <ResponsiveContainer width="100%" height={260}>
@@ -1662,6 +1676,7 @@ function TabMonthly({history,workers,absences=[],viewMonth,setViewMonth,jiraTree
         {label:'근무일수',value:days.length,unit:'일',color:'#0d7a4e'},
         {label:'업무 종류',value:Object.keys(aggByWork(rows)).length,unit:'종',color:'#b45309'},
         {label:'1인 총 업무',value:avgHours(total,wNames.length),unit:'h',color:'#6d28d9'}
+        ,{label:'야간·휴일',value:countOffHours(rows),unit:'h',color:'#b91c1c'}
       ]}/>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <Card title="주차별 분포 (누적 영역) · 단위: 시간(h)" style={{flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
@@ -1727,6 +1742,7 @@ function TabYearly({history,workers,absences=[],viewYear,setViewYear,jiraTree}){
         {label:'연간 근무일',value:days.length,unit:'일',color:'#0d7a4e'},
         {label:'업무 종류',value:Object.keys(aggByWork(rows)).length,unit:'종',color:'#b45309'},
         {label:'1인 연간 합계',value:avgHours(total,wNames.length),unit:'h',color:'#6d28d9'}
+        ,{label:'야간·휴일',value:countOffHours(rows),unit:'h',color:'#b91c1c'}
       ]}/>
       <Card title="월별 업무량 추이 · 단위: 시간(h)">
         <ResponsiveContainer width="100%" height={260}>
