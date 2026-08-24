@@ -1433,6 +1433,138 @@ app.post('/api/schedule/settlement/:ym/reopen', requireLogin, async (req, res) =
   }
 })
 
+// ─── 공휴일 ──────────────────────────────────────────────────
+// 「어느 날이 휴일인가」를 알아야 ①휴일 근무 시간을 세고 ②가동일에서 뺄 수 있다.
+//
+// 출처 = Google 「대한민국의 휴일」 iCal. 인증 키가 필요 없고 사내에서 그대로 열린다.
+// 🔑 대체공휴일·임시공휴일이 지정되면 이 피드에 반영된다 — 그래서 해마다 손으로
+//    넣는 방식보다 낫다. 다만 «갑자기» 생기므로 월 1회로는 늦어 «하루 1회» 돈다.
+//
+// 🔑 DESCRIPTION 이 「공휴일」 / 「기념일」 로 갈린다. 이것으로 걸러야 한다 —
+//    식목일·어버이날·스승의날은 기념일이라 쉬는 날이 아니다. 그대로 받으면
+//    가동일이 잘못 줄어든다.
+const HOLIDAY_ICS = 'https://calendar.google.com/calendar/ical/'
+  + 'ko.south_korea%23holiday%40group.v.calendar.google.com/public/basic.ics'
+const HOLIDAY_SYNC_MS = 24 * 60 * 60 * 1000
+
+// iCal 한 덩어리에서 «공휴일» 만 뽑는다. 라이브러리를 쓰지 않는다 —
+// 필요한 것이 DTSTART·SUMMARY·DESCRIPTION 셋뿐이라 의존성을 더할 이유가 없다.
+function parseHolidayIcs(text) {
+  const out = []
+  for (const block of String(text).split('BEGIN:VEVENT').slice(1)) {
+    const date = (block.match(/DTSTART;VALUE=DATE:(\d{4})(\d{2})(\d{2})/) || [])
+    const summary = (block.match(/SUMMARY:([^\r\n]+)/) || [])[1]
+    const desc = (block.match(/DESCRIPTION:([^\r\n]+)/) || [])[1] || ''
+    if (!date.length || !summary) continue
+    // 「기념일」 은 쉬는 날이 아니다
+    if (!desc.startsWith('공휴일')) continue
+    out.push({ date: `${date[1]}-${date[2]}-${date[3]}`, name: summary.trim() })
+  }
+  return out
+}
+
+async function syncHolidays() {
+  const res = await fetch(HOLIDAY_ICS, { signal: AbortSignal.timeout(20000) })
+  if (!res.ok) throw new Error(`공휴일 달력을 받지 못했습니다 (HTTP ${res.status})`)
+  const list = parseHolidayIcs(await res.text())
+  if (list.length === 0) {
+    // 조회 0건이면 기존 목록을 지우지 않고 멈춘다 — Jira 동기화와 같은 안전장치.
+    // 피드 형식이 바뀌었을 때 공휴일이 통째로 사라지는 것을 막는다.
+    throw new Error('공휴일이 0건으로 왔습니다. 형식이 바뀐 것 같아 기존 목록을 그대로 둡니다.')
+  }
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    // 🔑 손으로 넣은 것(manual)은 건드리지 않는다. 덮으면 다음날 아침에 사라진다.
+    for (const h of list) {
+      await client.query(
+        `INSERT INTO holidays (holiday_date, name, source, synced_at)
+         VALUES ($1, $2, 'auto', now())
+         ON CONFLICT (holiday_date) DO UPDATE
+           SET name = EXCLUDED.name, synced_at = now(), updated_at = now()
+         WHERE holidays.source = 'auto'`,
+        [h.date, h.name]
+      )
+    }
+    // 피드에서 빠진 날(취소된 임시공휴일 등)은 auto 만 지운다
+    const dates = list.map(h => h.date)
+    const { rowCount: removed } = await client.query(
+      `DELETE FROM holidays
+        WHERE source = 'auto'
+          AND holiday_date >= (SELECT min(holiday_date) FROM holidays WHERE source='auto')
+          AND NOT (holiday_date = ANY($1::date[]))`,
+      [dates]
+    )
+    await client.query('COMMIT')
+    console.log(`[${new Date().toISOString()}] 공휴일 동기화: ${list.length}건 반영, ${removed}건 삭제`)
+    return { synced: list.length, removed }
+  } catch (e) {
+    await client.query('ROLLBACK')
+    throw e
+  } finally {
+    client.release()
+  }
+}
+
+app.get('/api/holidays', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT to_char(holiday_date, 'YYYY-MM-DD') AS date, name, source, is_working, note,
+              to_char(synced_at, 'YYYY-MM-DD HH24:MI') AS synced_at
+         FROM holidays ORDER BY holiday_date ASC`)
+    res.json(rows)
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
+
+app.post('/api/holidays/sync', async (req, res) => {
+  try { res.json(await syncHolidays()) }
+  catch (e) { res.status(500).json({ error: e.message }) }
+})
+
+app.post('/api/holidays', async (req, res) => {
+  const { date, name, note } = req.body || {}
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) {
+    return res.status(400).json({ error: '날짜를 YYYY-MM-DD 로 넣어 주세요.' })
+  }
+  if (!String(name || '').trim()) return res.status(400).json({ error: '이름을 넣어 주세요.' })
+  try {
+    await pool.query(
+      `INSERT INTO holidays (holiday_date, name, source, note)
+       VALUES ($1, $2, 'manual', $3)
+       ON CONFLICT (holiday_date) DO UPDATE
+         SET name = EXCLUDED.name, source = 'manual', note = EXCLUDED.note, updated_at = now()`,
+      [date, String(name).trim(), note || null])
+    res.json({ ok: true })
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
+
+// 「공휴일이지만 우리는 근무」 — 지우지 않고 되돌린다.
+// 지우면 다음 동기화가 다시 넣기 때문이다.
+app.patch('/api/holidays/:date', async (req, res) => {
+  try {
+    const { rowCount } = await pool.query(
+      'UPDATE holidays SET is_working = $1, updated_at = now() WHERE holiday_date = $2',
+      [!!req.body?.is_working, req.params.date])
+    if (!rowCount) return res.status(404).json({ error: '그 날짜가 목록에 없습니다.' })
+    res.json({ ok: true })
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
+
+app.delete('/api/holidays/:date', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT source FROM holidays WHERE holiday_date = $1', [req.params.date])
+    if (!rows.length) return res.status(404).json({ error: '그 날짜가 목록에 없습니다.' })
+    if (rows[0].source === 'auto') {
+      return res.status(409).json({
+        error: '자동으로 받아 온 공휴일은 지워도 다음 동기화에 다시 들어옵니다. '
+             + '「그날 근무」로 표시해 주세요.' })
+    }
+    await pool.query('DELETE FROM holidays WHERE holiday_date = $1', [req.params.date])
+    res.json({ ok: true })
+  } catch (e) { res.status(500).json({ error: e.message }) }
+})
+
 // ─── 헬스체크 ────────────────────────────────────────────────
 
 app.get('/api/health', async (req, res) => {
@@ -1445,4 +1577,12 @@ app.get('/api/health', async (req, res) => {
 })
 
 const PORT = process.env.PORT || 3001
-app.listen(PORT, () => console.log(`API server running on port ${PORT}`))
+app.listen(PORT, () => {
+  console.log(`API server running on port ${PORT}`)
+  // 공휴일 동기화 — 기동할 때 한 번, 그 뒤 하루 1회.
+  // ⚠ 실패해도 서버를 멈추지 않는다. 사내망이 밖으로 못 나가는 상황이 있을 수 있고,
+  //   그때 대시보드 전체가 죽으면 훨씬 큰 문제다. 기존 목록으로 그냥 돈다.
+  const run = () => syncHolidays().catch(e => console.warn('공휴일 동기화 실패:', e.message))
+  run()
+  setInterval(run, HOLIDAY_SYNC_MS)
+})

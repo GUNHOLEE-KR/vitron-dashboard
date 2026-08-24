@@ -10,6 +10,8 @@ import { getPlaces, addPlace, updatePlace, hidePlace, getVehicles, addVehicle, u
          getPlans, addPlan, updatePlan, removePlan, getActuals, addActual, updateActual,
          removeActual, login, logout, whoAmI, getSettlement, approveSettlement,
          reopenSettlement } from './repositories/scheduleRepo'
+import { getHolidays, syncHolidays, addHoliday, setHolidayWorking, removeHoliday,
+         restDaySet } from './repositories/holidayRepo'
 
 const WORK_HOURS=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
 // 정규 근무시간 (09:00 시작 ~ 18:00 종료 → 17:00 행까지 포함) — 입력표에서 노랗게 강조
@@ -21,12 +23,14 @@ const isBusinessHour=h=>h>=BUSINESS_START_HOUR&&h<=BUSINESS_END_HOUR
 //    표가 생기면 여기에 조건을 하나 더 붙인다(그때 가동일 계산도 함께 바뀐다).
 // 🔑 KPI 추적 시스템의 OFF_HOUR_ROW 와 «반드시» 같은 값이어야 한다 —
 //    다르면 두 화면이 같은 사람의 야간 시간을 다르게 말한다.
-const isOffHourRow=r=>{
+// holidaySet = 실제로 쉬는 날의 'YYYY-MM-DD' 모음 (「그날 근무」로 표시한 날은 빠져 있다)
+const isOffHourRow=(r,holidaySet)=>{
   const d=new Date(r.work_date+'T00:00:00').getDay()   // 0=일 6=토
   if(d===0||d===6)return true
+  if(holidaySet&&holidaySet.has(r.work_date))return true
   return !isBusinessHour(Number(r.work_hour))
 }
-const countOffHours=rows=>rows.filter(isOffHourRow).length
+const countOffHours=(rows,holidaySet)=>rows.filter(r=>isOffHourRow(r,holidaySet)).length
 const COLORS=['#3b82f6','#10b981','#f59e0b','#8b5cf6','#06b6d4','#ec4899','#84cc16','#f97316']
 // Jira 에 넣기 애매한 «끝이 없는» 반복 업무(주간회의 등)를 모아 두는 상위업무 이름.
 // 내부적으로는 수동 추가(MANUAL-…)와 같은 것이라 Jira 동기화가 지우지 않는다.
@@ -330,14 +334,17 @@ function workersAvailable(workers, absences, from, to) {
   return workersForPeriod(workers, from, to).filter(w => activeDays(w, absences, from, to) > 0)
 }
 
-function activeDays(worker, absences, from, to) {
+// holidaySet 을 주면 공휴일도 뺀다 (2026-08-24 — 공휴일표가 생겼다).
+// 안 주면 종전처럼 주말만 뺀다 — 공휴일을 못 받아 온 상황에서도 화면이 돌아가야 한다.
+function activeDays(worker, absences, from, to, holidaySet) {
   let n = 0
   const cur = new Date(from + 'T00:00:00'), end = new Date(to + 'T00:00:00')
   while (cur <= end) {
     const d = ymd(cur), dow = cur.getDay()
     const inService = (!worker.hired_at || worker.hired_at <= d) &&
                       (!worker.resigned_at || worker.resigned_at >= d)
-    if (dow !== 0 && dow !== 6 && inService && !isAbsentOn(absences, worker.id, d)) n++
+    const holiday = holidaySet ? holidaySet.has(d) : false
+    if (dow !== 0 && dow !== 6 && !holiday && inService && !isAbsentOn(absences, worker.id, d)) n++
     cur.setDate(cur.getDate() + 1)
   }
   return n
@@ -1024,6 +1031,8 @@ function Dashboard({me,onLoggedOut}){
   const [workers,setWorkers]=useState([])
   const [history,setHistory]=useState([])
   const [absences,setAbsences]=useState([])   // 장기출장·휴직·파견 기간
+  // 공휴일 — 서버가 하루 1회 외부 달력에서 받아 둔 것. 야간·휴일 판정과 가동일이 함께 쓴다.
+  const [holidays,setHolidays]=useState([])
   const [jiraTree,setJiraTree]=useState({})
   const [jiraDone,setJiraDone]=useState(()=>new Set())   // 종료된 업무 (고르는 목록에서만 감춘다)
   const [grid,setGrid]=useState({})
@@ -1073,6 +1082,8 @@ function Dashboard({me,onLoggedOut}){
   // 분석 탭에는 부재 기간 기록을 뺀 목록을 넘긴다. 입력 탭은 원본을 그대로 써야
   // 사용자가 적어 둔 값이 화면에서 사라지지 않는다.
   const historyForStats=excludeAbsentRows(history,absences)
+  // 실제로 쉬는 날만 (「그날 근무」로 표시한 날은 빠진다)
+  const restDays=useMemo(()=>restDaySet(holidays),[holidays])
 
   function showToast(msg, duration=2500){
     if(toastTimerRef.current) clearTimeout(toastTimerRef.current)
@@ -1081,10 +1092,11 @@ function Dashboard({me,onLoggedOut}){
   }
 
   useEffect(()=>{
-    Promise.all([getWorkers(),getHistory(),getJiraTree(),getAbsences().catch(()=>[])])
-      .then(([w,h,j,ab])=>{
+    Promise.all([getWorkers(),getHistory(),getJiraTree(),getAbsences().catch(()=>[]),
+                 getHolidays().catch(()=>[])])
+      .then(([w,h,j,ab,hd])=>{
         setWorkers(w);setHistory(withDisplayNames(h,w))
-        setJiraTree(j.tree);setJiraDone(j.done);setAbsences(ab||[])
+        setJiraTree(j.tree);setJiraDone(j.done);setAbsences(ab||[]);setHolidays(hd||[])
         const tr=h.filter(r=>r.work_date===today())
         const g={}; tr.forEach(r=>{g[cellKey(r.work_hour,r.worker_id)]=r.work_text})
         setGrid(g); setParentSel(buildParentSel(tr,j.tree))
@@ -1245,10 +1257,10 @@ function Dashboard({me,onLoggedOut}){
           jiraTree={jiraTree} jiraDone={jiraDone} selWorkerId={selWorkerId} setSelWorkerId={setSelWorkerId}
           onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}
           history={historyForStats} me={me} canEditOthers={canEditOthers}/>}
-        {tab==='daily'   &&<TabDaily   history={historyForStats} workers={workersLabeled} absences={absences} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
-        {tab==='weekly'  &&<TabWeekly  history={historyForStats} workers={workersLabeled} absences={absences} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
-        {tab==='monthly' &&<TabMonthly history={historyForStats} workers={workersLabeled} absences={absences} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
-        {tab==='yearly'  &&<TabYearly  history={historyForStats} workers={workersLabeled} absences={absences} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
+        {tab==='daily'   &&<TabDaily   history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
+        {tab==='weekly'  &&<TabWeekly  history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
+        {tab==='monthly' &&<TabMonthly history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
+        {tab==='yearly'  &&<TabYearly  history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
         {tab==='schedule'&&<TabSchedule workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
           places={places} vehicles={vehicles} plans={plans} loading={schedLoading}
           onReload={loadSchedule} showToast={showToast} focusDate={schedFocus}
@@ -1260,6 +1272,7 @@ function Dashboard({me,onLoggedOut}){
           me={me} mayEdit={mayEdit} onLogout={handleLogout}
           clipboard={clipboard} onPaste={handlePaste} onCancelCopy={()=>setClipboard(null)}/>}
         {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers} dupNames={dupNames}
+          holidays={holidays} setHolidays={setHolidays}
           jiraTree={jiraTree} jiraDone={jiraDone} reloadJira={reloadJira} showToast={showToast} tokenStatus={tokenStatus}
           vehicles={vehicles} onVehiclesChanged={loadSchedule}
           absences={absences} setAbsences={setAbsences}/>}
@@ -1513,7 +1526,7 @@ function SectionTitle({children}){
 }
 
 // ── 일간 탭 ───────────────────────────────────────────────
-function TabDaily({history,workers,absences=[],viewDate,setViewDate,jiraTree}){
+function TabDaily({history,workers,absences=[],restDays,viewDate,setViewDate,jiraTree}){
   const rows=history.filter(r=>r.work_date===viewDate)
   const periodWorkers=workersAvailable(workers,absences,viewDate,viewDate)
   const agg=aggByWorker(rows),total=rows.length
@@ -1531,7 +1544,7 @@ function TabDaily({history,workers,absences=[],viewDate,setViewDate,jiraTree}){
         {label:'활동 직원',value:Object.keys(agg).length,unit:'명',color:'#0d7a4e'},
         {label:'업무 종류',value:Object.keys(aggByWork(rows)).length,unit:'종',color:'#b45309'},
         {label:'1인 평균',value:avgHours(total,Object.keys(agg).length),unit:'h',color:'#6d28d9'}
-        ,{label:'야간·휴일',value:countOffHours(rows),unit:'h',color:'#b91c1c'}
+        ,{label:'야간·휴일',value:countOffHours(rows,restDays),unit:'h',color:'#b91c1c'}
       ]}/>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <Card title="직원별 업무량 · 단위: 시간(h)" style={{flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
@@ -1561,7 +1574,7 @@ function TabDaily({history,workers,absences=[],viewDate,setViewDate,jiraTree}){
 }
 
 // ── 주간 탭 ───────────────────────────────────────────────
-function TabWeekly({history,workers,absences=[],viewDate,setViewDate,jiraTree}){
+function TabWeekly({history,workers,absences=[],restDays,viewDate,setViewDate,jiraTree}){
   const ym=toMonth(viewDate),wk=weekNum(viewDate)
   const wS=weekStart(viewDate),wE=weekEnd(viewDate)
   const rows=history.filter(r=>toMonth(r.work_date)===ym&&weekNum(r.work_date)===wk)
@@ -1607,7 +1620,7 @@ function TabWeekly({history,workers,absences=[],viewDate,setViewDate,jiraTree}){
         {label:'근무일수',value:days.length,unit:'일',color:'#0d7a4e'},
         {label:'일평균',value:avgHours(total,days.length),unit:'h',color:'#b45309'},
         {label:'1인 합계',value:avgHours(total,wNames.length),unit:'h',color:'#6d28d9'}
-        ,{label:'야간·휴일',value:countOffHours(rows),unit:'h',color:'#b91c1c'}
+        ,{label:'야간·휴일',value:countOffHours(rows,restDays),unit:'h',color:'#b91c1c'}
       ]}/>
       <Card title="일별 분포 (누적 영역) · 단위: 시간(h)">
         <ResponsiveContainer width="100%" height={260}>
@@ -1639,7 +1652,7 @@ function TabWeekly({history,workers,absences=[],viewDate,setViewDate,jiraTree}){
 }
 
 // ── 월간 탭 ───────────────────────────────────────────────
-function TabMonthly({history,workers,absences=[],viewMonth,setViewMonth,jiraTree}){
+function TabMonthly({history,workers,absences=[],restDays,viewMonth,setViewMonth,jiraTree}){
   const mS=viewMonth+'-01',mE=monthEnd(viewMonth)
   const rows=history.filter(r=>toMonth(r.work_date)===viewMonth)
   const periodWorkers=workersAvailable(workers,absences,mS,mE)
@@ -1676,7 +1689,7 @@ function TabMonthly({history,workers,absences=[],viewMonth,setViewMonth,jiraTree
         {label:'근무일수',value:days.length,unit:'일',color:'#0d7a4e'},
         {label:'업무 종류',value:Object.keys(aggByWork(rows)).length,unit:'종',color:'#b45309'},
         {label:'1인 총 업무',value:avgHours(total,wNames.length),unit:'h',color:'#6d28d9'}
-        ,{label:'야간·휴일',value:countOffHours(rows),unit:'h',color:'#b91c1c'}
+        ,{label:'야간·휴일',value:countOffHours(rows,restDays),unit:'h',color:'#b91c1c'}
       ]}/>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <Card title="주차별 분포 (누적 영역) · 단위: 시간(h)" style={{flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
@@ -1717,7 +1730,7 @@ function TabMonthly({history,workers,absences=[],viewMonth,setViewMonth,jiraTree
 }
 
 // ── 연간 탭 ───────────────────────────────────────────────
-function TabYearly({history,workers,absences=[],viewYear,setViewYear,jiraTree}){
+function TabYearly({history,workers,absences=[],restDays,viewYear,setViewYear,jiraTree}){
   const yS=viewYear+'-01-01',yE=viewYear+'-12-31'
   const rows=history.filter(r=>toYear(r.work_date)===viewYear)
   const periodWorkers=workersAvailable(workers,absences,yS,yE)
@@ -1742,7 +1755,7 @@ function TabYearly({history,workers,absences=[],viewYear,setViewYear,jiraTree}){
         {label:'연간 근무일',value:days.length,unit:'일',color:'#0d7a4e'},
         {label:'업무 종류',value:Object.keys(aggByWork(rows)).length,unit:'종',color:'#b45309'},
         {label:'1인 연간 합계',value:avgHours(total,wNames.length),unit:'h',color:'#6d28d9'}
-        ,{label:'야간·휴일',value:countOffHours(rows),unit:'h',color:'#b91c1c'}
+        ,{label:'야간·휴일',value:countOffHours(rows,restDays),unit:'h',color:'#b91c1c'}
       ]}/>
       <Card title="월별 업무량 추이 · 단위: 시간(h)">
         <ResponsiveContainer width="100%" height={260}>
@@ -3910,6 +3923,124 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
 // ── 설정 탭 ───────────────────────────────────────────────
 // 직원 수정·삭제는 모두 id 로 대상을 지정한다 (동명이인 구분).
 // editingWorkerId / resigningWorkerId 도 이름이 아니라 id 를 담는다.
+// ── 공휴일 관리 ──────────────────────────────────────────────
+// 서버가 하루 1회 외부 달력(Google 「대한민국의 휴일」)에서 받아 둔다.
+// 🔑 자동으로 받아 온 것(auto)과 손으로 넣은 것(manual)을 구분해 보여 준다 —
+//    구분이 없으면 「이걸 지워도 되나」를 사람이 알 수 없다.
+function HolidayManager({holidays,setHolidays,showToast}){
+  const [date,setDate]=useState(today())
+  const [name,setName]=useState('')
+  const [busy,setBusy]=useState(false)
+  const [openPast,setOpenPast]=useState(false)
+
+  const td=today()
+  const shown=openPast?holidays:holidays.filter(h=>h.date>=td.slice(0,4)+'-01-01')
+  const rest=holidays.filter(h=>!h.is_working).length
+
+  async function reload(){ setHolidays(await getHolidays()) }
+
+  async function handleSync(){
+    setBusy(true)
+    try{
+      const r=await syncHolidays()
+      await reload()
+      showToast(`동기화 완료 — ${r.synced}건 반영${r.removed?`, ${r.removed}건 삭제`:''}`,4000)
+    }catch(e){showToast('동기화 실패: '+e.message,5000)}
+    finally{setBusy(false)}
+  }
+  async function handleAdd(){
+    if(!name.trim()){showToast('이름을 넣어 주세요');return}
+    setBusy(true)
+    try{ await addHoliday(date,name.trim()); await reload(); setName(''); showToast('등록 완료 — 가동일에서 빠집니다') }
+    catch(e){showToast('등록 실패: '+e.message,4000)}
+    finally{setBusy(false)}
+  }
+  async function handleToggle(h){
+    const next=!h.is_working
+    if(next&&!confirm(`${h.date} ${h.name} — 그날 «근무했다» 로 둘까요?\n가동일에 다시 들어가고 휴일 근무로 세지 않습니다.`))return
+    try{ await setHolidayWorking(h.date,next); await reload() }
+    catch(e){showToast('실패: '+e.message,4000)}
+  }
+  async function handleDel(h){
+    if(!confirm(`${h.date} ${h.name} 을 목록에서 지울까요?`))return
+    try{ await removeHoliday(h.date); await reload(); showToast('삭제 완료') }
+    catch(e){showToast(e.message,5000)}
+  }
+
+  // 이 파일은 컴포넌트마다 입력 서식을 따로 둔다 (전역 하나로 두지 않는 것이 기존 방식)
+  const inputS={padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}
+  const thS={background:'#f9fafb',padding:'5px 8px',fontSize:11,fontWeight:700,color:'#6b7280',
+    border:'1px solid #e5e7eb',whiteSpace:'nowrap'}
+  const tdS2={padding:'4px 8px',fontSize:11,border:'1px solid #e5e7eb'}
+
+  return(
+    <Card title={`공휴일 — 쉬는 날 ${rest}일`} style={{flex:1,minWidth:340}}>
+      <p style={{fontSize:11,color:'#6b7280',margin:'0 0 10px',lineHeight:1.7}}>
+        <b>하루 한 번 자동으로</b> 받아 옵니다 (대체공휴일·임시공휴일 포함).
+        여기 있는 날은 <b>가동일에서 빠지고</b>, 그날 적은 기록은 <b>휴일 근무</b>로 셉니다.
+        <br />회사 자체 휴무는 <b>직접 추가</b>하십시오. 공휴일인데 근무했다면 <b>「근무」로 돌리십시오</b> —
+        지우면 다음 동기화에 다시 들어옵니다.
+      </p>
+      <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:10}}>
+        <input type="date" value={date} onChange={e=>setDate(e.target.value)} style={{...inputS,minWidth:130}}/>
+        <input value={name} onChange={e=>setName(e.target.value)} placeholder="이름 (예: 창립기념일)"
+          style={{...inputS,flex:1,minWidth:130}}/>
+        <button onClick={handleAdd} disabled={busy}
+          style={{padding:'6px 12px',borderRadius:7,border:'none',background:'#0d7a4e',color:'#fff',
+            cursor:busy?'default':'pointer',fontSize:12,fontWeight:700}}>추가</button>
+        <button onClick={handleSync} disabled={busy}
+          style={{padding:'6px 12px',borderRadius:7,border:'1px solid #e5e7eb',background:'#fff',
+            cursor:busy?'default':'pointer',fontSize:12}}>{busy?'…':'지금 동기화'}</button>
+      </div>
+      <div style={{maxHeight:260,overflowY:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse'}}>
+          <thead><tr>{['날짜','이름','출처','근무'].map(h=><th key={h} style={thS}>{h}</th>)}</tr></thead>
+          <tbody>
+            {shown.map(h=>(
+              <tr key={h.date} style={{background:h.is_working?'#f9fafb':undefined}}>
+                <td style={{...tdS2,whiteSpace:'nowrap',
+                  textDecoration:h.is_working?'line-through':undefined}}>{h.date}</td>
+                <td style={tdS2}>{h.name}</td>
+                <td style={{...tdS2,whiteSpace:'nowrap'}}>
+                  <span style={{padding:'1px 6px',borderRadius:8,fontSize:10,fontWeight:700,
+                    color:h.source==='manual'?'#7e22ce':'#0369a1',
+                    background:h.source==='manual'?'#f3e8ff':'#e0f2fe'}}>
+                    {h.source==='manual'?'직접':'자동'}
+                  </span>
+                </td>
+                <td style={{...tdS2,whiteSpace:'nowrap'}}>
+                  <button onClick={()=>handleToggle(h)}
+                    style={{padding:'2px 8px',borderRadius:5,fontSize:10,cursor:'pointer',
+                      border:'1px solid '+(h.is_working?'#fca5a5':'#e5e7eb'),
+                      background:h.is_working?'#fef2f2':'#fff',
+                      color:h.is_working?'#b91c1c':'#6b7280'}}>
+                    {h.is_working?'근무함':'휴무'}
+                  </button>
+                  {h.source==='manual'&&(
+                    <button onClick={()=>handleDel(h)}
+                      style={{marginLeft:4,padding:'2px 6px',borderRadius:5,fontSize:10,cursor:'pointer',
+                        border:'1px solid #fca5a5',background:'#fff',color:'#dc2626'}}>삭제</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {!shown.length&&(
+              <tr><td colSpan={4} style={{...tdS2,color:'#9ca3af',padding:16,textAlign:'center'}}>
+                아직 받아 온 공휴일이 없습니다. 「지금 동기화」를 눌러 주십시오.
+              </td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <button onClick={()=>setOpenPast(o=>!o)}
+        style={{marginTop:8,padding:'4px 10px',borderRadius:6,border:'1px solid #e5e7eb',
+          background:'#fff',cursor:'pointer',fontSize:11,color:'#6b7280'}}>
+        {openPast?'올해부터만 보기':`지난 해까지 전부 보기 (${holidays.length}건)`}
+      </button>
+    </Card>
+  )
+}
+
 // ── 장기 부재 관리 (장기출장·휴직·파견) ──────────────────────
 // 등록해 두면 그 기간은 «가동일»에서 빠지고, 그 기간에 남은 기록도 집계에 넣지 않는다.
 // 사람을 지우는 것이 아니라 «그 기간만» 빼는 것이라 과거 통계는 그대로 남는다.
@@ -4004,7 +4135,7 @@ function AbsenceManager({absences,setAbsences,workers,dupNames,showToast}){
   )
 }
 
-function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,jiraDone=new Set(),reloadJira,showToast,
+function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolidays,jiraTree,jiraDone=new Set(),reloadJira,showToast,
                       tokenStatus={configured:false},vehicles=[],onVehiclesChanged,
                       absences=[],setAbsences=()=>{}}){
   const [newWorker,setNewWorker]=useState('')
@@ -4131,6 +4262,7 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),jiraTree,jiraDone=ne
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <AbsenceManager absences={absences} setAbsences={setAbsences} workers={workers}
           dupNames={dupNames} showToast={showToast}/>
+        <HolidayManager holidays={holidays} setHolidays={setHolidays} showToast={showToast}/>
       </div>
       <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
         <Card title="직원 관리" style={{flex:1,minWidth:300}}>
