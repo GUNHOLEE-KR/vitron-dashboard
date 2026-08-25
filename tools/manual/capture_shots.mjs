@@ -139,6 +139,25 @@ const SHOTS = [
   // 2026-08-25 신설 — 차량 예약 알림 메일 카드 ([설정] 탭)
   { file: '63_설정_메일알림.png', js: `__click('설정')`, wait: 2400,
     clipCard: '차량 예약 알림 메일' },
+  // 2026-08-25 2차 — 색 · 주 사용자 · 연료 · 단가 · 업무 달력 · 휴일 표시
+  { file: '64_설정_차량관리.png', js: `__click('설정')`, wait: 2400, clipCard: '차량 관리' },
+  // 정산 화면의 「차량 단가 · 연비」 — 스케줄 탭 → 정산 → 8월로 옮긴 뒤 찍는다
+  { file: '65_정산_단가연비.png', wait: 3000,
+    js: `(()=>{__click('스케줄');
+      setTimeout(()=>{const b=[...document.querySelectorAll('button')].find(x=>/정산/.test(x.textContent));
+        if(b)b.click();
+        setTimeout(()=>{const s=document.querySelector('select');
+          if(s){const set=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set;
+            set.call(s,'2026-08'); s.dispatchEvent(new Event('change',{bubbles:true}))}},600)},400)})()`,
+    clipCard: '차량 단가 · 연비' },
+  // 업무 달력 — 주 보기(기본)와 월 보기
+  { file: '66_일간_업무달력_주.png', js: `__click('일간')`, wait: 2600,
+    clipCard: '업무 달력' },
+  { file: '67_일간_업무달력_월.png', wait: 2800,
+    js: `(()=>{__click('일간');
+      setTimeout(()=>{const bs=[...document.querySelectorAll('button')].filter(x=>x.textContent.trim()==='월');
+        if(bs.length)bs[bs.length-1].click()},700)})()`,
+    clipCard: '업무 달력' },
 ]
 
 class CDP {
