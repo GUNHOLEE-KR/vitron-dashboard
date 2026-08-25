@@ -33,6 +33,21 @@ export async function updateWorkerEmail(id, email) {
   }
 }
 
+// 달력·차트에서 이 사람을 나타내는 색. 빈 문자열을 보내면 «자동 배정» 으로 되돌아간다.
+export async function updateWorkerColor(id, color) {
+  const res = await fetch(`${BASE}/workers/${id}/color`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ color })
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    let message = text
+    try { message = JSON.parse(text).error || text } catch { /* JSON 이 아니면 원문을 쓴다 */ }
+    throw new Error(message)
+  }
+}
+
 // 아래 세 함수는 이름이 아니라 id 로 대상을 지정한다.
 // 동명이인이 있으면 이름으로는 누구를 고칠지 특정할 수 없다.
 export async function setWorkerStatus(id, active, resignedAt = null) {

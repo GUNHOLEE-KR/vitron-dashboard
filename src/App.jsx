@@ -2,7 +2,8 @@ import { useState, useEffect, useRef, useMemo } from 'react'
 import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, LabelList, Treemap,
          RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
          ComposedChart, XAxis, YAxis, Tooltip, Legend, ReferenceLine, ResponsiveContainer } from 'recharts'
-import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates, updateWorkerEmail } from './repositories/workerRepo'
+import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates, updateWorkerEmail,
+         updateWorkerColor } from './repositories/workerRepo'
 import { getAbsences, addAbsence, removeAbsence } from './repositories/absenceRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
 import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
@@ -1855,9 +1856,37 @@ function TabYearly({history,workers,absences=[],restDays,plans=[],viewYear,setVi
 // 설계서: docs/design/스케줄표_설계.md
 
 // 사람마다 색을 고정한다. 색이 매번 바뀌면 달력에서 누구인지 알 수 없다.
+//
+// 🔴 2026-08-25 개편 — 예전에는 «입사일 순번 % 팔레트 길이» 로 계산했다.
+//    직원이 팔레트보다 많아지자 색이 한 바퀴 돌아 **두 쌍이 완전히 같은 색**이 됐고
+//    (고광용↔송지형, 이건호↔김동현), 사람이 늘고 줄 때마다 남의 색까지 밀렸다.
+//    이제 `workers.color` 에 «값» 으로 박아 두고 [설정] 탭에서 고친다.
+// ⚠ 비어 있으면(새로 들어온 사람) 아래 팔레트에서 자동으로 고른다.
+//    자동 배정도 겹치지 않게 색상환에서 고르게 벌린 12색을 따로 둔다 —
+//    차트용 COLORS 는 계열이 붙어 있어(초록·라임·청록) 사람 구분에는 맞지 않는다.
+const WORKER_COLORS=[
+  '#dc2626','#d97706','#65a30d','#059669','#2563eb','#7c3aed',
+  '#db2777','#0891b2','#ca8a04','#4f46e5','#be123c','#15803d',
+]
 function workerColor(workerId,workers){
-  const i=workers.findIndex(w=>w.id===workerId)
-  return COLORS[(i<0?0:i)%COLORS.length]
+  const w=workers.find(x=>x.id===workerId)
+  if(w?.color) return w.color
+  const i=workers.findIndex(x=>x.id===workerId)
+  return WORKER_COLORS[(i<0?0:i)%WORKER_COLORS.length]
+}
+
+// 차량도 같은 문제였다 — 법인차 4대가 «전부» 주황, 자차는 «전부» 보라로 박혀 있어
+// 배차표에서 색만 보고는 어느 차인지 알 수 없었다 (2026-08-25 지적).
+// 정한 색이 없으면 종류별 기본색으로 돌아간다.
+const VEHICLE_COLORS=[
+  '#f59e0b','#0891b2','#16a34a','#e11d48','#7c3aed','#0d9488',
+  '#c2410c','#4f46e5','#a16207','#be123c','#15803d','#1d4ed8',
+]
+function vehicleColor(vehicle,vehicles=[]){
+  if(vehicle?.color) return vehicle.color
+  const i=vehicles.findIndex(v=>v.id===vehicle?.id)
+  if(i<0) return vehicle?.kind==='own'?'#8b5cf6':'#f59e0b'
+  return VEHICLE_COLORS[i%VEHICLE_COLORS.length]
 }
 
 // ── 보기 기준 ────────────────────────────────────────────
@@ -1875,7 +1904,7 @@ const GROUP_BYS=[
 // 기준에 맞는 행 목록을 만든다. 각 행은 {key,label,sub,color,match,cellDefaults} 다.
 //   match        그 행에 속하는 계획인지
 //   cellDefaults 빈 칸을 눌렀을 때 계획 창에 미리 채울 값
-function buildGroupRows(groupBy,workers,places,vehicles,plans){
+function buildGroupRows(groupBy,workers,places,vehicles,plans,opts={}){
   if(groupBy==='worker'){
     return workers.map(w=>({
       key:'w'+w.id, label:w.name, color:workerColor(w.id,workers),
@@ -1905,18 +1934,23 @@ function buildGroupRows(groupBy,workers,places,vehicles,plans){
   }
   // 차량 — 법인차는 배차 확인용이라 그 주에 안 쓰였어도 «항상» 세운다
   const rows=vehicles.filter(v=>v.kind==='company').map(v=>({
-    key:'v'+v.id, label:v.name, sub:v.plate||'', color:'#f59e0b',
+    key:'v'+v.id, label:v.name, sub:v.plate||'', color:vehicleColor(v,vehicles),
     match:p=>p.vehicle_id===v.id, cellDefaults:{vehicleId:v.id,transport:'company_car'},
   }))
   // 자차는 그 기간에 쓰인 것만
   const usedOwn=new Set(plans.filter(p=>p.vehicle_kind==='own'&&p.vehicle_id).map(p=>p.vehicle_id))
   vehicles.filter(v=>v.kind==='own'&&usedOwn.has(v.id)).forEach(v=>{
     rows.push({key:'v'+v.id,label:v.name+(v.owner_name?` (${v.owner_name})`:''),
-      sub:'자차',color:'#8b5cf6',match:p=>p.vehicle_id===v.id,
+      sub:'자차',color:vehicleColor(v,vehicles),match:p=>p.vehicle_id===v.id,
       cellDefaults:{vehicleId:v.id,transport:'own_car'}})
   })
-  rows.push({key:'nocar',label:'차량 없음',sub:'사무실·대중교통·휴가',color:'#94a3b8',
-    match:p=>!p.vehicle_id,cellDefaults:{}})
+  // 🔑 차량 기준은 «배차표» 다 — 「어느 차를 누가 어디로 가져가는가」 를 보는 자리다.
+  //    차량이 걸리지 않은 일정(사무실 내근·대중교통·휴가)까지 세우면 그 줄이 가장 길어
+  //    정작 배차가 묻힌다 (2026-08-25 지적). 기본으로 감추고, 체크 한 번으로 꺼낸다.
+  if(opts.showNoCar){
+    rows.push({key:'nocar',label:'차량 없음',sub:'사무실·대중교통·휴가',color:'#94a3b8',
+      match:p=>!p.vehicle_id,cellDefaults:{}})
+  }
   return rows
 }
 // 배지에 넣을 짧은 장소 이름. 달력 칸이 좁아 긴 이름은 잘라야 한다.
@@ -2024,6 +2058,8 @@ function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan
 
   const [view,setView]=useState('week')
   const [groupBy,setGroupBy]=useState('worker')   // 보기 기준 — 주 뷰의 세로축이 된다
+  // 차량 기준일 때 «차량이 안 걸린 일정» 까지 세울지. 기본은 감춤 (배차표로 쓰기 위함)
+  const [showNoCar,setShowNoCar]=useState(false)
   const [anchor,setAnchor]=useState(today())      // 기준 날짜 (주·일 뷰)
   const [ym,setYm]=useState(toMonth(today()))     // 기준 월 (월 뷰)
   const [year,setYear]=useState(toYear(today()))
@@ -2058,8 +2094,12 @@ function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan
   }
   const sortByGroup=(a,b)=>groupKeyOf(a).localeCompare(groupKeyOf(b),'ko')||
                            String(a.slot).localeCompare(String(b.slot))
-  const byDate=(d)=>shown.filter(p=>p.plan_date===d).sort(sortByGroup)
-  const groupRows=buildGroupRows(groupBy,workers,places,vehicles,shown)
+  // 🔑 차량 기준일 때는 «세로축에 자리가 없는 일정» 을 달력 칸에서도 뺀다.
+  //    주 뷰는 행이 걸러 주지만 월·일 뷰는 칸에 통째로 쏟아 넣기 때문에,
+  //    이것이 없으면 「차량 기준을 눌렀는데 사무실 내근이 다 나온다」 가 된다.
+  const inAxis=(p)=>groupBy!=='vehicle'||showNoCar||!!p.vehicle_id
+  const byDate=(d)=>shown.filter(p=>p.plan_date===d&&inAxis(p)).sort(sortByGroup)
+  const groupRows=buildGroupRows(groupBy,workers,places,vehicles,shown,{showNoCar})
 
   // 지난 날짜인데 실적이 없는 계획 — 정산 근거가 비어 있는 것들이라 눈에 띄게 모아 준다
   const pending=shown.filter(p=>planState(p,todayStr)==='needCheck')
@@ -2135,6 +2175,15 @@ function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan
                 color:groupBy===g.v?'#fff':'#6b7280'}}>{g.icon} {g.label}</button>
           ))}
         </div>
+        {/* 배차표를 보러 왔는데 사무실 내근이 줄줄이 섞이면 정작 차가 묻힌다 */}
+        {groupBy==='vehicle'&&
+          <label style={{display:'flex',alignItems:'center',gap:5,fontSize:11,color:'#6b7280',
+            cursor:'pointer',whiteSpace:'nowrap'}}
+            title="사무실 내근·대중교통·휴가처럼 차량이 걸리지 않은 일정도 함께 세웁니다">
+            <input type="checkbox" checked={showNoCar}
+              onChange={e=>setShowNoCar(e.target.checked)} style={{cursor:'pointer'}}/>
+            차량 없는 일정도
+          </label>}
 
         <div style={{flex:1}}/>
         <select value={filterWorker} onChange={e=>setFilterWorker(e.target.value)} style={selS}>
@@ -2732,6 +2781,131 @@ function PlacePicker({places,onPick,onClose,onChanged,showToast}){
 
 // 정산 화면 — 월별로 «직원이 회사에 낼 돈» 과 «회사가 직원에게 줄 것» 을 모아 본다.
 // 계산은 서버가 한다(현행 정산기준 문서를 그대로 따른다). 화면은 보여 주고 승인만 요청한다.
+// 차량 단가·연비 — 정산 금액을 «정하는» 값이라 금액을 «보는» 화면에 함께 둔다.
+// 🔑 2026-08-25 신설. 그전에는 이 값을 고치는 화면이 «어디에도 없었는데»
+//    설정 탭과 매뉴얼은 「정산 화면에서 대표이사만 고칠 수 있습니다」 라고
+//    없는 기능을 안내하고 있었다. 안내대로 만든 것이다.
+// ⚠ 승인 권한이 없으면 읽기 전용이다. 감추지 않는 이유 =
+//   자기 환급이 어떤 값으로 계산되는지는 누구나 알아야 한다.
+function VehicleRates({canApprove,showToast}){
+  const [rows,setRows]=useState(null)
+  const [edit,setEdit]=useState({})      // {차량id: 입력 중인 값}
+  const [busy,setBusy]=useState(false)
+
+  const load=async()=>{ try{ setRows(await getVehicles(true)) }catch{ setRows([]) } }
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(()=>{ load() },[])
+
+  async function save(v,field,raw){
+    const val=raw===''?null:Number(raw)
+    if(val!=null&&(!isFinite(val)||val<0)){ showToast('0 이상의 숫자를 넣어 주십시오'); return }
+    try{
+      setBusy(true)
+      await updateVehicle(v.id,{[field]:val})
+      showToast(`${v.name} — ${field==='rate_per_km'?'단가':'연비'}를 바꿨습니다`)
+      setEdit(e=>{const n={...e}; delete n[v.id+field]; return n})
+      await load()
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
+  if(!rows) return null
+  const company=rows.filter(v=>v.kind==='company'&&v.active)
+  const own=rows.filter(v=>v.kind==='own'&&v.active)
+  const inS={padding:'5px 8px',border:'1px solid #e5e7eb',borderRadius:6,fontSize:12,width:88}
+  const cell=(v,field,unit,ph)=>{
+    const k=v.id+field
+    const cur=v[field]
+    if(!canApprove) return <span>{cur!=null?`${cur}${unit}`:'-'}</span>
+    return(
+      <span style={{display:'inline-flex',alignItems:'center',gap:5}}>
+        <input type="number" step={field==='km_per_liter'?'0.1':'1'} min="0" style={inS}
+          placeholder={ph} disabled={busy}
+          value={edit[k]!==undefined?edit[k]:(cur??'')}
+          onChange={e=>setEdit({...edit,[k]:e.target.value})}
+          onKeyDown={e=>{ if(e.key==='Enter') save(v,field,e.target.value) }}/>
+        <span style={{fontSize:11,color:'#6b7280'}}>{unit}</span>
+        {edit[k]!==undefined&&String(edit[k])!==String(cur??'')&&
+          <button onClick={()=>save(v,field,edit[k])} disabled={busy}
+            style={{padding:'4px 9px',borderRadius:6,border:'none',background:'#1a56db',
+              color:'#fff',cursor:'pointer',fontSize:11,fontWeight:700}}>저장</button>}
+      </span>
+    )
+  }
+
+  return(
+    <Card title="차량 단가 · 연비">
+      <div style={{fontSize:12,color:'#374151',marginBottom:10,lineHeight:1.7}}>
+        {canApprove
+          ?<>정산 금액을 정하는 값입니다. 고친 값은 <strong>아직 확정하지 않은 달</strong>부터 적용되고,
+            <strong> 이미 확정한 달의 금액은 흔들리지 않습니다.</strong></>
+          :<>정산 금액을 정하는 값입니다. <strong>대표이사만</strong> 고칠 수 있어 여기서는 확인만 됩니다.</>}
+      </div>
+
+      <div style={{fontSize:12,fontWeight:700,color:'#374151',marginBottom:6}}>
+        법인차량 {company.length}대 — 개인 사용 단가
+      </div>
+      <table style={{width:'100%',borderCollapse:'collapse',marginBottom:16}}>
+        <thead><tr>
+          <th style={{...thS,textAlign:'left'}}>차량</th>
+          <th style={{...thS,width:190}}>개인 사용 단가</th>
+        </tr></thead>
+        <tbody>
+          {company.map(v=>(
+            <tr key={v.id}>
+              <td style={{...tdS,textAlign:'left'}}>
+                <strong style={{fontSize:12}}>{v.name}</strong>
+                <div style={{fontSize:10,color:'#6b7280'}}>{v.plate}</div>
+              </td>
+              <td style={tdS}>{cell(v,'rate_per_km','원/km','예: 100')}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div style={{fontSize:11,color:'#6b7280',marginBottom:16,lineHeight:1.7}}>
+        💡 <strong>입금액</strong> = 개인 사용 거리 × 이 단가 + 하이패스
+      </div>
+
+      <div style={{fontSize:12,fontWeight:700,color:'#374151',marginBottom:6}}>
+        자차 {own.length}대 — 연비
+      </div>
+      {own.length===0
+        ?<div style={{fontSize:12,color:'#9ca3af',padding:'10px 0'}}>
+          등록된 자차가 없습니다. 자차는 [설정] 탭에서 본인이 등록합니다.
+        </div>
+        :<table style={{width:'100%',borderCollapse:'collapse'}}>
+          <thead><tr>
+            <th style={{...thS,textAlign:'left'}}>차량</th>
+            <th style={{...thS,width:110}}>소유</th>
+            <th style={{...thS,width:190}}>연비</th>
+          </tr></thead>
+          <tbody>
+            {own.map(v=>(
+              <tr key={v.id}>
+                <td style={{...tdS,textAlign:'left'}}>
+                  <strong style={{fontSize:12}}>{v.name}</strong>
+                  <div style={{fontSize:10,color:'#6b7280'}}>{v.plate}</div>
+                </td>
+                <td style={tdS}>{v.owner_name||'-'}</td>
+                <td style={tdS}>
+                  {cell(v,'km_per_liter','km/L','예: 12.5')}
+                  {v.km_per_liter==null&&
+                    <div style={{fontSize:10,color:'#c2410c',fontWeight:600,marginTop:3}}>
+                      연비 미입력 — 환급이 계산되지 않습니다
+                    </div>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>}
+      <div style={{fontSize:11,color:'#6b7280',marginTop:10,lineHeight:1.7}}>
+        💡 <strong>환급</strong> = 자차 업무 거리 ÷ 연비 — 금액이 아니라 <strong>주유 한도(리터)</strong>로 지급합니다.<br/>
+        ⚠ 연비를 <strong>낮추면 환급 리터가 늘어납니다.</strong> 그래서 본인이 아니라 대표이사가 정합니다.
+      </div>
+    </Card>
+  )
+}
+
 function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
   const [ym,setYm]=useState(()=>{
     // 기본은 «지난달» — 익월 초에 정산하는 현행 규칙에 맞춘다
@@ -2963,6 +3137,8 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
               </tbody>
             </table>
           </Card>
+
+          <VehicleRates canApprove={!!data.can_approve} showToast={showToast}/>
 
           <Card title="정산 확정">
             {data.can_approve
@@ -3841,9 +4017,10 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
   async function saveEdit(){
     try{
       setBusy(true)
+      // ⚠ 연비(km_per_liter)는 보내지 않는다 — 서버가 승인 권한을 요구한다(403).
+      //   정산 화면의 「차량 단가 · 연비」 카드에서 대표이사가 정한다.
       await updateVehicle(editingId,{
         name:edit.name?.trim()||null, plate:edit.plate||null, fuel_type:edit.fuel_type||null,
-        km_per_liter:edit.km_per_liter===''?null:edit.km_per_liter,
       })
       showToast('차량 정보를 수정했습니다')
       setEditingId(null); await onChanged()
@@ -3855,6 +4032,17 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
     if(!confirm(`「${v.name}」을 목록에서 숨길까요?\n\n지난 계획·실적은 그대로 남습니다.`))return
     try{ setBusy(true); await updateVehicle(v.id,{active:false}); showToast('숨겼습니다'); await onChanged() }
     catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
+  // 달력·배차표에서 이 차를 나타내는 색.
+  // 🔑 예전에는 법인차가 «전부» 주황이라 색만 보고는 어느 차인지 알 수 없었다.
+  async function setColor(v,hex){
+    try{
+      setBusy(true)
+      await updateVehicle(v.id,{color:hex})          // ⚠ 이 칸만 보낸다
+      await onChanged()
+    }catch(e){ showToast('색 변경 실패: '+e.message) }
     finally{ setBusy(false) }
   }
 
@@ -3879,6 +4067,7 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
       <div style={{fontSize:12,fontWeight:700,color:'#374151',marginBottom:6}}>법인차량 {company.length}대</div>
       <table style={{width:'100%',borderCollapse:'collapse',marginBottom:16}}>
         <thead><tr>
+          <th style={{...thS,width:38}}>색</th>
           <th style={{...thS,textAlign:'left'}}>차량</th>
           <th style={{...thS,width:70}}>연료</th>
           <th style={{...thS,width:88}}>개인사용 단가</th>
@@ -3887,6 +4076,14 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
         <tbody>
           {company.map(v=>(
             <tr key={v.id}>
+              <td style={tdS}>
+                <input type="color" disabled={busy}
+                  value={vehicleColor(v,vehicles)}
+                  onChange={e=>setColor(v,e.target.value)}
+                  title={`달력·배차표에서 보이는 색 (${v.color||'기본'})`}
+                  style={{width:26,height:22,padding:0,border:'1px solid #e5e7eb',
+                          borderRadius:5,cursor:'pointer',background:'none'}}/>
+              </td>
               <td style={{...tdS,textAlign:'left'}}>
                 <strong style={{fontSize:12}}>{v.name}</strong>
                 <div style={{fontSize:10,color:'#6b7280'}}>{v.plate}</div>
@@ -3909,7 +4106,8 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
         </tbody>
       </table>
       <div style={{fontSize:11,color:'#6b7280',marginBottom:16}}>
-        법인차량 단가는 정산 금액에 직접 영향을 주므로 <strong>정산 화면에서 대표이사만</strong> 고칠 수 있습니다.
+        법인차량 <strong>단가</strong>와 자차 <strong>연비</strong>는 정산 금액에 직접 영향을 주므로
+        <strong> 스케줄 → 💰 정산</strong> 화면의 「차량 단가 · 연비」 에서 <strong>대표이사만</strong> 고칩니다.
         <br/><strong>전용 사용자</strong>를 지정하면 그 사람이 그 차로 잡은 일정은 알림 메일을 보내지 않습니다
         (늘 같은 사람이 타는 상용 차량). <strong>다른 사람이 그 차를 잡으면 그때는 보냅니다.</strong>
       </div>
@@ -3968,14 +4166,17 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
             {own.map(v=>(
               editingId===v.id
                 ?<tr key={v.id}><td colSpan={4} style={{padding:10,background:'#f8fbff'}}>
-                  <div style={{display:'grid',gridTemplateColumns:'2fr 1fr 1fr',gap:6,marginBottom:8}}>
+                  <div style={{display:'grid',gridTemplateColumns:'2fr 1fr',gap:6,marginBottom:8}}>
                     <input value={edit.name||''} onChange={e=>setEdit({...edit,name:e.target.value})}
                       placeholder="차종" style={inputS}/>
                     <input value={edit.plate||''} onChange={e=>setEdit({...edit,plate:e.target.value})}
                       placeholder="번호판" style={inputS}/>
-                    <input type="number" step="0.1" value={edit.km_per_liter??''}
-                      onChange={e=>setEdit({...edit,km_per_liter:e.target.value})}
-                      placeholder="연비" style={inputS}/>
+                  </div>
+                  {/* ⚠ 연비는 여기서 고치지 않는다 — 환급 리터를 정하는 값이라
+                      서버가 승인 권한을 요구한다(403). 칸을 두면 저장이 실패한다. */}
+                  <div style={{fontSize:11,color:'#6b7280',marginBottom:8,lineHeight:1.6}}>
+                    연비({v.km_per_liter!=null?`${v.km_per_liter}km/L`:'미입력'})는 <strong>환급 리터를 정하는 값</strong>이라
+                    여기서 고치지 않습니다 — <strong>스케줄 → 💰 정산</strong> 화면에서 대표이사가 정합니다.
                   </div>
                   <div style={{display:'flex',gap:6}}>
                     <button onClick={saveEdit} disabled={busy}
@@ -3986,9 +4187,17 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
                 </td></tr>
                 :<tr key={v.id}>
                   <td style={{...tdS,textAlign:'left'}}>
-                    <strong style={{fontSize:12}}>{nameOf(v.owner_worker_id)}</strong>
-                    <span style={{fontSize:12,marginLeft:6}}>{v.name}</span>
-                    {v.plate&&<div style={{fontSize:10,color:'#6b7280'}}>{v.plate}</div>}
+                    <span style={{display:'inline-flex',alignItems:'center',gap:6}}>
+                      <input type="color" disabled={busy}
+                        value={vehicleColor(v,vehicles)}
+                        onChange={e=>setColor(v,e.target.value)}
+                        title={`달력·배차표에서 보이는 색 (${v.color||'기본'})`}
+                        style={{width:22,height:20,padding:0,border:'1px solid #e5e7eb',
+                                borderRadius:5,cursor:'pointer',background:'none',flexShrink:0}}/>
+                      <strong style={{fontSize:12}}>{nameOf(v.owner_worker_id)}</strong>
+                      <span style={{fontSize:12}}>{v.name}</span>
+                    </span>
+                    {v.plate&&<div style={{fontSize:10,color:'#6b7280',marginLeft:28}}>{v.plate}</div>}
                   </td>
                   <td style={tdS}>{v.fuel_type||'-'}</td>
                   <td style={tdS}>
@@ -4278,6 +4487,7 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
   const [editHiredAt,setEditHiredAt]=useState('')
   const [editResignedAt,setEditResignedAt]=useState('')
   const [editEmail,setEditEmail]=useState('')
+  const [editColor,setEditColor]=useState('')
   const [newJira,setNewJira]=useState('')
   const [newJiraParent,setNewJiraParent]=useState('')
   const [newFixed,setNewFixed]=useState('')
@@ -4297,6 +4507,9 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
     setEditHiredAt(w.hired_at||'')
     setEditResignedAt(w.resigned_at||'')
     setEditEmail(w.email||'')
+    // 아직 정한 적이 없으면 «지금 보이는 색» 을 시작값으로 준다.
+    // 빈 칸을 주면 색 고르개가 검정에서 출발해 엉뚱한 색을 저장하기 쉽다.
+    setEditColor(w.color||workerColor(w.id,workers))
     setResigningWorkerId(null)
   }
 
@@ -4308,8 +4521,11 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
       await updateWorkerDates(editingWorkerId, editHiredAt||null, editResignedAt||null)
       // 메일 주소는 바뀌었을 때만 보낸다. 형식이 틀리면 서버가 막으므로 그 문구를 그대로 띄운다.
       if ((target?.email||'') !== editEmail) await updateWorkerEmail(editingWorkerId, editEmail)
+      // 색도 바뀌었을 때만 보낸다. 빈 값이면 «자동 배정» 으로 되돌아간다.
+      if ((target?.color||'') !== editColor) await updateWorkerColor(editingWorkerId, editColor)
       setWorkers(workers.map(w => w.id===editingWorkerId
-        ? {...w, hired_at:editHiredAt||null, resigned_at:editResignedAt||null, email:editEmail||null}
+        ? {...w, hired_at:editHiredAt||null, resigned_at:editResignedAt||null,
+           email:editEmail||null, color:editColor||null}
         : w))
       showToast(label+' 정보 수정 완료')
       setEditingWorkerId(null)
@@ -4419,6 +4635,11 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:w.active?'#fff':'#f9fafb'}}>
                 <div>
                   <div style={{display:'flex',alignItems:'center',gap:8}}>
+                    {/* 달력에서 이 사람이 무슨 색으로 보이는지 여기서 바로 알 수 있게 한다 */}
+                    <span title={`달력 색 ${w.color||'(자동)'}`}
+                      style={{width:12,height:12,borderRadius:3,flexShrink:0,
+                        background:workerColor(w.id,workers),
+                        border:'1px solid rgba(0,0,0,.15)'}}/>
                     <span style={{fontWeight:600}}>{w.name}</span>
                     {dupNames.has(w.name)&&(
                       <span title="같은 이름의 직원이 둘 이상 있어 입사일로 구분합니다"
@@ -4472,6 +4693,19 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
                       <input type="email" value={editEmail} onChange={e=>setEditEmail(e.target.value)}
                         placeholder="예: hong@vi-tron.com"
                         style={{width:'100%',boxSizing:'border-box',padding:'6px 10px',border:'1px solid #7dd3fc',borderRadius:6,fontSize:13}}/>
+                    </div>
+                    <div>
+                      <div style={{fontSize:11,color:'#6b7280',marginBottom:4}}>달력 색</div>
+                      <div style={{display:'flex',alignItems:'center',gap:6}}>
+                        <input type="color" value={editColor||'#2563eb'}
+                          onChange={e=>setEditColor(e.target.value)}
+                          style={{width:38,height:30,padding:0,border:'1px solid #7dd3fc',
+                                  borderRadius:6,cursor:'pointer',background:'none'}}/>
+                        {/* 비우면 «자동 배정» 으로 되돌아간다 — 규칙을 알려 주지 않으면 아무도 못 찾는다 */}
+                        <button onClick={()=>setEditColor('')} title="정한 색을 지우고 자동 배정으로 되돌립니다"
+                          style={{padding:'6px 9px',borderRadius:6,border:'1px solid #e5e7eb',
+                                  background:'#fff',cursor:'pointer',fontSize:11,color:'#6b7280'}}>자동</button>
+                      </div>
                     </div>
                     <div style={{display:'flex',gap:6}}>
                       <button onClick={confirmEdit}

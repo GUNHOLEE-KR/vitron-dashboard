@@ -89,6 +89,27 @@ app.post('/api/workers', async (req, res) => {
 })
 
 // 회사 메일 주소. KPI 추적 시스템(8083)이 이 값을 로그인 아이디로 쓴다.
+// 달력·차트에서 이 사람을 나타내는 색 (2026-08-25 신설).
+// 🔑 예전에는 «입사일 순번 % 팔레트 길이» 로 계산했는데, 직원이 팔레트보다 많아지자
+//    색이 한 바퀴 돌아 두 쌍이 «완전히 같은 색» 이 됐다. 사람이 늘고 줄 때마다
+//    남의 색까지 밀리는 문제도 있었다. 그래서 «계산» 이 아니라 «값» 으로 둔다.
+// ⚠ 비우면(`null`) 예전처럼 팔레트에서 자동으로 고른다 — 새로 들어온 사람의 기본값이다.
+app.patch('/api/workers/:id/color', async (req, res) => {
+  const raw = String(req.body?.color || '').trim()
+  if (raw && !/^#[0-9a-fA-F]{6}$/.test(raw)) {
+    return res.status(400).json({ error: '색은 #rrggbb 형식이어야 합니다.' })
+  }
+  try {
+    const { rowCount } = await pool.query(
+      'UPDATE workers SET color = $1 WHERE id = $2', [raw ? raw.toLowerCase() : null, req.params.id]
+    )
+    if (rowCount === 0) return res.status(404).json({ error: '해당 직원을 찾을 수 없습니다.' })
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 app.patch('/api/workers/:id/email', async (req, res) => {
   const { email } = req.body
   const value = String(email || '').trim()
@@ -755,9 +776,20 @@ app.post('/api/schedule/vehicles', async (req, res) => {
 //       같은 이유이고, 칸이 늘어날수록 사고가 커지므로 여기서 아예 막는다.
 //    ⚠ null 을 «명시해서» 보내면 지운다 — 「안 보냄」과 「비우기」는 다른 뜻이다.
 const VEHICLE_PATCH_COLS = ['name', 'plate', 'fuel_type', 'rate_per_km',
-                            'km_per_liter', 'memo', 'active', 'assigned_worker_id']
+                            'km_per_liter', 'memo', 'active', 'assigned_worker_id', 'color']
+
+// 🔑 돈이 되는 두 칸은 «승인 권한자만» 고친다 (2026-08-25 신설).
+//    rate_per_km  개인 사용 청구액 = 거리 × 이 값
+//    km_per_liter 자차 환급 리터   = 거리 ÷ 이 값  (낮출수록 환급이 늘어난다)
+//    그전에는 화면 자체가 없어 DB 로만 바꿀 수 있었는데, 설정 탭과 매뉴얼은
+//    「정산 화면에서 대표이사만 고칠 수 있습니다」 라고 «없는 기능»을 안내하고 있었다.
+const VEHICLE_MONEY_COLS = ['rate_per_km', 'km_per_liter']
 
 app.patch('/api/schedule/vehicles/:id', async (req, res) => {
+  const touchesMoney = VEHICLE_MONEY_COLS.some(c => c in req.body)
+  if (touchesMoney && !await canApprove(req.session.uid)) {
+    return res.status(403).json({ error: '단가·연비는 대표이사만 고칠 수 있습니다.' })
+  }
   const sets = [], vals = []
   for (const col of VEHICLE_PATCH_COLS) {
     if (!(col in req.body)) continue                  // 안 보낸 칸은 손대지 않는다
@@ -765,6 +797,12 @@ app.patch('/api/schedule/vehicles/:id', async (req, res) => {
     if (col === 'name') {
       if (!v || !String(v).trim()) continue           // 이름은 비울 수 없다
       v = String(v).trim()
+    } else if (col === 'color') {
+      v = String(v || '').trim().toLowerCase()
+      if (v && !/^#[0-9a-f]{6}$/.test(v)) {
+        return res.status(400).json({ error: '색은 #rrggbb 형식이어야 합니다.' })
+      }
+      v = v || null                                   // 비우면 기본색으로 되돌아간다
     } else if (col === 'active') {
       v = !!v
     } else if (v === '' || v === undefined) {
