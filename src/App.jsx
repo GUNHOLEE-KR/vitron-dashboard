@@ -3998,10 +3998,13 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
 }
 
 // ── 차량 관리 (설정 탭) ───────────────────────────────────
-// 법인차는 목록만 보여 준다. 개인사용 정산 단가를 고치는 것은 금액에 직접
-// 영향을 주므로 정산 화면에서 대표이사만 하도록 남겨 둔다(설계서 4.2절).
+// 여기서 고치는 것 = 색 · 주 사용자 · 연료 (로그인만 하면 누구나).
+// 🔑 단가·연비만 «정산 화면에서 대표이사» 몫이다 — 금액에 직접 영향을 주기 때문이다.
+//    연료는 표시용이라 여기 둔다.
 // 자차는 본인이 등록한다 — 등록해 두지 않으면 계획에서 「자차」를 골라도 고를 차가 없다.
-const FUEL_TYPES=['가솔린','디젤','LPG','전기','하이브리드']
+// ⚠ 「하이브리드」는 뺐다 (2026-08-25 사용자 지시 — 네 가지로 줄임).
+//   지금 DB 에 하이브리드인 차량은 없어 지워도 잃는 값이 없다(실측).
+const FUEL_TYPES=['가솔린','디젤','LPG','전기']
 
 function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
   const [adding,setAdding]=useState(false)
@@ -4034,10 +4037,11 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
   async function saveEdit(){
     try{
       setBusy(true)
-      // ⚠ 연비(km_per_liter)는 보내지 않는다 — 서버가 승인 권한을 요구한다(403).
-      //   정산 화면의 「차량 단가 · 연비」 카드에서 대표이사가 정한다.
+      // ⚠ 이 창이 «실제로 고치는 칸» 만 보낸다.
+      //   연비 = 서버가 승인 권한을 요구한다(403) → 정산 화면에서 대표이사가 정한다
+      //   연료 = 표에서 바로 고른다 → 여기서 보내면 방금 바꾼 값을 되돌릴 수 있다
       await updateVehicle(editingId,{
-        name:edit.name?.trim()||null, plate:edit.plate||null, fuel_type:edit.fuel_type||null,
+        name:edit.name?.trim()||null, plate:edit.plate||null,
       })
       showToast('차량 정보를 수정했습니다')
       setEditingId(null); await onChanged()
@@ -4063,17 +4067,42 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
     finally{ setBusy(false) }
   }
 
-  // 전용(상용) 배정 — 늘 같은 사람이 타는 차는 그 사람 일정에 알림 메일을 보내지 않는다.
+  // 연료 — 표시용 값이라 로그인한 누구나 고친다.
+  // ⚠ 단가·연비와 달리 정산 금액에 쓰이지 않는다. 자차 «연비» 와 헷갈리지 말 것.
+  async function setFuel(v,fuel){
+    try{
+      setBusy(true)
+      await updateVehicle(v.id,{fuel_type:fuel})     // ⚠ 이 칸만 보낸다
+      showToast(`${v.name} 의 연료를 ${fuel||'미지정'} 으로 바꿨습니다`)
+      await onChanged()
+    }catch(e){ showToast('연료 변경 실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
+  // 연료 고르개 — 법인차·자차 표에서 같은 모양으로 쓴다
+  const fuelCell=(v)=>(
+    <select value={v.fuel_type||''} disabled={busy}
+      onChange={e=>setFuel(v,e.target.value||null)}
+      style={{padding:'3px 4px',border:'1px solid #e5e7eb',borderRadius:6,
+              fontSize:11,width:'100%'}}>
+      <option value="">미지정</option>
+      {FUEL_TYPES.map(f=><option key={f} value={f}>{f}</option>)}
+    </select>
+  )
+
+  // 주 사용자 — 늘 같은 사람이 타는 차는 그 사람 일정에 알림 메일을 보내지 않는다.
   // ⚠ 코드에 박지 않고 여기서 고르게 둔 이유 = 배정은 바뀐다. 바뀔 때마다 배포해야
   //   한다면 결국 낡은 채로 남는다.
+  // ⚠ DB 칸 이름은 `assigned_worker_id` 그대로다 — 화면 문구만 바뀌었다
+  //   (「전용 사용자」 → 「주 사용자」, 2026-08-25 사용자 지시).
   async function assign(v,workerId){
     try{
       setBusy(true)
       // ⚠ «이 칸만» 보낸다. 예전에는 서버가 안 보낸 칸을 NULL 로 덮어써
       //   단가·연료가 지워졌다(2026-08-25). 지금은 서버도 보낸 칸만 고친다.
       await updateVehicle(v.id,{assigned_worker_id:workerId?Number(workerId):null})
-      showToast(workerId?`${v.name} 을 ${nameOf(Number(workerId))} 전용으로 두었습니다`
-                        :`${v.name} 의 전용 배정을 풀었습니다`)
+      showToast(workerId?`${v.name} 의 주 사용자를 ${nameOf(Number(workerId))} 으로 두었습니다`
+                        :`${v.name} 의 주 사용자를 지웠습니다`)
       await onChanged()
     }catch(e){ showToast('실패: '+e.message) }
     finally{ setBusy(false) }
@@ -4088,7 +4117,7 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
           <th style={{...thS,textAlign:'left'}}>차량</th>
           <th style={{...thS,width:70}}>연료</th>
           <th style={{...thS,width:88}}>개인사용 단가</th>
-          <th style={{...thS,width:112}}>전용 사용자</th>
+          <th style={{...thS,width:112}}>주 사용자</th>
         </tr></thead>
         <tbody>
           {company.map(v=>(
@@ -4105,7 +4134,7 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
                 <strong style={{fontSize:12}}>{v.name}</strong>
                 <div style={{fontSize:10,color:'#6b7280'}}>{v.plate}</div>
               </td>
-              <td style={tdS}>{v.fuel_type||'-'}</td>
+              <td style={tdS}>{fuelCell(v)}</td>
               <td style={tdS}>{v.rate_per_km!=null?`${v.rate_per_km}원/km`:'-'}</td>
               <td style={tdS}>
                 <select value={v.assigned_worker_id??''} disabled={busy}
@@ -4125,8 +4154,8 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
       <div style={{fontSize:11,color:'#6b7280',marginBottom:16}}>
         법인차량 <strong>단가</strong>와 자차 <strong>연비</strong>는 정산 금액에 직접 영향을 주므로
         <strong> 스케줄 → 💰 정산</strong> 화면의 「차량 단가 · 연비」 에서 <strong>대표이사만</strong> 고칩니다.
-        <br/><strong>전용 사용자</strong>를 지정하면 그 사람이 그 차로 잡은 일정은 알림 메일을 보내지 않습니다
-        (늘 같은 사람이 타는 상용 차량). <strong>다른 사람이 그 차를 잡으면 그때는 보냅니다.</strong>
+        <br/><strong>주 사용자</strong>를 지정하면 그 사람이 그 차로 잡은 일정은 알림 메일을 보내지 않습니다
+        (늘 같은 사람이 타는 차라 알릴 것이 없습니다). <strong>다른 사람이 그 차를 잡으면 그때는 보냅니다.</strong>
       </div>
 
       <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
@@ -4216,7 +4245,7 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
                     </span>
                     {v.plate&&<div style={{fontSize:10,color:'#6b7280',marginLeft:28}}>{v.plate}</div>}
                   </td>
-                  <td style={tdS}>{v.fuel_type||'-'}</td>
+                  <td style={tdS}>{fuelCell(v)}</td>
                   <td style={tdS}>
                     {v.km_per_liter!=null
                       ?`${v.km_per_liter}km/L`
@@ -4276,7 +4305,7 @@ function MailStatusCard(){
             보낸사람은 <b>등록한 직원 이름</b>으로 보이고, <b>답장하면 그 직원에게</b> 갑니다.
             받는 쪽에서는 제목의 <code>[차량]</code> 으로 거르시면 됩니다.
             <br/>자차 업무는 회사 차를 잡지 않으므로 보내지 않습니다.
-            <br/><strong>전용 사용자</strong>가 지정된 차량은 그 사람의 일정도 보내지 않습니다
+            <br/><strong>주 사용자</strong>가 지정된 차량은 그 사람의 일정도 보내지 않습니다
             (차량 관리 카드에서 지정).
           </div>
         </>
