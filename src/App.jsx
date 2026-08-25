@@ -1116,6 +1116,10 @@ function Dashboard({me,onLoggedOut}){
   const historyForStats=excludeAbsentRows(history,absences)
   // 실제로 쉬는 날만 (「그날 근무」로 표시한 날은 빠진다)
   const restDays=useMemo(()=>restDaySet(holidays),[holidays])
+  // 날짜 → 공휴일 «이름». 화면에 「휴일 · 삼일절」 처럼 이름을 붙여 주기 위한 것이다.
+  // ⚠ 「그날 근무」로 돌린 날은 뺀다 — restDays 와 같은 기준이어야 한 화면에서 어긋나지 않는다.
+  const holidayMap=useMemo(()=>new Map(
+    (holidays||[]).filter(h=>!h.is_working).map(h=>[h.date,h.name])),[holidays])
 
   function showToast(msg, duration=2500){
     if(toastTimerRef.current) clearTimeout(toastTimerRef.current)
@@ -1297,10 +1301,10 @@ function Dashboard({me,onLoggedOut}){
           jiraTree={jiraTree} jiraDone={jiraDone} selWorkerId={selWorkerId} setSelWorkerId={setSelWorkerId}
           onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}
           history={historyForStats} me={me} canEditOthers={canEditOthers}/>}
-        {tab==='daily'   &&<TabDaily   history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} plans={plans} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
-        {tab==='weekly'  &&<TabWeekly  history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} plans={plans} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
-        {tab==='monthly' &&<TabMonthly history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} plans={plans} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
-        {tab==='yearly'  &&<TabYearly  history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} plans={plans} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
+        {tab==='daily'   &&<TabDaily   history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} holidayMap={holidayMap} plans={plans} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
+        {tab==='weekly'  &&<TabWeekly  history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} holidayMap={holidayMap} plans={plans} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
+        {tab==='monthly' &&<TabMonthly history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} holidayMap={holidayMap} plans={plans} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
+        {tab==='yearly'  &&<TabYearly  history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} holidayMap={holidayMap} plans={plans} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
         {tab==='schedule'&&<TabSchedule workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
           places={places} vehicles={vehicles} plans={plans} loading={schedLoading}
           showToast={showToast} focusDate={schedFocus}
@@ -1566,18 +1570,247 @@ function SectionTitle({children}){
 }
 
 // ── 일간 탭 ───────────────────────────────────────────────
-function TabDaily({history,workers,absences=[],restDays,plans=[],viewDate,setViewDate,jiraTree}){
+// ── 업무 달력 ─────────────────────────────────────────────
+// 「누가 어느 날 무슨 업무를 몇 시간 했는가」를 달력으로 본다 (2026-08-25 신설).
+// 스케줄 탭과 «같은 모양» 이되 담는 것이 일정이 아니라 «업무 기록» 이다.
+//   스케줄  어디에 있는가 · 무엇을 타고 가는가   (schedule_plans)
+//   업무    무엇을 몇 시간 했는가                (work_history)
+// 🔑 읽기 전용이다. 입력은 「오늘 업무」 탭 한 곳에서만 한다 —
+//    적는 자리가 둘이 되면 어느 쪽이 맞는지 알 수 없게 된다.
+// ⚠ 연 보기는 두지 않았다(사용자 지시). 한 해를 사람×날짜로 펴면 읽을 수 없다.
+const WCAL_VIEWS=[{v:'day',label:'일'},{v:'week',label:'주'},{v:'month',label:'월'}]
+
+// 차트 X축 눈금 — 쉬는 날은 빨갛게, 공휴일이면 이름을 한 줄 더 적는다.
+// ⚠ recharts 의 tick 은 «SVG» 안에서 그려지므로 <div> 를 쓸 수 없다. <text> 로만.
+function RestTick({x,y,payload,data}){
+  const row=(data||[]).find(d=>d.name===payload?.value)
+  const rest=!!row?._rest
+  return(
+    <g transform={`translate(${x},${y})`}>
+      <text x={0} y={0} dy={12} textAnchor="middle" fontSize={11}
+        fill={rest?REST_TEXT:'#6b7280'} fontWeight={rest?700:400}>{payload?.value}</text>
+      {row?._restName&&
+        <text x={0} y={0} dy={24} textAnchor="middle" fontSize={9} fill={REST_TEXT}>
+          {row._restName}
+        </text>}
+    </g>
+  )
+}
+// 쉬는 날이 있을 때만 「무엇이 빨간가」 를 한 줄로 알려 준다.
+// 🔑 색만 칠하고 뜻을 안 적으면 「이 빨간 건 뭔가」 를 매번 묻게 된다.
+function RestDayLegend({days}){
+  const rest=(days||[]).filter(d=>d._rest)
+  if(!rest.length) return null
+  const named=rest.filter(d=>d._restName)
+  return(
+    <div style={{fontSize:11,color:REST_TEXT,marginBottom:6}}>
+      🔴 연한 빨강 = 쉬는 날 {rest.length}일
+      {named.length>0&&` (${named.map(d=>`${mdLabel(d._date)} ${d._restName}`).join(' · ')})`}
+    </div>
+  )
+}
+
+// 휴일 칸 색 — 주말과 공휴일을 «같은 연한 빨강» 으로 칠한다.
+// 🔑 둘을 다른 색으로 나누면 「왜 이 날은 다른 색인가」를 또 설명해야 한다.
+//    쉬는 날인 것은 같으므로 같게 칠하고, 이름만 공휴일에 붙인다.
+const REST_BG='#fef2f2', REST_LINE='#fecaca', REST_TEXT='#b91c1c'
+function restInfo(date,restDays,holidayMap){
+  const dow=new Date(date+'T00:00:00').getDay()
+  const weekend=dow===0||dow===6
+  const holiday=restDays?.has(date)
+  return { rest:weekend||holiday, name:holidayMap?.get(date)||null,
+           label:holidayMap?.get(date)||(dow===6?'토요일':dow===0?'일요일':null) }
+}
+
+function WorkCalendar({history,workers,restDays,holidayMap,viewDate,setViewDate}){
+  const [view,setView]=useState('week')
+  const ym=toMonth(viewDate)
+
+  // 그 기간에 보일 날짜들
+  const days=view==='day'?[viewDate]
+    :view==='week'?calWeekDays(viewDate)
+    :monthGridDays(ym)
+  const from=days[0], to=days[days.length-1]
+
+  // {사람id|날짜: {업무명: 시간}} — 한 칸 = 1시간이므로 «행 수가 곧 시간» 이다
+  const cell=useMemo(()=>{
+    const m=new Map()
+    history.forEach(r=>{
+      if(r.work_date<from||r.work_date>to) return
+      const k=r.worker_id+'|'+r.work_date
+      if(!m.has(k)) m.set(k,new Map())
+      const t=m.get(k), nm=normText(r.work_text)
+      t.set(nm,(t.get(nm)||0)+1)
+    })
+    return m
+  },[history,from,to])
+
+  // 그 기간에 기록이 하나라도 있는 사람만 세운다 — 빈 줄만 길어지면 읽기 어렵다
+  const shownWorkers=useMemo(()=>{
+    const has=new Set()
+    history.forEach(r=>{ if(r.work_date>=from&&r.work_date<=to) has.add(r.worker_id) })
+    return workers.filter(w=>has.has(w.id))
+  },[history,workers,from,to])
+
+  const totalOf=(wid,d)=>{
+    const t=cell.get(wid+'|'+d); if(!t) return 0
+    let s=0; t.forEach(v=>s+=v); return s
+  }
+  const tasksOf=(wid,d)=>{
+    const t=cell.get(wid+'|'+d)
+    return t?[...t.entries()].sort((a,b)=>b[1]-a[1]):[]
+  }
+
+  function move(n){
+    if(view==='day') setViewDate(addDays(viewDate,n))
+    else if(view==='week') setViewDate(addDays(viewDate,n*7))
+    else setViewDate(shiftMonth(ym,n)+'-01')
+  }
+  const periodLabel=view==='day'?`${viewDate} (${dayName(viewDate)})`
+    :view==='week'?`${mdLabel(days[0])} ~ ${mdLabel(days[6])}`
+    :`${ym.slice(0,4)}년 ${Number(ym.slice(5,7))}월`
+
+  const navBtn={padding:'5px 11px',border:'1px solid #e5e7eb',borderRadius:7,background:'#fff',
+    cursor:'pointer',fontSize:12,fontWeight:600}
+  // 업무 배지 — 이름은 번호를 떼고 길면 자른다. 전체 이름은 마우스를 올리면 나온다.
+  const badge=(name,hours,color)=>(
+    <div key={name} title={`${name} — ${hours}h`}
+      style={{background:color,color:'#fff',borderRadius:5,padding:'2px 5px',fontSize:10,
+              lineHeight:1.35,marginBottom:2,overflow:'hidden',textOverflow:'ellipsis',
+              whiteSpace:'nowrap',fontWeight:600}}>
+      {cleanName(name)||name} <span style={{opacity:.85,fontWeight:700}}>{hours}h</span>
+    </div>
+  )
+
+  return(
+    <Card title="업무 달력 — 누가 어느 날 무엇을 했는가">
+      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10,flexWrap:'wrap'}}>
+        <div style={{display:'flex',border:'1px solid #e5e7eb',borderRadius:7,overflow:'hidden'}}>
+          {WCAL_VIEWS.map(g=>(
+            <button key={g.v} onClick={()=>setView(g.v)}
+              style={{padding:'5px 13px',border:'none',cursor:'pointer',fontSize:12,
+                fontWeight:view===g.v?700:500,
+                background:view===g.v?'#1e3a5f':'#fff',
+                color:view===g.v?'#fff':'#6b7280'}}>{g.label}</button>
+          ))}
+        </div>
+        <button onClick={()=>move(-1)} style={navBtn}>◀</button>
+        <strong style={{fontSize:13,minWidth:150,textAlign:'center'}}>{periodLabel}</strong>
+        <button onClick={()=>move(1)} style={navBtn}>▶</button>
+        <button onClick={()=>setViewDate(today())} style={navBtn}>오늘</button>
+        <div style={{flex:1}}/>
+        <span style={{fontSize:11,color:'#9ca3af'}}>한 칸 = 1시간 · 읽기 전용</span>
+      </div>
+
+      {shownWorkers.length===0
+        ?<div style={{padding:'26px 10px',textAlign:'center',fontSize:13,color:'#9ca3af'}}>
+          이 기간에는 기록된 업무가 없습니다.
+        </div>
+        :view==='month'
+        // ── 월 보기 — 날짜 격자. 칸이 좁아 «사람 + 총 시간» 만 적고, 눌러 그날로 간다.
+        ?<div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:3}}>
+            {['월','화','수','목','금','토','일'].map((d,i)=>(
+              <div key={d} style={{textAlign:'center',fontSize:11,fontWeight:700,padding:'4px 0',
+                color:i>=5?REST_TEXT:'#6b7280'}}>{d}</div>
+            ))}
+            {days.map(d=>{
+              const ri=restInfo(d,restDays,holidayMap)
+              const dim=!isSameMonth(d,ym)
+              const people=shownWorkers.map(w=>[w,totalOf(w.id,d)]).filter(([,h])=>h>0)
+              return(
+                <div key={d} onClick={()=>{setViewDate(d);setView('day')}}
+                  title="눌러서 그날 상세 보기"
+                  style={{border:`1px solid ${ri.rest?REST_LINE:'#e5e7eb'}`,borderRadius:7,
+                    minHeight:78,padding:4,cursor:'pointer',
+                    background:dim?'#fafafa':ri.rest?REST_BG:'#fff',opacity:dim?.55:1}}>
+                  <div style={{fontSize:10,fontWeight:700,marginBottom:3,
+                    color:ri.rest?REST_TEXT:d===today()?'#1a56db':'#6b7280'}}>
+                    {Number(d.slice(8,10))}
+                    {ri.name&&<span style={{marginLeft:3,fontWeight:600}}>{ri.name}</span>}
+                  </div>
+                  {people.map(([w,h])=>badge(w.name,h,workerColor(w.id,workers)))}
+                </div>
+              )
+            })}
+          </div>
+          <div style={{fontSize:11,color:'#6b7280',marginTop:8}}>
+            월 보기는 칸이 좁아 <strong>사람과 총 시간</strong>만 적습니다. 날짜를 누르면 그날 업무 목록이 나옵니다.
+          </div>
+        </div>
+        // ── 일·주 보기 — 사람 × 날짜 격자. 칸 안에 «업무 이름 + 시간».
+        :<div style={{overflowX:'auto'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',minWidth:view==='week'?760:320}}>
+            <thead><tr>
+              <th style={{...thS,width:96,textAlign:'left'}}>사람</th>
+              {days.map(d=>{
+                const ri=restInfo(d,restDays,holidayMap)
+                return(
+                  <th key={d} style={{...thS,background:ri.rest?'#7f1d1d':'#1e3a5f'}}>
+                    {mdLabel(d)} ({dayName(d)})
+                    {ri.name&&<div style={{fontSize:9,fontWeight:600,opacity:.9}}>{ri.name}</div>}
+                  </th>
+                )
+              })}
+            </tr></thead>
+            <tbody>
+              {shownWorkers.map(w=>(
+                <tr key={w.id}>
+                  <td style={{...tdS,textAlign:'left',whiteSpace:'nowrap'}}>
+                    <span style={{display:'inline-flex',alignItems:'center',gap:5}}>
+                      <span style={{width:9,height:9,borderRadius:2,flexShrink:0,
+                        background:workerColor(w.id,workers)}}/>
+                      <strong style={{fontSize:12}}>{w.name}</strong>
+                    </span>
+                    <div style={{fontSize:10,color:'#9ca3af',marginLeft:14}}>
+                      {days.reduce((s,d)=>s+totalOf(w.id,d),0)}h
+                    </div>
+                  </td>
+                  {days.map(d=>{
+                    const ri=restInfo(d,restDays,holidayMap)
+                    const list=tasksOf(w.id,d)
+                    return(
+                      <td key={d} style={{...tdS,verticalAlign:'top',textAlign:'left',
+                        background:ri.rest?REST_BG:'#fff',minWidth:96}}>
+                        {list.length===0
+                          ?<span style={{color:'#d1d5db'}}>-</span>
+                          :list.map(([nm,h])=>badge(nm,h,workerColor(w.id,workers)))}
+                      </td>
+                    )
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>}
+    </Card>
+  )
+}
+
+function TabDaily({history,workers,absences=[],restDays,holidayMap,plans=[],viewDate,setViewDate,jiraTree}){
   const rows=history.filter(r=>r.work_date===viewDate)
   const periodWorkers=workersAvailable(workers,absences,viewDate,viewDate)
   const agg=aggByWorker(rows),total=rows.length
   const wNames=periodWorkers.map(w=>w.name)
   const barData=wNames.map(n=>({name:n,업무수:agg[n]?.total||0}))
   const t8=top8(rows)
+  const dayRest=restInfo(viewDate,restDays,holidayMap)
   return(
     <div>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 18px',marginBottom:16,display:'flex',gap:10,alignItems:'center'}}>
+      {/* 조회한 날이 쉬는 날이면 머리말째 연한 빨강으로 칠한다 —
+          「이 날은 왜 기록이 적은가」 를 숫자를 보기 «전에» 알 수 있어야 한다. */}
+      <div style={{background:dayRest.rest?REST_BG:'#fff',
+        border:`1px solid ${dayRest.rest?REST_LINE:'#e5e7eb'}`,borderRadius:10,
+        padding:'14px 18px',marginBottom:16,display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
         <strong>일간 리포트</strong>
         <input type="date" value={viewDate} onChange={e=>setViewDate(e.target.value)} style={{padding:'6px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
+        <span style={{fontSize:12,color:'#6b7280'}}>{dayName(viewDate)}요일</span>
+        {dayRest.rest&&(
+          <span style={{fontSize:12,fontWeight:700,color:REST_TEXT,background:'#fff',
+            border:`1px solid ${REST_LINE}`,borderRadius:20,padding:'3px 12px'}}>
+            휴일{dayRest.label?` · ${dayRest.label}`:''}
+          </span>
+        )}
       </div>
       <Metrics items={[
         {label:'총 업무 기록',value:total,unit:'h',color:'#1a56db'},
@@ -1606,6 +1839,9 @@ function TabDaily({history,workers,absences=[],restDays,plans=[],viewDate,setVie
           </ResponsiveContainer>
         </Card>}
       </div>
+      <SectionTitle>업무 달력</SectionTitle>
+      <WorkCalendar history={history} workers={workers} restDays={restDays}
+        holidayMap={holidayMap} viewDate={viewDate} setViewDate={setViewDate}/>
       <SectionTitle>직원별 업무 분석</SectionTitle>
       <WorkerAnalysis rows={rows} workers={periodWorkers} jiraTree={jiraTree}/>
       <SectionTitle>프로젝트 기간 비중 분석</SectionTitle>
@@ -1615,7 +1851,7 @@ function TabDaily({history,workers,absences=[],restDays,plans=[],viewDate,setVie
 }
 
 // ── 주간 탭 ───────────────────────────────────────────────
-function TabWeekly({history,workers,absences=[],restDays,plans=[],viewDate,setViewDate,jiraTree}){
+function TabWeekly({history,workers,absences=[],restDays,holidayMap,plans=[],viewDate,setViewDate,jiraTree}){
   const ym=toMonth(viewDate),wk=weekNum(viewDate)
   const wS=weekStart(viewDate),wE=weekEnd(viewDate)
   const rows=history.filter(r=>toMonth(r.work_date)===ym&&weekNum(r.work_date)===wk)
@@ -1625,7 +1861,18 @@ function TabWeekly({history,workers,absences=[],restDays,plans=[],viewDate,setVi
   const wNames=periodWorkers.map(w=>w.name)
   const dm={}
   rows.forEach(r=>{if(!dm[r.work_date])dm[r.work_date]={};dm[r.work_date][r.worker_name]=(dm[r.work_date][r.worker_name]||0)+1})
-  const barData=days.map(d=>{const o={name:d.slice(5)+'('+dayName(d)+')'};wNames.forEach(n=>{o[n]=dm[d][n]||0});return o})
+  // 🔑 그림에는 «그 주 전부» 를 세운다. 예전에는 기록이 있는 날만 세워서
+  //    광복절 주간을 보면 8/15·16·17 이 아예 없었고, 「쉬는 날이라 0」 인지
+  //    「안 적은 것」 인지 그림만 봐서는 알 수 없었다 (2026-08-25).
+  // ⚠ 위 `days` 는 그대로 둔다 — 「근무일수」 지표는 «기록이 있는 날 수» 다.
+  const allDays=(()=>{const out=[];let d=wS;while(d<=wE){out.push(d);d=addDays(d,1)}return out})()
+  // ⚠ 휴일 여부를 데이터에 함께 실어 둔다 — 그림에서 «그 날이 쉬는 날이었는가» 를
+  //   알아야 「기록이 왜 적은가」 를 숫자를 보기 전에 읽을 수 있다.
+  const barData=allDays.map(d=>{
+    const ri=restInfo(d,restDays,holidayMap)
+    const o={name:d.slice(5)+'('+dayName(d)+')',_date:d,_rest:ri.rest,_restName:ri.name}
+    // ⚠ 기록이 하나도 없는 날(쉬는 날)은 `dm[d]` 자체가 없다. 없는 채로 읽으면 터진다.
+    wNames.forEach(n=>{o[n]=dm[d]?.[n]||0});return o})
   const tmData=buildTreemapData(rows,jiraTree)
   const mix=buildTaskMix(rows,r=>({k:r.work_date,label:r.work_date.slice(5)+'('+dayName(r.work_date)+')'}))
   // 연도 선택지 — 기록이 있는 해와 올해를 합쳐 최근순으로
@@ -1665,8 +1912,16 @@ function TabWeekly({history,workers,absences=[],restDays,plans=[],viewDate,setVi
         ,outsideMetric(plans,wS,wE)
       ]}/>
       <Card title="일별 분포 (누적 영역) · 단위: 시간(h)">
+        {/* 쉬는 날은 세로 띠로 칠하고 X축 글자도 빨갛게 한다 */}
+        <RestDayLegend days={barData}/>
         <ResponsiveContainer width="100%" height={260}>
-          <AreaChart data={barData} margin={{top:16,right:12,left:0,bottom:0}}><XAxis dataKey="name" tick={{fontSize:11}}/><YAxis unit="h"/><Tooltip content={<NonZeroTooltip/>}/><Legend wrapperStyle={{fontSize:11}}/>
+          <AreaChart data={barData} margin={{top:16,right:12,left:0,bottom:0}}><XAxis dataKey="name" tick={<RestTick data={barData}/>}/><YAxis unit="h"/><Tooltip content={<NonZeroTooltip/>}/><Legend wrapperStyle={{fontSize:11}}/>
+            {/* ⚠ 범주 축에서는 ReferenceArea 의 x1·x2 가 같으면 «폭 0» 이라 아무것도 안 그려진다.
+                굵은 세로선으로 띠처럼 보이게 한다 — 한 줄로 끝나고 어디서나 확실히 그려진다. */}
+            {barData.filter(b=>b._rest).map(b=>(
+              <ReferenceLine key={b._date} x={b.name} stroke={REST_TEXT}
+                strokeOpacity={0.10} strokeWidth={46} ifOverflow="extendDomain"/>
+            ))}
             {wNames.map((n,i)=>(
               <Area key={n} type="monotone" dataKey={n} stackId="a" stroke={COLORS[i%COLORS.length]} fill={COLORS[i%COLORS.length]} fillOpacity={0.5}>
                 <LabelList dataKey={n} position="top" fontSize={9} fill="#374151" formatter={numLabel}/>
@@ -1694,7 +1949,7 @@ function TabWeekly({history,workers,absences=[],restDays,plans=[],viewDate,setVi
 }
 
 // ── 월간 탭 ───────────────────────────────────────────────
-function TabMonthly({history,workers,absences=[],restDays,plans=[],viewMonth,setViewMonth,jiraTree}){
+function TabMonthly({history,workers,absences=[],restDays,holidayMap,plans=[],viewMonth,setViewMonth,jiraTree}){
   const mS=viewMonth+'-01',mE=monthEnd(viewMonth)
   const rows=history.filter(r=>toMonth(r.work_date)===viewMonth)
   const periodWorkers=workersAvailable(workers,absences,mS,mE)
@@ -1710,6 +1965,11 @@ function TabMonthly({history,workers,absences=[],restDays,plans=[],viewMonth,set
   // 연도 선택지 — 기록이 있는 해와 올해를 합쳐 최근순 (주간 탭과 동일)
   const yearOptions=[...new Set([...history.map(r=>r.work_date.slice(0,4)),today().slice(0,4)])].sort((a,b)=>b-a)
   const selS={padding:'6px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,fontWeight:700,cursor:'pointer',background:'#fff'}
+  // 그 달의 공휴일 (주말은 뺀다 — 주말은 매달 같아 적어 봐야 알려 주는 것이 없다)
+  const monthHolidays=[...(holidayMap||new Map()).entries()]
+    .filter(([d])=>d.slice(0,7)===viewMonth)
+    .sort((a,b)=>a[0].localeCompare(b[0]))
+    .map(([date,name])=>({date,name}))
   return(
     <div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 18px',marginBottom:16,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
@@ -1725,6 +1985,15 @@ function TabMonthly({history,workers,absences=[],restDays,plans=[],viewMonth,set
           ))}
         </select>
         <span style={{fontSize:12,color:'#6b7280'}}>{mS} ~ {mE.slice(5)}</span>
+        {/* 월간에는 «날짜 축» 이 없다(주차 단위라). 그래서 색을 칠할 자리가 없어
+            대신 그 달의 공휴일을 이름과 함께 한 줄로 적는다 —
+            가동일의 분모가 되는 값이라 숫자를 읽기 «전에» 알아야 한다. */}
+        {monthHolidays.length>0&&(
+          <span style={{fontSize:12,fontWeight:600,color:REST_TEXT,background:REST_BG,
+            border:`1px solid ${REST_LINE}`,borderRadius:20,padding:'3px 12px'}}>
+            공휴일 {monthHolidays.length}일 — {monthHolidays.map(h=>`${Number(h.date.slice(8,10))}일 ${h.name}`).join(' · ')}
+          </span>
+        )}
       </div>
       <Metrics items={[
         {label:'총 업무 기록',value:total,unit:'h',color:'#1a56db'},
