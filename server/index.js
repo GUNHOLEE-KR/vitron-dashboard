@@ -708,9 +708,10 @@ app.delete('/api/schedule/places/:id', async (req, res) => {
 app.get('/api/schedule/vehicles', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT v.*, w.name AS owner_name
+      `SELECT v.*, w.name AS owner_name, aw.name AS assigned_worker_name
          FROM schedule_vehicles v
-         LEFT JOIN workers w ON w.id = v.owner_worker_id
+         LEFT JOIN workers w  ON w.id  = v.owner_worker_id
+         LEFT JOIN workers aw ON aw.id = v.assigned_worker_id
         WHERE ($1 = 'true' OR v.active)
         ORDER BY v.kind ASC, v.name ASC, v.id ASC`,
       [String(req.query.all === '1')]
@@ -746,18 +747,37 @@ app.post('/api/schedule/vehicles', async (req, res) => {
 
 // 단가·연비는 정산 금액에 직접 영향을 준다. 화면에서 대표이사만 부를 수 있게 하고,
 // 여기서는 값만 바꾼다 (권한 판정은 정산 화면에서 한다 — 설계서 4.2절)
+// 🔴 2026-08-25: 여기에 지뢰가 있었다. 예전에는 본문에 «없는» 칸까지 그대로
+//    `fuel_type = $3` 로 덮어써, 한 칸만 고치려고 부르면 나머지가 통째로 NULL 이
+//    됐다. 실제로 Model Y 의 연료(전기)와 단가(100원/km)를 날렸다 —
+//    단가는 정산 금액이 걸린 값이다.
+//    🔑 **보낸 칸만 고친다.** 4번 문서 4.7절의 「수정 항목마다 경로를 나눈다」와
+//       같은 이유이고, 칸이 늘어날수록 사고가 커지므로 여기서 아예 막는다.
+//    ⚠ null 을 «명시해서» 보내면 지운다 — 「안 보냄」과 「비우기」는 다른 뜻이다.
+const VEHICLE_PATCH_COLS = ['name', 'plate', 'fuel_type', 'rate_per_km',
+                            'km_per_liter', 'memo', 'active', 'assigned_worker_id']
+
 app.patch('/api/schedule/vehicles/:id', async (req, res) => {
-  const { name, plate, fuel_type, rate_per_km, km_per_liter, memo, active } = req.body
+  const sets = [], vals = []
+  for (const col of VEHICLE_PATCH_COLS) {
+    if (!(col in req.body)) continue                  // 안 보낸 칸은 손대지 않는다
+    let v = req.body[col]
+    if (col === 'name') {
+      if (!v || !String(v).trim()) continue           // 이름은 비울 수 없다
+      v = String(v).trim()
+    } else if (col === 'active') {
+      v = !!v
+    } else if (v === '' || v === undefined) {
+      v = null                                        // 빈 칸은 «비우기» 로 읽는다
+    }
+    vals.push(v)
+    sets.push(`${col} = $${vals.length}`)
+  }
+  if (!sets.length) return res.json({ ok: true })     // 바꿀 것이 없으면 그냥 통과
+  vals.push(req.params.id)
   try {
     const { rowCount } = await pool.query(
-      `UPDATE schedule_vehicles
-          SET name = COALESCE($1, name), plate = $2, fuel_type = $3,
-              rate_per_km = $4, km_per_liter = $5, memo = $6,
-              active = COALESCE($7, active)
-        WHERE id = $8`,
-      [name ? String(name).trim() : null, plate || null, fuel_type || null,
-       rate_per_km ?? null, km_per_liter ?? null, memo || null,
-       active === undefined ? null : !!active, req.params.id]
+      `UPDATE schedule_vehicles SET ${sets.join(', ')} WHERE id = $${vals.length}`, vals
     )
     if (rowCount === 0) return res.status(404).json({ error: '해당 차량을 찾을 수 없습니다.' })
     res.json({ ok: true })
@@ -772,6 +792,7 @@ const PLAN_SELECT = `
   SELECT p.*, w.name AS worker_name, w.team AS worker_team,
          pl.name AS place_name, pl.category AS place_category,
          v.name AS vehicle_name, v.plate AS vehicle_plate, v.kind AS vehicle_kind,
+         v.assigned_worker_id AS vehicle_assigned_worker_id,
          a.id AS actual_id, a.as_planned, a.distance_km AS actual_distance_km
     FROM schedule_plans p
     LEFT JOIN workers w          ON w.id  = p.worker_id

@@ -3858,6 +3858,22 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
     finally{ setBusy(false) }
   }
 
+  // 전용(상용) 배정 — 늘 같은 사람이 타는 차는 그 사람 일정에 알림 메일을 보내지 않는다.
+  // ⚠ 코드에 박지 않고 여기서 고르게 둔 이유 = 배정은 바뀐다. 바뀔 때마다 배포해야
+  //   한다면 결국 낡은 채로 남는다.
+  async function assign(v,workerId){
+    try{
+      setBusy(true)
+      // ⚠ «이 칸만» 보낸다. 예전에는 서버가 안 보낸 칸을 NULL 로 덮어써
+      //   단가·연료가 지워졌다(2026-08-25). 지금은 서버도 보낸 칸만 고친다.
+      await updateVehicle(v.id,{assigned_worker_id:workerId?Number(workerId):null})
+      showToast(workerId?`${v.name} 을 ${nameOf(Number(workerId))} 전용으로 두었습니다`
+                        :`${v.name} 의 전용 배정을 풀었습니다`)
+      await onChanged()
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
   return(
     <Card title="차량 관리" style={{flex:1,minWidth:320}}>
       <div style={{fontSize:12,fontWeight:700,color:'#374151',marginBottom:6}}>법인차량 {company.length}대</div>
@@ -3865,7 +3881,8 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
         <thead><tr>
           <th style={{...thS,textAlign:'left'}}>차량</th>
           <th style={{...thS,width:70}}>연료</th>
-          <th style={{...thS,width:96}}>개인사용 단가</th>
+          <th style={{...thS,width:88}}>개인사용 단가</th>
+          <th style={{...thS,width:112}}>전용 사용자</th>
         </tr></thead>
         <tbody>
           {company.map(v=>(
@@ -3876,12 +3893,25 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
               </td>
               <td style={tdS}>{v.fuel_type||'-'}</td>
               <td style={tdS}>{v.rate_per_km!=null?`${v.rate_per_km}원/km`:'-'}</td>
+              <td style={tdS}>
+                <select value={v.assigned_worker_id??''} disabled={busy}
+                  onChange={e=>assign(v,e.target.value)}
+                  style={{padding:'3px 4px',border:'1px solid #e5e7eb',borderRadius:6,
+                          fontSize:11,width:'100%'}}>
+                  <option value="">공용</option>
+                  {workers.filter(w=>w.active).map(w=>(
+                    <option key={w.id} value={w.id}>{workerLabel(w,dupNames)}</option>
+                  ))}
+                </select>
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
       <div style={{fontSize:11,color:'#6b7280',marginBottom:16}}>
         법인차량 단가는 정산 금액에 직접 영향을 주므로 <strong>정산 화면에서 대표이사만</strong> 고칠 수 있습니다.
+        <br/><strong>전용 사용자</strong>를 지정하면 그 사람이 그 차로 잡은 일정은 알림 메일을 보내지 않습니다
+        (늘 같은 사람이 타는 상용 차량). <strong>다른 사람이 그 차를 잡으면 그때는 보냅니다.</strong>
       </div>
 
       <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
@@ -4020,6 +4050,8 @@ function MailStatusCard(){
             보낸사람은 <b>등록한 직원 이름</b>으로 보이고, <b>답장하면 그 직원에게</b> 갑니다.
             받는 쪽에서는 제목의 <code>[차량]</code> 으로 거르시면 됩니다.
             <br/>자차 업무는 회사 차를 잡지 않으므로 보내지 않습니다.
+            <br/><strong>전용 사용자</strong>가 지정된 차량은 그 사람의 일정도 보내지 않습니다
+            (차량 관리 카드에서 지정).
           </div>
         </>
       )}
