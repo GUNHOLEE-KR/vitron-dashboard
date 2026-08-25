@@ -7,7 +7,7 @@ import { getAbsences, addAbsence, removeAbsence } from './repositories/absenceRe
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
 import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
 import { getPlaces, addPlace, updatePlace, hidePlace, getVehicles, addVehicle, updateVehicle,
-         getPlans, addPlan, updatePlan, removePlan, getActuals, addActual, updateActual,
+         getPlans, getMailStatus, addPlan, updatePlan, removePlan, getActuals, addActual, updateActual,
          removeActual, login, logout, whoAmI, getSettlement, approveSettlement,
          reopenSettlement } from './repositories/scheduleRepo'
 import { getHolidays, syncHolidays, addHoliday, setHolidayWorking, removeHoliday,
@@ -3349,9 +3349,13 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
       const targets=[...dates].sort()
       const conflicts=[]   // 차량이 겹친 날짜
       let done=0
+      // 🔑 «이번 한 번의 등록» 을 서버가 알아볼 표를 붙인다 (2026-08-25).
+      //    출장 3일을 넣으면 계획은 세 번 저장되는데, 대표이사에게 갈 알림 메일까지
+      //    세 통이면 못 쓴다. 서버가 이 표로 묶어 한 통으로 보낸다.
+      const batchId=`${Date.now()}-${Math.random().toString(36).slice(2,8)}`
       for(const d of targets){
         try{
-          await addPlan(buildBody(d,usePlaceId,useKm,useMin))
+          await addPlan({...buildBody(d,usePlaceId,useKm,useMin),batch_id:batchId})
           done++
         }catch(e){
           if(e.status===409&&e.conflicts?.length){
@@ -3365,7 +3369,10 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
         const lines=conflicts.map(c=>`· ${c.date} — ${c.names.join('·')}`).join('\n')
         if(confirm(`아래 날짜는 그 차량이 이미 예약돼 있습니다.\n\n${lines}\n\n그래도 등록할까요?`)){
           for(const c of conflicts){
-            await addPlan(buildBody(c.date,usePlaceId,useKm,useMin,true))
+            // 겹친 줄도 같은 묶음이다. 겹쳤다는 사실은 메일에도 적힌다
+            await addPlan({...buildBody(c.date,usePlaceId,useKm,useMin,true),
+              batch_id:batchId,
+              conflicts_ack:c.names.map(n=>({worker_name:n,slot:slot}))})
             done++
           }
         }
@@ -3980,6 +3987,45 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
 // 서버가 하루 1회 외부 달력(Google 「대한민국의 휴일」)에서 받아 둔다.
 // 🔑 자동으로 받아 온 것(auto)과 손으로 넣은 것(manual)을 구분해 보여 준다 —
 //    구분이 없으면 「이걸 지워도 되나」를 사람이 알 수 없다.
+// 차량 알림 메일이 살아 있는가 (2026-08-25 신설)
+// 🔑 이 기능의 가장 큰 위험은 «조용히 멈추는 것» 이다 — 앱 비밀번호를 바꾸면
+//    아무 증상 없이 메일만 안 간다. 그래서 마지막 결과를 늘 보이게 둔다.
+function MailStatusCard(){
+  const [st,setSt]=useState(null)
+  useEffect(()=>{ getMailStatus().then(setSt).catch(()=>setSt({error:true})) },[])
+  if(!st) return null
+  const bad = st.error || st.enabled===false || st.ok===false
+  return(
+    <Card title="차량 예약 알림 메일" style={{flex:1,minWidth:340}}>
+      {st.error ? (
+        <div style={{fontSize:12,color:'#b91c1c'}}>상태를 읽지 못했습니다.</div>
+      ) : (
+        <>
+          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+            <span style={{padding:'2px 9px',borderRadius:9,fontSize:11,fontWeight:700,color:'#fff',
+              background:st.enabled?(st.ok===false?'#dc2626':'#0d7a4e'):'#9ca3af'}}>
+              {st.enabled?(st.ok===false?'실패':'켜짐'):'꺼짐'}
+            </span>
+            <span style={{fontSize:12,color:'#6b7280'}}>
+              {st.enabled?'차량이 걸린 예약을 등록·변경·취소하면 대표이사에게 갑니다.'
+                         :'메일 설정(.env)이 없어 보내지 않습니다.'}
+            </span>
+          </div>
+          <div style={{fontSize:11,color:bad?'#b91c1c':'#6b7280',lineHeight:1.8,
+            background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:7,padding:'8px 11px'}}>
+            <div><b>마지막 발송</b> — {st.at||'없음'}</div>
+            <div>{st.detail}</div>
+          </div>
+          <div style={{fontSize:11,color:'#9ca3af',marginTop:6,lineHeight:1.7}}>
+            보낸사람은 <b>등록한 직원 이름</b>으로 보이고, <b>답장하면 그 직원에게</b> 갑니다.
+            받는 쪽에서는 제목의 <code>[차량]</code> 으로 거르시면 됩니다.
+            <br/>자차 업무는 회사 차를 잡지 않으므로 보내지 않습니다.
+          </div>
+        </>
+      )}
+    </Card>
+  )
+}
 function HolidayManager({holidays,setHolidays,showToast}){
   const [date,setDate]=useState(today())
   const [name,setName]=useState('')
@@ -4316,6 +4362,9 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
         <AbsenceManager absences={absences} setAbsences={setAbsences} workers={workers}
           dupNames={dupNames} showToast={showToast}/>
         <HolidayManager holidays={holidays} setHolidays={setHolidays} showToast={showToast}/>
+      </div>
+      <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
+        <MailStatusCard/>
       </div>
       <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
         <Card title="직원 관리" style={{flex:1,minWidth:300}}>

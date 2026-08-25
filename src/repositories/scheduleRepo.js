@@ -40,6 +40,10 @@ export const addVehicle = (vehicle) => request('POST', '/vehicles', vehicle)
 export const updateVehicle = (id, patch) => request('PATCH', `/vehicles/${id}`, patch)
 
 // ── 계획 ──
+// 차량 알림 메일이 살아 있는가 (설정 탭 카드용).
+// 🔑 «조용히 멈추는 것» 이 이 기능의 가장 큰 위험이라 상태를 늘 볼 수 있게 둔다.
+export const getMailStatus = () => request('GET', '/mail-status')
+
 export function getPlans(from, to, filters = {}) {
   const q = new URLSearchParams({ from, to })
   if (filters.worker_id) q.set('worker_id', filters.worker_id)

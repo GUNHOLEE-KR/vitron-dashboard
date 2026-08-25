@@ -12,8 +12,12 @@ dist
 dist-ssr
 *.local
 
-# 환경변수 (DB 비밀번호, Jira 토큰 포함)
+# 환경변수 (DB 비밀번호, Jira 토큰, 메일 앱 비밀번호 포함)
 .env
+# 🔴 .env 를 고치기 전에 뜨는 사본도 «반드시» 함께 막는다.
+#    이름만 다를 뿐 안에 든 비밀은 똑같은데 `.env` 만 막으면 조용히 딸려 올라간다.
+.env.bak*
+.env.*.bak
 
 # push-to-nas.ps1 이 만드는 임시 전송 파일
 vitron-src.tar.gz

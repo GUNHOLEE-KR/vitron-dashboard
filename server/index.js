@@ -5,6 +5,7 @@ const cors = require('cors')
 // fetch 는 Node 18+ 내장 전역을 쓴다 (node-fetch v2 는 AbortSignal.timeout 과 호환되지 않음)
 
 // DATE 타입을 JS Date 객체가 아닌 YYYY-MM-DD 문자열로 반환
+const mailer = require('./mailer')
 const { types } = require('pg')
 types.setTypeParser(1082, val => val)
 
@@ -797,6 +798,12 @@ app.get('/api/schedule/plans', async (req, res) => {
 })
 
 // 같은 날 같은 차량을 쓰려는 계획이 있는지 알려 준다(달력에서 미리 보여 주기 위함).
+// 차량 알림 메일이 살아 있는가. 🔑설정 화면이 이걸 읽는다 —
+// 비밀번호가 바뀌어 조용히 멈추는 것이 이 기능의 가장 큰 위험이다.
+app.get('/api/schedule/mail-status', (req, res) => {
+  res.json(mailer.lastResult())
+})
+
 app.get('/api/schedule/vehicle-usage', async (req, res) => {
   const { from, to } = req.query
   if (!from || !to) return res.status(400).json({ error: 'from·to 날짜가 필요합니다.' })
@@ -866,11 +873,34 @@ app.post('/api/schedule/plans', async (req, res) => {
        b.est_distance_km ?? null, b.est_travel_min ?? null,
        roundTrip, vacationType, oneWayDir(roundTrip, b.one_way_dir)]
     )
+    // 🔑 차량 알림 — 저장은 이미 끝났다. 메일은 «덤» 이라 await 하지 않는다.
+    //    이름(차량·장소·직원)이 붙은 줄이 필요해 조회용 SELECT 로 한 번 더 읽는다.
+    notifyVehicle('create', rows[0].id, req, b.batch_id, b.conflicts_ack)
     res.json(rows[0])
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
 })
+
+// 알림용으로 «이름까지 붙은» 계획 한 줄을 읽어 mailer 에 넘긴다.
+// ⚠ 실패해도 삼킨다 — 알림 때문에 예약이 흔들리면 안 된다.
+async function notifyVehicle(kind, planId, req, batchId, conflicts) {
+  try {
+    if (!mailer.isEnabled()) return
+    const { rows } = await pool.query(`${PLAN_SELECT} WHERE p.id = $1`, [planId])
+    if (!rows.length) return
+    mailer.notify({
+      kind,
+      plans: rows[0],
+      conflicts,
+      batchId,
+      // 답장은 «등록한 사람» 에게 간다. session.login 이 회사 메일 주소다.
+      actor: { name: req.session?.name, email: req.session?.login },
+    })
+  } catch (e) {
+    console.error(`[mail] notifyVehicle(${kind}) :: ${e.message}`)
+  }
+}
 
 app.patch('/api/schedule/plans/:id', async (req, res) => {
   const b = req.body
@@ -907,6 +937,8 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
                  b.one_way_dir === undefined ? cur[0].one_way_dir : b.one_way_dir)]
     )
     if (rowCount === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
+    // 고친 뒤의 모습으로 알린다. 차량이 빠졌으면 mailer 가 알아서 거른다.
+    notifyVehicle('update', req.params.id, req)
     res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -926,9 +958,24 @@ app.delete('/api/schedule/plans/:id', async (req, res) => {
     if (rows.some(r => r.locked)) {
       return res.status(409).json({ error: '정산이 완료된 달의 기록은 지울 수 없습니다.' })
     }
+    // 🔑 지우기 «전에» 읽어 둔다. 지운 뒤에는 무엇을 취소했는지 알 길이 없다.
+    let doomed = null
+    try {
+      if (mailer.isEnabled()) {
+        const { rows: r } = await pool.query(`${PLAN_SELECT} WHERE p.id = $1`, [req.params.id])
+        doomed = r[0] || null
+      }
+    } catch { /* 알림용이라 실패해도 삭제는 그대로 진행한다 */ }
+
     await pool.query('DELETE FROM schedule_actuals WHERE plan_id = $1', [req.params.id])
     const { rowCount } = await pool.query('DELETE FROM schedule_plans WHERE id = $1', [req.params.id])
     if (rowCount === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
+    if (doomed) {
+      mailer.notify({
+        kind: 'delete', plans: doomed,
+        actor: { name: req.session?.name, email: req.session?.login },
+      })
+    }
     res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ error: e.message })
