@@ -31,6 +31,31 @@ const isOffHourRow=(r,holidaySet)=>{
   return !isBusinessHour(Number(r.work_hour))
 }
 const countOffHours=(rows,holidaySet)=>rows.filter(r=>isOffHourRow(r,holidaySet)).length
+// 외근 / 내근 (2026-08-25 요청) — 「사무실 내근을 제외한 모든 항목이 외근」.
+// 근거는 일정 관리의 «이동 수단» 뿐이다. 업무 기록에는 장소가 없다.
+// 🔑 «건수» 가 아니라 «사람·날짜» 로 센다. 하루에 계획을 두 건 적었다고 이틀 나간 것이 아니다.
+//    한 날에 둘이 섞이면 **외근**으로 본다 — 반나절이라도 나갔으면 그날은 나간 날이다.
+// ⚠ 휴가·차량 개인사용은 뺀다. 근무 위치를 보는 값인데 휴가가 섞이면 내근율이 제멋대로 움직인다.
+// ⚠ 일정을 아예 안 적었으면 «내근 100%» 가 아니라 «모른다» 다 → total 0 이면 화면이 '-' 를 그린다.
+function outsideInside(plans,from,to){
+  const day=new Map()
+  ;(plans||[]).forEach(p=>{
+    if(p.use_type!=='business')return
+    const d=p.plan_date; if(!d||d<from||d>to)return
+    const key=`${p.worker_id}|${d}`
+    day.set(key,(day.get(key)||false)||p.transport!=='office')
+  })
+  let out=0,inside=0
+  day.forEach(wentOut=>{wentOut?out++:inside++})
+  return {out,inside,total:out+inside}
+}
+// 지표 카드에 넣을 문구. 분모가 0 이면 숫자를 지어내지 않는다.
+const outsideMetric=(plans,from,to)=>{
+  const r=outsideInside(plans,from,to)
+  return {label:'외근 / 내근',color:'#0369a1',
+    value:r.total?`${r.out} / ${r.inside}`:'-',
+    unit:r.total?`일 (외근 ${Math.round(r.out/r.total*100)}%)`:''}
+}
 const COLORS=['#3b82f6','#10b981','#f59e0b','#8b5cf6','#06b6d4','#ec4899','#84cc16','#f97316']
 // Jira 에 넣기 애매한 «끝이 없는» 반복 업무(주간회의 등)를 모아 두는 상위업무 이름.
 // 내부적으로는 수동 추가(MANUAL-…)와 같은 것이라 Jira 동기화가 지우지 않는다.
@@ -1054,6 +1079,7 @@ function Dashboard({me,onLoggedOut}){
   const [actuals,setActuals]=useState([])
   const [actualDialog,setActualDialog]=useState(null)   // {plan} — 실적 입력 창
   const [schedLoading,setSchedLoading]=useState(false)
+  const [schedLoaded,setSchedLoaded]=useState(false)   // 한 번 받았는가 (탭마다 다시 받지 않게)
   const [planDialog,setPlanDialog]=useState(null)   // {editing} | {date} | null
   const [schedFocus,setSchedFocus]=useState('')     // 등록 직후 달력을 옮길 날짜
   const [clipboard,setClipboard]=useState(null)     // 복사한 계획 (달력에서 붙여넣기)
@@ -1152,16 +1178,23 @@ function Dashboard({me,onLoggedOut}){
         getActuals(`${y-1}-01-01`,`${y+1}-12-31`)
       ])
       setPlaces(pl); setVehicles(vh); setPlans(pn); setActuals(ac)
+      setSchedLoaded(true)
     }catch(e){ showToast('스케줄 조회 실패: '+e.message) }
     finally{ setSchedLoading(false) }
   }
 
-  // 스케줄 탭과 설정 탭(차량 관리)이 같은 데이터를 쓴다.
+  // 스케줄·설정 탭이 같은 데이터를 쓰고, 2026-08-25 부터 «리포트 탭도» 쓴다 —
+  // 지표 카드의 「외근 / 내근」 이 일정의 이동 수단을 근거로 삼기 때문이다.
   // 로그인 확인은 최상위 관문에서 이미 끝났으므로 여기서 다시 묻지 않는다.
+  //
+  // ⚠ 「한 번만 받는다」 를 «장소·차량이 0건인가» 로 판정하면 안 된다 —
+  //   실제로 0건인 상태에서는 탭을 옮길 때마다 다시 받는다. 받았다는 사실을 따로 둔다.
   useEffect(()=>{
-    if((tab==='schedule'||tab==='settings')&&places.length===0&&vehicles.length===0) loadSchedule()
+    const needs = tab==='schedule'||tab==='settings'
+      ||tab==='daily'||tab==='weekly'||tab==='monthly'||tab==='yearly'
+    if(needs&&!schedLoaded) loadSchedule()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[tab])
+  },[tab,schedLoaded])
 
   // 복사한 계획을 고른 칸들에 붙인다.
   // 주 뷰에서 고른 칸은 사람이 함께 정해지므로 그 사람에게 붙고,
@@ -1257,10 +1290,10 @@ function Dashboard({me,onLoggedOut}){
           jiraTree={jiraTree} jiraDone={jiraDone} selWorkerId={selWorkerId} setSelWorkerId={setSelWorkerId}
           onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}
           history={historyForStats} me={me} canEditOthers={canEditOthers}/>}
-        {tab==='daily'   &&<TabDaily   history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
-        {tab==='weekly'  &&<TabWeekly  history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
-        {tab==='monthly' &&<TabMonthly history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
-        {tab==='yearly'  &&<TabYearly  history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
+        {tab==='daily'   &&<TabDaily   history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} plans={plans} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
+        {tab==='weekly'  &&<TabWeekly  history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} plans={plans} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
+        {tab==='monthly' &&<TabMonthly history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} plans={plans} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
+        {tab==='yearly'  &&<TabYearly  history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} plans={plans} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
         {tab==='schedule'&&<TabSchedule workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
           places={places} vehicles={vehicles} plans={plans} loading={schedLoading}
           onReload={loadSchedule} showToast={showToast} focusDate={schedFocus}
@@ -1526,7 +1559,7 @@ function SectionTitle({children}){
 }
 
 // ── 일간 탭 ───────────────────────────────────────────────
-function TabDaily({history,workers,absences=[],restDays,viewDate,setViewDate,jiraTree}){
+function TabDaily({history,workers,absences=[],restDays,plans=[],viewDate,setViewDate,jiraTree}){
   const rows=history.filter(r=>r.work_date===viewDate)
   const periodWorkers=workersAvailable(workers,absences,viewDate,viewDate)
   const agg=aggByWorker(rows),total=rows.length
@@ -1545,6 +1578,7 @@ function TabDaily({history,workers,absences=[],restDays,viewDate,setViewDate,jir
         {label:'업무 종류',value:Object.keys(aggByWork(rows)).length,unit:'종',color:'#b45309'},
         {label:'1인 평균',value:avgHours(total,Object.keys(agg).length),unit:'h',color:'#6d28d9'}
         ,{label:'야간·휴일',value:countOffHours(rows,restDays),unit:'h',color:'#b91c1c'}
+        ,outsideMetric(plans,viewDate,viewDate)
       ]}/>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <Card title="직원별 업무량 · 단위: 시간(h)" style={{flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
@@ -1574,7 +1608,7 @@ function TabDaily({history,workers,absences=[],restDays,viewDate,setViewDate,jir
 }
 
 // ── 주간 탭 ───────────────────────────────────────────────
-function TabWeekly({history,workers,absences=[],restDays,viewDate,setViewDate,jiraTree}){
+function TabWeekly({history,workers,absences=[],restDays,plans=[],viewDate,setViewDate,jiraTree}){
   const ym=toMonth(viewDate),wk=weekNum(viewDate)
   const wS=weekStart(viewDate),wE=weekEnd(viewDate)
   const rows=history.filter(r=>toMonth(r.work_date)===ym&&weekNum(r.work_date)===wk)
@@ -1621,6 +1655,7 @@ function TabWeekly({history,workers,absences=[],restDays,viewDate,setViewDate,ji
         {label:'일평균',value:avgHours(total,days.length),unit:'h',color:'#b45309'},
         {label:'1인 합계',value:avgHours(total,wNames.length),unit:'h',color:'#6d28d9'}
         ,{label:'야간·휴일',value:countOffHours(rows,restDays),unit:'h',color:'#b91c1c'}
+        ,outsideMetric(plans,wS,wE)
       ]}/>
       <Card title="일별 분포 (누적 영역) · 단위: 시간(h)">
         <ResponsiveContainer width="100%" height={260}>
@@ -1652,7 +1687,7 @@ function TabWeekly({history,workers,absences=[],restDays,viewDate,setViewDate,ji
 }
 
 // ── 월간 탭 ───────────────────────────────────────────────
-function TabMonthly({history,workers,absences=[],restDays,viewMonth,setViewMonth,jiraTree}){
+function TabMonthly({history,workers,absences=[],restDays,plans=[],viewMonth,setViewMonth,jiraTree}){
   const mS=viewMonth+'-01',mE=monthEnd(viewMonth)
   const rows=history.filter(r=>toMonth(r.work_date)===viewMonth)
   const periodWorkers=workersAvailable(workers,absences,mS,mE)
@@ -1690,6 +1725,7 @@ function TabMonthly({history,workers,absences=[],restDays,viewMonth,setViewMonth
         {label:'업무 종류',value:Object.keys(aggByWork(rows)).length,unit:'종',color:'#b45309'},
         {label:'1인 총 업무',value:avgHours(total,wNames.length),unit:'h',color:'#6d28d9'}
         ,{label:'야간·휴일',value:countOffHours(rows,restDays),unit:'h',color:'#b91c1c'}
+        ,outsideMetric(plans,mS,mE)
       ]}/>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <Card title="주차별 분포 (누적 영역) · 단위: 시간(h)" style={{flex:2,minWidth:260,maxWidth:'100%',boxSizing:'border-box'}}>
@@ -1730,7 +1766,7 @@ function TabMonthly({history,workers,absences=[],restDays,viewMonth,setViewMonth
 }
 
 // ── 연간 탭 ───────────────────────────────────────────────
-function TabYearly({history,workers,absences=[],restDays,viewYear,setViewYear,jiraTree}){
+function TabYearly({history,workers,absences=[],restDays,plans=[],viewYear,setViewYear,jiraTree}){
   const yS=viewYear+'-01-01',yE=viewYear+'-12-31'
   const rows=history.filter(r=>toYear(r.work_date)===viewYear)
   const periodWorkers=workersAvailable(workers,absences,yS,yE)
@@ -1756,6 +1792,7 @@ function TabYearly({history,workers,absences=[],restDays,viewYear,setViewYear,ji
         {label:'업무 종류',value:Object.keys(aggByWork(rows)).length,unit:'종',color:'#b45309'},
         {label:'1인 연간 합계',value:avgHours(total,wNames.length),unit:'h',color:'#6d28d9'}
         ,{label:'야간·휴일',value:countOffHours(rows,restDays),unit:'h',color:'#b91c1c'}
+        ,outsideMetric(plans,yS,yE)
       ]}/>
       <Card title="월별 업무량 추이 · 단위: 시간(h)">
         <ResponsiveContainer width="100%" height={260}>
