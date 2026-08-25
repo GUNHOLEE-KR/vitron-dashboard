@@ -1066,6 +1066,52 @@ app.get('/api/schedule/actuals', async (req, res) => {
   }
 })
 
+// 보고 결과를 실적에 적는다. 「보냈다」와 「왜 안 보냈다」를 한 쌍으로 남긴다.
+const markReport = (id, at, skip) => pool.query(
+  'UPDATE schedule_actuals SET reported_at = $1, report_skip = $2 WHERE id = $3',
+  [at, skip, id])
+
+// 완료 보고 메일용으로 «이름까지 붙은» 실적 한 줄을 읽어 mailer 에 넘긴다.
+// ⚠ 실패해도 삼킨다 — 보고 때문에 완료 처리가 흔들리면 안 된다.
+async function notifyDone(actualId, req) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT a.*, w.name AS worker_name,
+              pl.name AS place_name,
+              v.name AS vehicle_name, v.plate AS vehicle_plate
+         FROM schedule_actuals a
+         LEFT JOIN workers w           ON w.id  = a.worker_id
+         LEFT JOIN schedule_places pl  ON pl.id = a.place_id
+         LEFT JOIN schedule_vehicles v ON v.id  = a.vehicle_id
+        WHERE a.id = $1`, [actualId])
+    if (!rows.length) return
+    const a = rows[0]
+
+    // 🔑 «당일에 처리한 것만» 보고한다 (2026-08-26 사용자 결정).
+    //    늦게 넣은 것은 보내는 대신 «누락» 으로 적는다. 지우지 않고 적는 이유는,
+    //    안 보낸 사실이 어디에도 없으면 「보고가 없었다」와 「일을 안 했다」를
+    //    구분할 수 없기 때문이다. 나중에 KPI 가 이 칸을 세어 누락 건수를 낸다.
+    // ⚠ 출장처럼 늦게 복귀해 늦어진 것은 감점 대상이 아니다(사용자 방침).
+    //    그 판정은 KPI 쪽에서 transport·use_type 을 보고 한다 — 여기서는 사실만 적는다.
+    if (String(a.work_date) !== todayLocal()) {
+      await markReport(actualId, null, 'late')
+      console.log(`[mail] skip(late) actual#${actualId} :: work_date ${a.work_date}`)
+      return
+    }
+    if (!mailer.isEnabled()) { await markReport(actualId, null, 'mail_off'); return }
+
+    // 답장은 «처리한 사람» 에게 간다. session.login 이 회사 메일 주소다.
+    mailer.notifyDone({
+      actual: a,
+      actor: { name: req.session?.name, email: req.session?.login },
+      onResult: ok => markReport(actualId, ok ? new Date() : null, ok ? null : 'failed')
+        .catch(e => console.error(`[mail] markReport(${actualId}) :: ${e.message}`)),
+    })
+  } catch (e) {
+    console.error(`[mail] notifyDone :: ${e.message}`)
+  }
+}
+
 // 「계획대로」 한 번 누르면 계획 내용을 그대로 실적으로 만든다.
 // 계획 없이 생긴 일도 기록할 수 있게 plan_id 없이도 받는다.
 app.post('/api/schedule/actuals', async (req, res) => {
@@ -1121,6 +1167,11 @@ app.post('/api/schedule/actuals', async (req, res) => {
         [b.as_planned === false ? 'changed' : 'done', b.plan_id]
       )
     }
+    // 🔑 작업 완료 보고는 화면이 아니라 «여기» 에 건다 (2026-08-26 신설).
+    //    「계획대로 완료」는 차량·대중교통이면 실적 창을 열고 아니면 그 자리에서
+    //    처리하는 두 갈래인데, 둘 다 결국 이 API 로 모인다. 화면 두 곳에 각각
+    //    걸면 한쪽을 조용히 빠뜨린다 — 배차표 필터에서 이미 겪은 종류의 실수다.
+    notifyDone(rows[0].id, req)
     res.json(rows[0])
   } catch (e) {
     res.status(500).json({ error: e.message })

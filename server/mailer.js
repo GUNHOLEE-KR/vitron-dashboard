@@ -26,6 +26,11 @@ const cfg = () => ({
   pass: process.env.MAIL_PASS || '',
   from: process.env.MAIL_FROM || '',
   to:   process.env.MAIL_TO || '',
+  // 완료 보고만 다른 사람에게 보낼 수 있게 열어 둔다.
+  // ⏳ 지금은 «시험 중» 이라 담당자 본인 주소로 돌려 두었다 (2026-08-26 사용자 지시).
+  //    MAIL_TO 를 통째로 바꾸면 «차량 예약 알림까지» 따라가므로 칸을 나눴다.
+  //    시험이 끝나면 .env 에서 MAIL_TO_REPORT 줄만 빼면 대표이사에게 간다.
+  toReport: process.env.MAIL_TO_REPORT || process.env.MAIL_TO || '',
 })
 
 const isEnabled = () => {
@@ -148,6 +153,70 @@ function build({ kind, actorName, actorEmail, plans, conflicts }) {
   }
 }
 
+// ── 작업 완료 보고 (2026-08-26 신설) ─────────────────────────
+// 배차 알림과 «다른 메일» 이다. 한 함수에 섞지 않은 이유가 셋 있다.
+//   · 대상이 다르다 — 배차 알림은 회사 차를 잡은 것만, 완료 보고는 «전부»
+//     (사무실 내근·휴가까지. 2026-08-26 사용자 결정)
+//   · 담는 것이 다르다 — 계획이 아니라 «실제로 얼마나 다녔고 얼마가 들었는가»
+//   · 🔑 제목 머리말을 `[완료]` 로 나눈다. `[차량]` 과 섞이면 대표이사가 거를 수 없다.
+//     주소가 하나뿐이라 «제목» 이 유일한 분류 수단이다
+const won = n => Number(n || 0).toLocaleString('ko-KR')
+
+function buildDone({ actorName, actorEmail, a }) {
+  const c = cfg()
+  const who = a.worker_name || actorName || '누군가'
+  const car = [a.vehicle_name, a.vehicle_plate].filter(Boolean).join(' ')
+  // 🔑 개인 사용은 «행선지도 사유도» 적지 않는다 (사생활) — planLine 과 같은 규칙이다.
+  //    ⚠ 지금은 서버가 개인 사용 실적의 place·purpose 를 비워 두지만(keepPlace),
+  //    그 조건이 바뀌면 여기로 새어 나온다. 저쪽을 믿지 말고 여기서도 막는다.
+  const personal = a.use_type === 'personal'
+  const where = personal ? '개인 사용' : (a.place_name || a.place_text || '장소 미정')
+  const why = personal ? null : a.purpose
+
+  const subject = `[완료] ${who} · ${dayLabel(a.work_date)} · ${where}`
+
+  const head = !a.plan_id
+    ? '작업을 완료했습니다 (계획 없이 실적만 등록).'
+    : a.as_planned
+      ? '계획대로 작업을 완료했습니다.'
+      : '작업을 완료했습니다 — 계획과 달랐습니다.'
+
+  const body = [
+    `${who} 님이 ${head}`,
+    '',
+    '  · ' + [dayLabel(a.work_date), where, why, car].filter(Boolean).join(' · '),
+    '',
+  ]
+
+  // 실제로 «든 것» 만 적는다. 0원짜리 줄을 늘어놓으면 볼 것이 묻힌다.
+  const spent = []
+  if (a.distance_km != null) spent.push(`  이동 거리 : ${Number(a.distance_km)} km`)
+  if (Number(a.toll_fee))    spent.push(`  하이패스  : ${won(a.toll_fee)} 원`)
+  if (Number(a.fuel_fee))    spent.push(`  주유비    : ${won(a.fuel_fee)} 원`)
+  if (Number(a.transit_fee)) spent.push(`  대중교통  : ${won(a.transit_fee)} 원`)
+  if (spent.length) body.push('실제', ...spent, '')
+
+  // 메모도 개인 사용이면 싣지 않는다 — 위와 같은 이유다
+  if (a.memo && !personal) body.push(`메모 : ${a.memo}`, '')
+
+  body.push(
+    `처리한 사람 : ${actorName || '-'}${actorEmail ? ` <${actorEmail}>` : ''}`,
+    '',
+    '실적과 정산은 업무 현황 대시보드의 [스케줄] 탭에서 보실 수 있습니다.',
+    'http://vitron-nas:8082',
+    '',
+    '— 바이트론 이앤에스 업무 현황 대시보드',
+  )
+
+  return {
+    from: { name: `${actorName || '업무'} (업무 대시보드)`, address: c.from },
+    replyTo: actorEmail ? `${actorName} <${actorEmail}>` : undefined,
+    to: c.toReport,
+    subject,
+    text: body.join('\n'),
+  }
+}
+
 // ── 여러 날짜를 한 통으로 묶기 ───────────────────────────────
 // 화면이 「출장 3일」을 넣으면 계획을 «날짜마다 따로» 저장한다(addPlan 반복).
 // 그대로 두면 메일이 세 통 간다. 화면이 한 번의 등록마다 붙여 보내는
@@ -200,7 +269,7 @@ async function send(msg) {
         detail: `${msg.to} 로 보냈습니다${i > 1 ? ` (${i}번째 시도)` : ''}`,
       }
       console.log(`[mail] sent to ${msg.to} :: ${msg.subject}${i > 1 ? ` (retry ${i})` : ''}`)
-      return
+      return true
     } catch (e) {
       lastErr = e
       console.error(`[mail] attempt ${i}/${TRIES} failed :: ${e.message}`)
@@ -214,6 +283,9 @@ async function send(msg) {
   const stamp = new Date().toISOString().replace('T', ' ').slice(0, 19)
   last = { at: stamp, ok: false, detail: `${TRIES}번 시도했지만 실패했습니다 — ${lastErr?.message}` }
   console.error(`[mail] GAVE UP :: ${lastErr?.message}`)
+  // 🔑 던지지는 않되 «갔는지» 는 알려 준다. 완료 보고는 그 결과를 DB 에 적어야 한다 —
+  //    안 적으면 실패한 건이 「늦게 넣어서 안 보낸 것」과 구분되지 않는다.
+  return false
 }
 
 // ── 바깥에서 부르는 것 ───────────────────────────────────────
@@ -239,4 +311,29 @@ function notify({ kind, actor, plans, conflicts, batchId }) {
   }
 }
 
-module.exports = { notify, isEnabled, lastResult, isVehiclePlan }
+// 🔑 묶지 않는다 — 계획 1건 = 1통 (2026-08-26 사용자 결정).
+//    실측(2026-08-26)에서 계획이 있는 사람·날짜 49건이 «전부» 하루 1건이었다.
+//    묶어도 달라지는 것이 없고, 완료 보고는 «바로 아는 것» 이 값어치다.
+//    하루 여러 건이 실제로 생기기 시작하면 그때 queue() 를 태우면 된다.
+//
+// ⚠ isVehiclePlan 을 태우지 않는다. 그 규칙(주 사용자·자차 제외)은 «누가 그 차를
+//   쓰는가» 를 가리는 것이라 완료 보고와 아무 상관이 없다. 태우면 사무실 내근이
+//   전부 빠져 「전부 보고」 지시가 조용히 뒤집힌다.
+// onResult(ok) — 보냈는지를 부르는 쪽에 알려 준다. 부르는 쪽이 그 결과를 실적에 적는다.
+// 🔑 mailer 는 DB 를 모른다. 알게 하면 「메일 보내는 일」과 「기록하는 일」이 한 덩어리가 되어
+//    한쪽을 고칠 때마다 다른 쪽을 함께 건드리게 된다.
+function notifyDone({ actor, actual, onResult }) {
+  try {
+    if (!isEnabled()) return
+    if (!actual) return
+    send(buildDone({
+      actorName: actor?.name || null,
+      actorEmail: actor?.email || null,
+      a: actual,
+    })).then(ok => { try { onResult && onResult(!!ok) } catch { /* 기록 실패가 메일을 되돌리진 않는다 */ } })
+  } catch (e) {
+    console.error(`[mail] notifyDone error :: ${e.message}`)
+  }
+}
+
+module.exports = { notify, notifyDone, isEnabled, lastResult, isVehiclePlan }

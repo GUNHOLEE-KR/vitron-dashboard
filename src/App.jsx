@@ -261,6 +261,16 @@ function ymd(d){
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
 }
 function today(){return ymd(new Date())}
+
+// 작업 완료 보고는 «당일에 처리한 것만» 나간다 (2026-08-26 사용자 결정).
+// 늦게 넣은 것은 보고 대신 «누락» 으로 기록되고, 나중에 KPI 가 그것을 센다.
+// ⚠ 이 판정이 서버(server/index.js 의 notifyDone)에도 있다. 두 곳인 이유는
+//   화면은 «누르기 전에» 알려 줘야 하고, 실제로 보낼지 말지는 서버가 정하기 때문이다.
+//   문구가 어긋나도 데이터는 서버 판정을 따른다.
+const willReport = workDate => String(workDate) === today()
+const reportNotice = workDate => willReport(workDate)
+  ? '기록하면 대표이사에게 작업 완료 보고 메일이 갑니다.'
+  : '⚠ 작업일이 오늘이 아니라 보고 메일은 가지 않고 「누락」으로 기록됩니다.'
 function toMonth(d){return d.slice(0,7)}
 function toYear(d){return parseInt(d.slice(0,4))}
 function weekNum(d){return Math.ceil(new Date(d).getDate()/7)}
@@ -3500,11 +3510,28 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
   const rowS={marginBottom:12}
   const num=(v)=>v===''||v==null?null:Number(v)
 
+  // 새 실적은 «작업 완료» 를 뜻하고, 저장하는 순간 대표이사에게 보고가 나간다 (2026-08-26 신설).
+  // 🔑 이 창은 계획 화면의 「계획대로 완료」를 거치지 않고도 열린다 — 달력의
+  //    「실적을 넣지 않은 일정」 목록에서 바로 열리는 길이 있다. 한쪽에만 확인을
+  //    두면 그 길로 들어온 사람은 모르는 사이에 메일을 보내게 된다.
+  // ⚠ 수정(PATCH)은 보고를 보내지 않으므로 묻지 않는다.
+  function confirmReport(){
+    const personal=plan.use_type==='personal'
+    const where=personal?'개인 사용':(plan.place_name||plan.place_text||'장소 미정')
+    const car=[plan.vehicle_name,plan.vehicle_plate].filter(Boolean).join(' ')
+    const bits=[mdLabel(plan.plan_date),where,personal?null:plan.purpose,car].filter(Boolean)
+    return confirm(
+      `아래 일정을 완료로 기록할까요?\n\n· ${bits.join(' · ')}\n\n`
+      +reportNotice(plan.plan_date)
+    )
+  }
+
   async function save(){
     // 차량을 쓴 일정은 거리를 받아야 정산이 된다. 사무실·휴가는 필요 없다.
     if(usesVehicle&&(distance===''||Number(distance)<0)){
       showToast('주행거리를 입력해 주세요');return
     }
+    if(isNew&&!confirmReport())return
     const body={
       as_planned:asPlanned,
       distance_km:(atOffice||vacation)?null:num(distance),
@@ -3875,18 +3902,37 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
     finally{setBusy(false)}
   }
 
+  // 완료 처리 «전에» 무엇을 완료로 넘기는지 보여 주고 승인을 받는다 (2026-08-26 신설).
+  // 🔑 대표이사에게 보고가 나가는 일이라 «오눌림» 을 그대로 통과시키면 안 된다.
+  //    되돌리려면 실적을 지워야 하는데, 메일은 이미 나간 뒤다.
+  function confirmDone(){
+    const p = editing
+    // 개인 사용은 행선지·사유를 적지 않는다 (사생활) — 메일과 같은 규칙이다
+    const personal = p.use_type==='personal'
+    const where = personal ? '개인 사용' : (p.place_name||p.place_text||'장소 미정')
+    const car = [p.vehicle_name,p.vehicle_plate].filter(Boolean).join(' ')
+    const bits = [mdLabel(p.plan_date), where, personal?null:p.purpose, car].filter(Boolean)
+    return confirm(
+      `아래 일정을 「계획대로 완료」로 처리할까요?\n\n· ${bits.join(' · ')}\n\n`
+      + reportNotice(p.plan_date)
+    )
+  }
+
   // 「계획대로」 — 계획 내용을 그대로 실적으로 만든다.
   // 차량을 쓴 일정은 거리·비용을 받아야 정산이 되므로 실적 창을 연다.
+  // ⚠ 보고 메일은 화면이 아니라 실적 API 에 걸려 있다 — 아래 두 갈래가 거기서 합쳐진다.
   async function handleAsPlanned(){
     if(editing.vehicle_id||editing.transport==='transit'){
+      // ⚠ 여기서는 묻지 않는다. 실적 창에서 저장할 때 물으므로 두 번 묻게 된다.
       onOpenActual&&onOpenActual(editing)
       onClose()
       return
     }
+    if(!confirmDone())return
     try{
       setBusy(true)
       await addActual({plan_id:editing.id,as_planned:true})
-      showToast('계획대로 완료 처리했습니다')
+      showToast('계획대로 완료 처리했습니다 — 대표이사에게 보고가 갑니다')
       await onSaved({}); onClose()
     }catch(e){showToast('처리 실패: '+e.message)}
     finally{setBusy(false)}
