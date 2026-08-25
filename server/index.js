@@ -406,7 +406,10 @@ async function searchJiraIssues(baseUrl, auth, jql, fields) {
       const reason = e.name === 'TimeoutError'
         ? `응답이 ${JIRA_TIMEOUT_MS / 1000}초 안에 오지 않았습니다`
         : e.message
-      throw new Error(`Jira 서버에 연결할 수 없습니다 (${reason}).`)
+      // 🔑 원인을 `cause` 로 달아 둔다. 사람에게 보여 줄 문구로 갈아 끼우면서
+      //    원본을 버리면, 서버 로그에 「연결할 수 없습니다」만 남아 무엇 때문이었는지
+      //    (DNS·인증서·타임아웃) 되짚을 방법이 사라진다.
+      throw new Error(`Jira 서버에 연결할 수 없습니다 (${reason}).`, { cause: e })
     }
 
     const body = await response.text()

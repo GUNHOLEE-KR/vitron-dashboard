@@ -22,4 +22,19 @@ export default defineConfig([
       parserOptions: { ecmaFeatures: { jsx: true } },
     },
   },
+  // 🔑 서버는 브라우저가 아니다. 이 블록이 없으면 `require`·`process`·`__dirname`·
+  //    `Buffer` 가 전부 「정의되지 않음」으로 잡혀 오류 27건이 뜬다 — 코드는 멀쩡한데
+  //    lint 가 늘 빨개서, 정작 «진짜 오류» 가 그 속에 묻힌다.
+  //    server/ 는 CommonJS(`require`) 라 sourceType 도 따로 알려 준다.
+  {
+    files: ['server/**/*.js'],
+    languageOptions: {
+      globals: globals.node,
+      sourceType: 'commonjs',
+    },
+    rules: {
+      // 서버 파일에는 리액트 규칙이 해당 없다
+      'react-refresh/only-export-components': 'off',
+    },
+  },
 ])

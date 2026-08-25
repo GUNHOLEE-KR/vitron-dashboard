@@ -342,11 +342,6 @@ function isExcludedOn(absences, workerId, date) {
   return absences.some(a => a.worker_id === workerId && a.kind === '집계 제외' &&
     a.from_date <= date && (!a.to_date || a.to_date >= date))
 }
-// 기간과 겹치는 부재만 추린다 (화면 배지용)
-function absencesInPeriod(absences, workerId, from, to) {
-  return absences.filter(a => a.worker_id === workerId &&
-    a.from_date <= to && (!a.to_date || a.to_date >= from))
-}
 // 부재 기간에 남은 기록은 집계에서 뺀다. 원본은 그대로 두고 «보는 것만» 뺀다.
 function excludeAbsentRows(rows, absences) {
   if (!absences.length) return rows
@@ -818,9 +813,13 @@ function ParetoAnalysis({rows}){
   if(!rows.length)return null
   const agg=Object.entries(aggByWork(rows)).sort((a,b)=>b[1]-a[1])
   const total=agg.reduce((s,[,v])=>s+v,0)||1
-  let cum=0
   // X축은 좁아 이름을 줄이지만, full 에 전체 제목을 남겨 툴팁에서 쓴다
-  const data=agg.slice(0,12).map(([name,v])=>{cum+=v;const nm=cleanName(name)
+  // ⚠ 누적은 바깥 변수를 렌더 중에 고쳐 쓰지 않는다 — 리렌더 때 값이 이어져 어긋난다.
+  //   열두 개뿐이라 앞부분을 매번 더해도 부담이 없다.
+  const top=agg.slice(0,12)
+  const data=top.map(([name,v],i)=>{
+    const cum=top.slice(0,i+1).reduce((a,[,x])=>a+x,0)
+    const nm=cleanName(name)
     return{name:nm.length>14?nm.slice(0,14)+'…':nm,full:nm,시간:v,누적:Math.round(cum/total*100)}})
   const 목표도달=data.findIndex(d=>d.누적>=80)+1   // 80% 에 닿기까지 필요한 업무 개수
   return(
@@ -1064,7 +1063,7 @@ function Dashboard({me,onLoggedOut}){
   const [parentSel,setParentSel]=useState({})
   // 입력 대상. 로그인한 본인으로 «시작» 한다 — 예전에는 이름을 눌러 골랐다.
   // 관리자는 대신 적어 줄 수 있어 바꿀 수 있고, 일반 사용자는 이 값이 고정이다.
-  const [selWorkerId,setSelWorkerId]=useState(me.worker_id??null)
+  const [selWorkerRaw,setSelWorkerId]=useState(me.worker_id??null)
   const [viewDate,setViewDate]=useState(today())
   const [viewMonth,setViewMonth]=useState(toMonth(today()))
   const [viewYear,setViewYear]=useState(toYear(today()))
@@ -1091,6 +1090,12 @@ function Dashboard({me,onLoggedOut}){
 
   // 오늘 기준 재직 중인 직원만 (입사일 이후 + 퇴사 전)
   const td=today()
+  // 고르고 있던 사람이 「집계 제외」로 등록되면 «고르지 않은 것» 으로 본다.
+  // 안 그러면 입력표에 없는 열을 가리킨 채로 저장 버튼이 살아 있다.
+  // 🔑 effect 로 상태를 되돌리지 않는다 — 렌더가 한 번 더 돌고, 그사이 한 박자 동안
+  //    «없는 사람» 이 골라진 채로 화면이 그려진다. 읽을 때 걸러 내는 편이 확실하다.
+  // ⚠ 반드시 «처음 읽는 곳보다 위» 에 두어야 한다 — const 는 선언 전에 못 읽는다.
+  const selWorkerId = (selWorkerRaw&&isExcludedOn(absences,selWorkerRaw,td)) ? null : selWorkerRaw
   const activeWorkers=workers.filter(w=>
     w.active &&
     (!w.hired_at || w.hired_at<=td) &&
@@ -1139,11 +1144,6 @@ function Dashboard({me,onLoggedOut}){
     return j
   }
 
-  // 고르고 있던 사람이 「집계 제외」로 등록되면 선택을 비운다.
-  // 안 비우면 입력표에 없는 열을 가리킨 채로 저장 버튼이 살아 있다.
-  useEffect(()=>{
-    if(selWorkerId&&isExcludedOn(absences,selWorkerId,td)) setSelWorkerId(null)
-  },[absences,selWorkerId,td])
 
   async function handleLogout(){
     try{ await logout() }catch{ /* 이미 만료됐을 수 있다 */ }
@@ -1189,9 +1189,15 @@ function Dashboard({me,onLoggedOut}){
   //
   // ⚠ 「한 번만 받는다」 를 «장소·차량이 0건인가» 로 판정하면 안 된다 —
   //   실제로 0건인 상태에서는 탭을 옮길 때마다 다시 받는다. 받았다는 사실을 따로 둔다.
+  // ⚠ 아래 두 규칙은 «일부러» 껐다. 자료를 받아 오는 effect 라서다.
+  //   · set-state-in-effect : 「불러오는 중」 깃발을 await 전에 세워야 한다.
+  //     미루면 렌더가 한 번 더 도는 것은 그대로인 채 lint 눈만 피하는 셈이다.
+  //   · exhaustive-deps     : loadSchedule 을 넣으면 렌더마다 새 함수라 무한히 돈다.
+  //     실제로 다시 받아야 하는 조건은 «탭» 과 «아직 안 받았는가» 둘뿐이다.
   useEffect(()=>{
     const needs = tab==='schedule'||tab==='settings'
       ||tab==='daily'||tab==='weekly'||tab==='monthly'||tab==='yearly'
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if(needs&&!schedLoaded) loadSchedule()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   },[tab,schedLoaded])
@@ -1243,7 +1249,7 @@ function Dashboard({me,onLoggedOut}){
       const g={}; rows.forEach(r=>{g[cellKey(r.work_hour,r.worker_id)]=r.work_text})
       setGrid(g); setParentSel(buildParentSel(rows,jiraTree))
       showToast(date+' 조회 완료')
-    }catch(e){showToast('조회 실패')}
+    }catch(e){showToast('조회 실패: '+e.message)}
   }
 
   return(
@@ -1296,7 +1302,7 @@ function Dashboard({me,onLoggedOut}){
         {tab==='yearly'  &&<TabYearly  history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} plans={plans} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
         {tab==='schedule'&&<TabSchedule workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
           places={places} vehicles={vehicles} plans={plans} loading={schedLoading}
-          onReload={loadSchedule} showToast={showToast} focusDate={schedFocus}
+          showToast={showToast} focusDate={schedFocus}
           onOpenNew={()=>setPlanDialog({editing:null,date:today()})}
           onOpenPlan={p=>setPlanDialog({editing:p})}
           onOpenCell={(d)=>setPlanDialog({editing:null,...d})}
@@ -1691,7 +1697,7 @@ function TabMonthly({history,workers,absences=[],restDays,plans=[],viewMonth,set
   const mS=viewMonth+'-01',mE=monthEnd(viewMonth)
   const rows=history.filter(r=>toMonth(r.work_date)===viewMonth)
   const periodWorkers=workersAvailable(workers,absences,mS,mE)
-  const total=rows.length,agg=aggByWorker(rows)
+  const total=rows.length
   const days=[...new Set(rows.map(r=>r.work_date))]
   const wm={}
   rows.forEach(r=>{const w=weekNum(r.work_date)+'주';if(!wm[w])wm[w]={};wm[w][r.worker_name]=(wm[w][r.worker_name]||0)+1})
@@ -1952,8 +1958,10 @@ function planState(plan,todayStr){
 const PLAN_STATE_MARK={done:'',changed:'↺',needCheck:'●',planned:'',canceled:'✕'}
 
 // 달력 배지 하나.
-// showWorker — 장소·차량 기준으로 볼 때는 «누구인가» 가 핵심 정보이므로 이름을 남긴다.
-function PlanBadge({plan,workers,onClick,todayStr,compact=false,showWorker=true}){
+// 이름은 «어느 기준으로 보든» 늘 보여 준다 — 장소·차량으로 볼 때는 「누구인가」 가
+// 핵심 정보이고, 사람 기준으로 볼 때도 한 칸에 여러 명이 겹칠 수 있다.
+// (전에는 showWorker 프로퍼티가 있었지만 본문이 쓰지 않아 늘 켜진 것과 같았다 — 걷어냈다)
+function PlanBadge({plan,workers,onClick,todayStr,compact=false}){
   const color=workerColor(plan.worker_id,workers)
   const st=planState(plan,todayStr)
   const personal=plan.use_type==='personal'
@@ -1987,7 +1995,7 @@ function PlanBadge({plan,workers,onClick,todayStr,compact=false,showWorker=true}
   )
 }
 
-function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,onOpenNew,onOpenPlan,
+function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan,
                       onOpenCell,onOpenActual,showToast,focusDate,clipboard,onPaste,onCancelCopy,
                       me,mayEdit=()=>true,onLogout}){
   // 빈 칸을 눌러 계획을 만들 때, 그 칸이 «남의 줄» 이면 막는다.
@@ -2001,7 +2009,7 @@ function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,
   }
   // 붙여넣기 모드에서 고른 칸들. 「날짜_직원id」 를 키로 담는다
   // (주 뷰는 사람까지 고를 수 있고, 월·일 뷰는 날짜만 고른다)
-  const [picked,setPicked]=useState([])
+  const [pickedRaw,setPicked]=useState([])
   const pasting=!!clipboard
   const isPicked=(d,wid)=>picked.some(p=>p.date===d&&p.workerId===wid)
   function togglePick(d,wid){
@@ -2009,8 +2017,10 @@ function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,
       ? prev.filter(p=>!(p.date===d&&p.workerId===wid))
       : [...prev,{date:d,workerId:wid}])
   }
-  // 복사를 취소하거나 붙여넣기를 마치면 선택을 비운다
-  useEffect(()=>{ if(!clipboard) setPicked([]) },[clipboard])
+  // 복사한 것이 없으면 고른 칸도 없는 것으로 본다 (복사 취소 · 붙여넣기 완료).
+  // 🔑 effect 로 비우지 않는다 — 비우기 전 한 박자 동안 고른 칸이 남아 보인다.
+
+  const picked = clipboard ? pickedRaw : []
 
   const [view,setView]=useState('week')
   const [groupBy,setGroupBy]=useState('worker')   // 보기 기준 — 주 뷰의 세로축이 된다
@@ -2020,10 +2030,13 @@ function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,
 
   // 계획을 등록하면 그 날짜로 달력을 옮긴다.
   // 보고 있는 기간 밖에 등록되면 화면에 안 나타나 «등록이 안 됐다» 고 오해한다.
-  useEffect(()=>{
-    if(!focusDate) return
+  // 🔑 «프로퍼티가 바뀌면 상태를 맞춘다» 는 effect 가 아니라 **렌더 중에** 한다 —
+  //    리액트가 권하는 방식이고, effect 로 하면 옛 날짜로 한 번 그린 뒤에 옮겨 간다.
+  const [seenFocus,setSeenFocus]=useState(null)
+  if(focusDate&&focusDate!==seenFocus){
+    setSeenFocus(focusDate)
     setAnchor(focusDate); setYm(toMonth(focusDate)); setYear(toYear(focusDate))
-  },[focusDate])
+  }
   const [filterWorker,setFilterWorker]=useState('')
   const [filterVehicle,setFilterVehicle]=useState('')
   const todayStr=today()
@@ -2217,7 +2230,7 @@ function TabSchedule({workers,places,vehicles,plans,actuals=[],loading,onReload,
       {view==='day'&&<ScheduleDay date={anchor} byDate={byDate} workers={workers} vehicles={vehicles}
         todayStr={todayStr} onOpenPlan={onOpenPlan} onOpenCell={openCell} onOpenActual={onOpenActual}
         rows={groupRows} groupBy={groupBy} sortByGroup={sortByGroup}/>}
-      {view==='year'&&<ScheduleYear year={year} plans={shown} workers={workers}
+      {view==='year'&&<ScheduleYear year={year} plans={shown}
         onPickMonth={m=>{setYm(m);setView('month')}}/>}
       {view==='settle'&&<ScheduleSettlement me={me} onLogout={onLogout}
         onOpenActual={onOpenActual} showToast={showToast}/>}
@@ -2350,7 +2363,7 @@ function ScheduleWeek({anchor,shown,workers,todayStr,onOpenPlan,onOpenCell,
                       :list.map(p=>(
                         <PlanBadge key={p.id} plan={p} workers={workers} todayStr={todayStr}
                           onClick={()=>onOpenPlan(p)}
-                          showWorker={groupBy!=='worker'}/>
+                          />
                       ))}
                     {/* 차량 기준에서 한 칸에 둘 이상이면 배차가 겹친 것이다 */}
                     {groupBy==='vehicle'&&row.key.startsWith('v')&&list.length>1&&(
@@ -2495,7 +2508,7 @@ function ScheduleDay({date,byDate,workers,vehicles,todayStr,onOpenPlan,onOpenCel
 }
 
 // 연 뷰 — 월별 요약. 외근이 어느 달에 몰렸는지 본다.
-function ScheduleYear({year,plans,workers,onPickMonth}){
+function ScheduleYear({year,plans,onPickMonth}){
   const months=Array.from({length:12},(_,i)=>`${year}-${String(i+1).padStart(2,'0')}`)
   const stat=months.map(m=>{
     const rows=plans.filter(p=>p.plan_date.slice(0,7)===m)
@@ -2743,7 +2756,10 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
     finally{ setLoading(false) }
   }
 
-  useEffect(()=>{ if(me) load(ym) /* eslint-disable-next-line react-hooks/exhaustive-deps */ },[me,ym])
+  // ⚠ 위와 같은 이유로 두 규칙을 껐다 — 정산을 받아 오는 effect 다.
+  //   (전에는 disable 주석이 «본문 안» 에 있어 아무 규칙도 끄지 못하고 있었다)
+  // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
+  useEffect(()=>{ if(me) load(ym) },[me,ym])
 
   async function approve(){
     if(!confirm(`${ym} 정산을 확정할까요?\n\n· 이 달 금액이 승인 시점 값으로 저장됩니다\n· 이 달 실적은 수정할 수 없게 잠깁니다\n\n정정이 필요하면 나중에 잠금을 해제하고 다시 승인할 수 있습니다.`))return
@@ -2991,7 +3007,7 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
 // 월 정산의 근거가 된다(설계서 3장).
 //   plan     대상 계획 (plan.actual_id 가 있으면 이미 실적이 있는 것)
 //   actual   기존 실적 (없으면 새로 만든다)
-function ActualDialog({plan,actual,places,vehicles,me,canEditOthers=false,onClose,onSaved,showToast}){
+function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSaved,showToast}){
   const isNew=!actual
   // 실적은 «계획의 주인» 것이다. 남의 것은 열어서 보기만 된다 (서버도 같은 기준).
   const mine=canEditOthers||Number(plan.worker_id)===Number(me?.worker_id)
@@ -4248,14 +4264,14 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
       setWorkers(workers.map(w=>w.id===resigningWorkerId?{...w,active:false,resigned_at:resignDate}:w))
       showToast(label+' 퇴사 처리 ('+resignDate+')')
       setResigningWorkerId(null)
-    }catch(e){showToast('변경 실패')}
+    }catch(e){showToast('변경 실패: '+e.message)}
   }
 
   async function handleDelWorker(w){
     const label=workerLabel(w,dupNames)
     if(!confirm(label+' 완전 삭제합니까?\n(업무 기록은 그대로 남습니다)'))return
     try{await removeWorker(w.id);setWorkers(workers.filter(x=>x.id!==w.id));showToast(label+' 삭제 완료')}
-    catch(e){showToast('삭제 실패')}
+    catch(e){showToast('삭제 실패: '+e.message)}
   }
 
   async function handleSyncJira(){
@@ -4270,11 +4286,11 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
   async function handleAddJira(){
     if(!newJira.trim())return
     try{await addJiraIssue(newJira.trim(),newJiraParent||null);await reloadJira();setNewJira('');showToast('추가 완료')}
-    catch(e){showToast('추가 실패')}
+    catch(e){showToast('추가 실패: '+e.message)}
   }
   async function handleDelJira(text){
     try{await removeJiraIssue(text);await reloadJira()}
-    catch(e){showToast('삭제 실패')}
+    catch(e){showToast('삭제 실패: '+e.message)}
   }
 
   // ── 고정업무 (Jira 에 없는 반복 업무) ────────────────────────

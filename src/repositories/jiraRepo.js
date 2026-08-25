@@ -18,10 +18,15 @@ export async function getJiraTree() {
   const parents = data.filter(i => !i.parent_key)
   const children = data.filter(i => i.parent_key)
 
+  // 🔑 이름으로 «중복을 눌러 묶는다».
+  //    업무 기록은 이름만 저장하므로 트리에서 이름이 두 번 나오면 뜻이 없고,
+  //    화면이 이름을 key 로 쓰기 때문에 리액트가 「같은 key 가 둘」 이라며
+  //    한 줄을 조용히 빠뜨릴 수 있다 (2026-08-25 실제로 겪었다 —
+  //    같은 업무가 `VITRON-231` 과 `MANUAL-…` 두 줄로 들어와 있었다).
   parents.forEach(p => {
-    tree[p.full_text] = children
+    tree[p.full_text] = [...new Set(children
       .filter(c => c.parent_key === p.jira_key)
-      .map(c => c.full_text)
+      .map(c => c.full_text))]
   })
   const done = new Set(
     data.filter(i => i.status_category === 'done').map(i => i.full_text)
