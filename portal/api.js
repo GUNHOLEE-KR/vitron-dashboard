@@ -16,6 +16,10 @@ async function call(path) {
   return res.json()
 }
 
+// 🔴 «어느 대시보드를 보고 있는가» — 운영인가 테스트인가.
+//    포털은 nginx 설정 한 줄로 뒤쪽이 바뀌는데, 그 사실이 화면에 드러나지 않으면
+//    시험 자료를 운영으로 착각하게 된다.
+export const health = () => call('dash/health')
 export const whoAmI = () => call('dash/auth/me')
 export const getWorkers = () => call('dash/workers')
 export const getVehicles = () => call('dash/schedule/vehicles')

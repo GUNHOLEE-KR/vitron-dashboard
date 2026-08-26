@@ -17,6 +17,7 @@ services:
     networks:
       - default
       - dashboard
+      - dashboard-test
       - kpi
     restart: unless-stopped
 
@@ -25,6 +26,10 @@ networks:
   dashboard:
     external: true
     name: vitron-dashboard_default
+  # ⏳ 시험 기간에만 쓴다 — 포털이 테스트 백엔드를 볼 수 있게 (nginx.conf 참고)
+  dashboard-test:
+    external: true
+    name: vitron-dashboard-test_default
   kpi:
     external: true
     name: vitron-kpi_default

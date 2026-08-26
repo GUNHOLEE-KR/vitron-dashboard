@@ -83,6 +83,14 @@ export default function Portal() {
     return () => clearInterval(t)
   }, [])
 
+  // 🔴 뒤쪽이 운영인지 테스트인지. nginx 한 줄로 바뀌므로 화면이 말해 줘야 한다.
+  const [env, setEnv] = useState(null)
+  useEffect(() => {
+    let alive = true
+    api.health().then(d => { if (alive) setEnv(d) }).catch(() => {})
+    return () => { alive = false }
+  }, [])
+
   useEffect(() => {
     let alive = true
     api.whoAmI()
@@ -164,11 +172,11 @@ export default function Portal() {
   const myToday = mine(todayStr)
   const myTomorrow = mine(tomorrow)
 
-  if (!ready) return <Shell><div style={{ padding: 40, color: C.dim }}>확인 중…</div></Shell>
+  if (!ready) return <Shell env={env}><div style={{ padding: 40, color: C.dim }}>확인 중…</div></Shell>
 
   if (!me) {
     return (
-      <Shell>
+      <Shell env={env}>
         <div style={{ ...box, padding: 22, background: '#fffbeb', borderColor: '#fde68a', color: '#92400e' }}>
           로그인하지 않으셨습니다. <a href={URLS.dashboard} style={{ color: '#92400e', fontWeight: 700 }}>
             업무 현황 대시보드에서 로그인</a>하시면 이 쪽도 그대로 열립니다.
@@ -179,7 +187,7 @@ export default function Portal() {
   }
 
   return (
-    <Shell me={me}>
+    <Shell me={me} env={env}>
       {/* ── 결재자가 봐야 할 것 (최상단) ── */}
       {canApprove && todo.length > 0 && (
         <div style={{
@@ -294,10 +302,20 @@ const navBtn = {
   background: '#fff', cursor: 'pointer', fontSize: 12.5,
 }
 
-function Shell({ me, children }) {
+function Shell({ me, env, children }) {
   return (
     <div style={{ minHeight: '100vh', background: '#f3f4f6', color: C.ink,
       fontFamily: "'맑은 고딕','Malgun Gothic',system-ui,-apple-system,sans-serif" }}>
+      {/* 🔴 뒤쪽이 테스트면 «한눈에» 보여야 한다. 시험 자료를 운영으로 착각하지 않도록. */}
+      {env?.env === 'test' && (
+        <div style={{ background: '#b91c1c', color: '#fff', padding: '6px 24px',
+          fontSize: 12.5, fontWeight: 700, letterSpacing: '.3px' }}>
+          🔴 테스트 자료를 보고 있습니다
+          <span style={{ fontWeight: 400, opacity: .9, marginLeft: 10 }}>
+            여기 숫자는 운영이 아닙니다{env.db_name ? ` · DB ${env.db_name}` : ''}
+          </span>
+        </div>
+      )}
       <header style={{ background: C.navy, color: '#fff', padding: '17px 24px' }}>
         <div style={{ maxWidth: 1240, margin: '0 auto', display: 'flex', alignItems: 'center' }}>
           <div>
