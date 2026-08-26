@@ -15,6 +15,16 @@ import { getHolidays, syncHolidays, addHoliday, setHolidayWorking, removeHoliday
          restDaySet } from './repositories/holidayRepo'
 import { getPurchases, addPurchase, setPurchaseStatus,
          removePurchase } from './repositories/purchaseRepo'
+// 🔑 스케줄 달력은 «사내 포털과 함께 쓰는» 조각이라 여기 두지 않는다 (2026-08-26).
+//    각자 그리면 언젠가 한쪽만 고쳐 두 화면이 어긋난다.
+//    ⚠ CLAUDE.md 의 「App.jsx 단일 파일 유지」에 대한 예외 — 사용자 승인.
+import { OUT_TRANSPORTS, TRANSPORT_MAP, OFFICE_PLACE, SLOTS, SLOT_MAP, thS, tdS,
+         ymd, today, dayName, mdLabel, addDays, calWeekDays,
+         monthGridDays, isSameMonth, shiftMonth,
+         workerColor, vehicleColor, GROUP_BYS, buildGroupRows,
+         planIcon, planState } from './shared/schedule-core'
+import { ScheduleMonth, ScheduleWeek, ScheduleDay } from './shared/ScheduleCalendar'
+import { Card } from './shared/ui'
 
 const WORK_HOURS=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
 // 정규 근무시간 (09:00 시작 ~ 18:00 종료 → 17:00 행까지 포함) — 입력표에서 노랗게 강조
@@ -75,26 +85,13 @@ const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'
   schedule:'스케줄',purchase:'구매',settings:'설정'}
 
 // ── 스케줄 상수 ──────────────────────────────────────────
-// 이동 수단.
-// ⚠ 「사무실」은 이 목록에 넣지 않는다. 장소가 사무실이면 이동 자체가 없어
+// 이동 수단(OUT_TRANSPORTS·TRANSPORT_MAP)·장소 고정값·시간대·색은
+// 포털과 함께 쓰므로 `shared/schedule-core.js` 에 있다. 위 import 참고.
+// ⚠ 「사무실」은 OUT_TRANSPORTS 에 넣지 않는다. 장소가 사무실이면 이동 자체가 없어
 //   이동 수단을 물을 일이 없다 — 장소 선택으로 결정된다(place = OFFICE_PLACE).
 //   예전에는 사무실이 법인차량과 같은 줄에 섞여 있어, 내근을 넣으려 해도
 //   장소를 강제로 골라야 해서 등록이 막혔다.
-const OUT_TRANSPORTS=[
-  {v:'company_car', label:'법인차량', icon:'🚗', needsVehicle:true},
-  {v:'own_car',     label:'자차',   icon:'🚙', needsVehicle:true},
-  {v:'transit',     label:'대중교통', icon:'🚌', needsVehicle:false},
-]
-// 표시용에는 사무실과 «이동 없음» 도 필요하다(달력 배지·일 뷰).
-// none 을 빼 두면 휴가 배지가 fallback 으로 🏢(사무실) 처럼 보인다.
-const TRANSPORT_MAP=Object.fromEntries([
-  ...OUT_TRANSPORTS,
-  {v:'office', label:'사무실',   icon:'🏢', needsVehicle:false},
-  {v:'none',   label:'이동 없음', icon:'🌴', needsVehicle:false},
-].map(t=>[t.v,t]))
-// 장소 목록 맨 위의 고정 항목. 장소 목록(DB)에 넣지 않는다 —
-// 사무실은 회사 자체이고 거리가 0 이라 관리 대상을 늘릴 이유가 없다.
-const OFFICE_PLACE='office'
+
 // 편도 일정의 방향. 왕복은 나갔다 돌아오는 하루라 방향을 따질 것이 없어 저장하지 않는다.
 const ONE_WAY_DIRS=[
   {value:'출발',icon:'🏢→',hint:'사무실에서 그 장소로'},
@@ -142,17 +139,10 @@ const sumDays=(items,key)=>
   Math.round(items.reduce((s,x)=>s+(x[key]==null?0:Number(x[key])),0)*10)/10
 // 장소 분류 — 「현장」과 「고객사」를 굳이 나눌 이유가 없어 합쳤다.
 const PLACE_CATEGORIES=['고객사','기타']
-const SLOTS=[{v:'allday',label:'종일'},{v:'am',label:'오전'},{v:'pm',label:'오후'},{v:'time',label:'시각 지정'}]
-const SLOT_MAP=Object.fromEntries(SLOTS.map(s=>[s.v,s.label]))
 const SCHEDULE_VIEWS=[{v:'month',label:'월'},{v:'week',label:'주'},{v:'day',label:'일'},
                       {v:'year',label:'연'},{v:'settle',label:'💰 정산'},{v:'vac',label:'🌴 휴가'}]
 // 달력이 아닌 보기 — 기간 이동(◀ ▶)·범례가 뜻이 없다
 const NON_CALENDAR_VIEWS=['settle','vac']
-// 표 머리글은 데이터 행과 확실히 구분되는 진한 남색으로.
-// 연한 회색(#f9fafb)이던 때는 첫 데이터 행과 같은 색이라 머리글이 붙어 보였다.
-// 오늘 업무 입력표 머리글과 같은 색이라 화면 전체가 일관된다.
-const thS={background:'#1e3a5f',padding:'8px 10px',textAlign:'center',fontWeight:700,border:'1px solid #e5e7eb',fontSize:11,color:'#fff',whiteSpace:'nowrap'}
-const tdS={padding:'6px 10px',border:'1px solid #e5e7eb',textAlign:'center',verticalAlign:'middle',fontSize:12}
 
 // 차트 공통 헬퍼 — 단위는 모두 "시간(h)"
 const numLabel=(v)=>(v?String(v):'')              // 0/빈값은 라벨 숨김
@@ -288,14 +278,6 @@ function NonZeroTooltip({active,payload,label,unit='h',percent=false}){
   )
 }
 
-// ⚠️ 날짜를 YYYY-MM-DD 로 만들 때 toISOString() 을 쓰면 안 된다.
-// toISOString() 은 UTC 기준이라 한국(UTC+9)에서는 오전 9시 이전에 전날이 된다.
-// 실제로 오전에 업무를 저장하면 전날 날짜로 기록되는 버그가 있었다.
-// 로컬 연·월·일을 그대로 조립해야 시간대 영향을 받지 않는다.
-function ymd(d){
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`
-}
-function today(){return ymd(new Date())}
 
 // 작업 완료 보고는 «당일에 처리한 것만» 나간다 (2026-08-26 사용자 결정).
 // 늦게 넣은 것은 보고 대신 «누락» 으로 기록되고, 나중에 KPI 가 그것을 센다.
@@ -309,7 +291,6 @@ const reportNotice = workDate => willReport(workDate)
 function toMonth(d){return d.slice(0,7)}
 function toYear(d){return parseInt(d.slice(0,4))}
 function weekNum(d){return Math.ceil(new Date(d).getDate()/7)}
-function dayName(d){return['일','월','화','수','목','금','토'][new Date(d).getDay()]}
 
 // ── 동명이인 구분 ────────────────────────────────────
 // 직원의 진짜 식별자는 id 다. 이름은 개명·오타 정정으로 바뀔 수 있어서다.
@@ -446,32 +427,6 @@ function weekFirstDate(ym,wk){
 // 리포트 탭의 주차는 «1~7일 = 1주차» 방식이지만, 스케줄 달력은 사람이 보는
 // 달력과 같아야 하므로 «월요일 시작» 실제 주를 쓴다.
 // ⚠ 날짜 계산에 toISOString() 을 쓰지 않는다 (UTC 라 오전에 하루 밀린다)
-function addDays(dateStr,n){
-  const [y,m,d]=dateStr.split('-').map(Number)
-  return ymd(new Date(y,m-1,d+n))
-}
-function calWeekStart(dateStr){          // 그 날짜가 속한 주의 월요일
-  const [y,m,d]=dateStr.split('-').map(Number)
-  const dow=new Date(y,m-1,d).getDay()   // 0=일 … 6=토
-  return addDays(dateStr,dow===0?-6:1-dow)
-}
-function calWeekDays(dateStr){           // 월~일 7일
-  const s=calWeekStart(dateStr)
-  return Array.from({length:7},(_,i)=>addDays(s,i))
-}
-// 월 달력 격자 — 1일이 속한 주의 월요일부터 6주(42칸)를 채운다.
-// 42칸 고정이면 달을 옮겨도 격자 높이가 흔들리지 않는다.
-function monthGridDays(ym){
-  const start=calWeekStart(ym+'-01')
-  return Array.from({length:42},(_,i)=>addDays(start,i))
-}
-function isSameMonth(dateStr,ym){ return dateStr.slice(0,7)===ym }
-function shiftMonth(ym,n){
-  const [y,m]=ym.split('-').map(Number)
-  const d=new Date(y,m-1+n,1)
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`
-}
-function mdLabel(dateStr){ return `${Number(dateStr.slice(5,7))}/${Number(dateStr.slice(8,10))}` }
 
 function aggByWorker(rows){
   const m={}
@@ -1619,11 +1574,6 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),sel
   )
 }
 
-// ── 공통 컴포넌트 ─────────────────────────────────────────
-function Card({title,children,style={}}){
-  return<div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,marginBottom:16,...style}}>
-    {title&&<div style={{fontSize:14,fontWeight:700,marginBottom:14}}>{title}</div>}{children}</div>
-}
 // 지표 카드. unit 은 숫자 뒤에 작게 붙는다 —
 // 값만 보면 시간인지 사람 수인지 구분할 수 없어 단위를 반드시 표시한다.
 function Metrics({items}){
@@ -2199,196 +2149,10 @@ function TabYearly({history,workers,absences=[],restDays,plans=[],viewYear,setVi
 // 업무 내용을 적는 「오늘 업무」와 달리 장소와 이동 수단이 중심이다.
 // 설계서: docs/design/스케줄표_설계.md
 
-// 사람마다 색을 고정한다. 색이 매번 바뀌면 달력에서 누구인지 알 수 없다.
-//
-// 🔴 2026-08-25 개편 — 예전에는 «입사일 순번 % 팔레트 길이» 로 계산했다.
-//    직원이 팔레트보다 많아지자 색이 한 바퀴 돌아 **두 쌍이 완전히 같은 색**이 됐고
-//    (고광용↔송지형, 이건호↔김동현), 사람이 늘고 줄 때마다 남의 색까지 밀렸다.
-//    이제 `workers.color` 에 «값» 으로 박아 두고 [설정] 탭에서 고친다.
-// ⚠ 비어 있으면(새로 들어온 사람) 아래 팔레트에서 자동으로 고른다.
-//
-// 🔴 이 팔레트는 «세 번 틀리고 네 번째에» 정했다. 남겨 두는 이유는 같은 실수를 막기 위해서다.
-//   1차 색상(hue)만 40도씩 벌리고 명도·채도는 전부 같은 단계 → 「다 비슷하다」
-//   2차 ΔE 를 재 보니 모든 쌍이 30 이상인데도 여전히 비슷했다. 지적받은 쌍이
-//       전부 «같은 색 이름» 이었다 — 파랑–보라, 빨강–주황–분홍, 초록–연두.
-//       🔑 사람은 작은 점을 «미세한 거리» 가 아니라 «색 이름» 으로 분류한다.
-//   3차 이름을 전부 다르게 하고 ΔE 49 까지 올렸는데도 남색(밝기 27)과
-//       적갈(밝기 28)이 「너무 비슷하다」 고 했다.
-//       🔑 **둘 다 아주 어두우면 12px 점에서는 색상이 안 보이고 «검은 점» 둘로 보인다.**
-//   4차 밝기를 45 이상으로 올렸더니 이번엔 주황(밝기 57)과 분홍(밝기 57)이 붙어 보였다.
-//       🔑 **색상이 가까운데 밝기까지 같으면 붙는다.** ΔE 73.9 여도 그렇다.
-//   5차 「색상 간격」 과 「밝기 간격」 을 «함께» 보는 규칙을 코드에 박고,
-//       되짚어 찾기로 규칙을 지키는 조합 9,684개를 전부 훑어 최선을 골랐다 (ΔE 60.6).
-//         색상이 멀면(≥55도) 그대로 / 어중간(35~55도) 밝기 16↑ / 가까우면(<35도) 밝기 26↑
-//   ⚠ ΔE 는 «큰 면적» 기준이라 12px 점에 그대로 쓸 수 없다 — 보조 지표로만 본다.
-//   ⚠ 탐욕으로는 못 찾는다 — 「지금 가장 먼 색」 을 집으면 뒤에서 막다른 길에 빠진다.
-// 고르는 도구 = `tools/pick-colors.mjs` — 버리지 말 것. 사람이 늘면 다시 돌린다.
-const WORKER_COLORS=[
-  '#3b82f6','#dc2626','#facc15','#16a34a','#67e8f9','#c026d3',
-  '#f9a8d4','#f97316','#a3e635','#0d9488','#c084fc','#93c5fd',
-]
-function workerColor(workerId,workers){
-  const w=workers.find(x=>x.id===workerId)
-  if(w?.color) return w.color
-  const i=workers.findIndex(x=>x.id===workerId)
-  return WORKER_COLORS[(i<0?0:i)%WORKER_COLORS.length]
-}
 
-// 차량도 같은 문제였다 — 법인차 4대가 «전부» 주황, 자차는 «전부» 보라로 박혀 있어
-// 배차표에서 색만 보고는 어느 차인지 알 수 없었다 (2026-08-25 지적).
-// 정한 색이 없으면 종류별 기본색으로 돌아간다.
-// ⚠ 차량 색은 «직원 색과도» 떨어져 있어야 한다 — 주 뷰의 차량 기준에서는
-//   행(차량)과 배지(사람)가 동시에 보인다. 위 팔레트와 ΔE 25 이상 벌려 골랐다.
-const VEHICLE_COLORS=[
-  '#f97316','#a3e635','#0d9488','#c084fc','#ca8a04','#0891b2',
-  '#be185d','#65a30d','#7c3aed','#22d3ee','#ef4444','#64748b',
-]
-function vehicleColor(vehicle,vehicles=[]){
-  if(vehicle?.color) return vehicle.color
-  const i=vehicles.findIndex(v=>v.id===vehicle?.id)
-  if(i<0) return vehicle?.kind==='own'?'#8b5cf6':'#f59e0b'
-  return VEHICLE_COLORS[i%VEHICLE_COLORS.length]
-}
 
-// ── 보기 기준 ────────────────────────────────────────────
-// 여러 사람이 등록하면 등록 순서대로 쌓여 뒤섞인다. 무엇을 기준으로 묶어 볼지
-// 고르게 한다. 주 뷰는 이 기준이 «격자의 세로축» 이 되므로 성격이 크게 달라진다.
-//   사람  누가 어디 있는가        (위치 파악)
-//   장소  그 현장에 누가 언제 가는가 (동행·중복 방문)
-//   차량  배차표                  (겹침 확인)
-const GROUP_BYS=[
-  {v:'worker', label:'사람', icon:'👤'},
-  {v:'place',  label:'장소', icon:'📍'},
-  {v:'vehicle',label:'차량', icon:'🚗'},
-]
 
-// 기준에 맞는 행 목록을 만든다. 각 행은 {key,label,sub,color,match,cellDefaults} 다.
-//   match        그 행에 속하는 계획인지
-//   cellDefaults 빈 칸을 눌렀을 때 계획 창에 미리 채울 값
-function buildGroupRows(groupBy,workers,places,vehicles,plans,opts={}){
-  if(groupBy==='worker'){
-    return workers.map(w=>({
-      key:'w'+w.id, label:w.name, color:workerColor(w.id,workers),
-      match:p=>p.worker_id===w.id, cellDefaults:{workerId:w.id},
-    }))
-  }
-  if(groupBy==='place'){
-    // 그 기간에 실제로 쓰인 장소만 보여 준다. 등록된 장소를 다 세우면 빈 줄만 길어진다.
-    const used=new Map()
-    plans.forEach(p=>{
-      if(p.use_type==='vacation'||p.place_id==null) return
-      if(!used.has(p.place_id)) used.set(p.place_id,p.place_name||p.place_text||'(이름 없음)')
-    })
-    const rows=[{key:'office',label:'🏢 사무실 (내근)',color:'#64748b',
-      match:p=>p.use_type!=='vacation'&&p.transport==='office',
-      cellDefaults:{placeId:OFFICE_PLACE}}]
-    ;[...used.entries()].sort((a,b)=>String(a[1]).localeCompare(String(b[1]),'ko'))
-      .forEach(([id,name])=>{
-        const pl=places.find(x=>x.id===id)
-        rows.push({key:'p'+id,label:name,
-          sub:pl?.distance_km!=null?`${pl.distance_km}km`:'',
-          color:'#0ea5e9',match:p=>p.place_id===id,cellDefaults:{placeId:id}})
-      })
-    rows.push({key:'vac',label:'🌴 휴가',color:'#059669',
-      match:p=>p.use_type==='vacation',cellDefaults:{kind:'vacation'}})
-    return rows
-  }
-  // 차량 — 법인차는 배차 확인용이라 그 주에 안 쓰였어도 «항상» 세운다
-  const rows=vehicles.filter(v=>v.kind==='company').map(v=>({
-    key:'v'+v.id, label:v.name, sub:v.plate||'', color:vehicleColor(v,vehicles),
-    match:p=>p.vehicle_id===v.id, cellDefaults:{vehicleId:v.id,transport:'company_car'},
-  }))
-  // 자차는 그 기간에 쓰인 것만
-  const usedOwn=new Set(plans.filter(p=>p.vehicle_kind==='own'&&p.vehicle_id).map(p=>p.vehicle_id))
-  vehicles.filter(v=>v.kind==='own'&&usedOwn.has(v.id)).forEach(v=>{
-    rows.push({key:'v'+v.id,label:v.name+(v.owner_name?` (${v.owner_name})`:''),
-      sub:'자차',color:vehicleColor(v,vehicles),match:p=>p.vehicle_id===v.id,
-      cellDefaults:{vehicleId:v.id,transport:'own_car'}})
-  })
-  // 🔑 차량 기준은 «배차표» 다 — 「어느 차를 누가 어디로 가져가는가」 를 보는 자리다.
-  //    차량이 걸리지 않은 일정(사무실 내근·대중교통·휴가)까지 세우면 그 줄이 가장 길어
-  //    정작 배차가 묻힌다 (2026-08-25 지적). 기본으로 감추고, 체크 한 번으로 꺼낸다.
-  if(opts.showNoCar){
-    rows.push({key:'nocar',label:'차량 없음',sub:'사무실·대중교통·휴가',color:'#94a3b8',
-      match:p=>!p.vehicle_id,cellDefaults:{}})
-  }
-  return rows
-}
-// 배지에 넣을 짧은 장소 이름. 달력 칸이 좁아 긴 이름은 잘라야 한다.
-// 편도면 방향을 화살표로 덧붙인다 — 「→현장」 은 나가는 길, 「현장→」 은 돌아오는 길.
-function shortPlace(plan){
-  if(plan.use_type==='vacation') return plan.vacation_type||'휴가'
-  if(plan.use_type==='personal') return '개인 사용'
-  if(plan.transport==='office') return '사무실'
-  const nm=plan.place_name||plan.place_text||''
-  const cut=nm.length>9?nm.slice(0,9)+'…':nm
-  if(plan.one_way_dir==='출발') return '→'+cut
-  if(plan.one_way_dir==='복귀') return cut+'→'
-  return cut
-}
-// 배지에 붙는 아이콘 — 휴가는 이동 수단이 없으므로 따로 잡는다
-function planIcon(plan){
-  if(plan.use_type==='vacation') return '🌴'
-  return (TRANSPORT_MAP[plan.transport]||TRANSPORT_MAP.office).icon
-}
-// 차량은 모델명만 남긴다. 「Model Y 15도 3955」 를 그대로 쓰면 달력 칸을 다 먹는다.
-const shortVehicle=(name)=>String(name||'').replace(/\s*\d+[가-힣]\s*\d+\s*$/,'').trim()
-// 배지 둘째 줄 — «어디에 · 무엇으로 · 왕복인가». 이름만 있으면 달력만 보고는
-// 어디 갔는지 알 수 없어 매번 눌러 봐야 했다.
-function planDetail(plan){
-  if(plan.use_type==='vacation') return plan.vacation_type||''
-  if(plan.use_type==='personal') return plan.vehicle_name?shortVehicle(plan.vehicle_name):''
-  const parts=[shortPlace(plan)]
-  if(plan.vehicle_name) parts.push(shortVehicle(plan.vehicle_name))
-  // 사무실 내근은 이동이 없어 왕복을 따질 것이 없다
-  if(plan.transport&&plan.transport!=='office') parts.push(plan.round_trip?'왕복':'편도')
-  return parts.filter(Boolean).join(' · ')
-}
-// 계획 한 건이 어떤 상태인지 — 달력 표시와 「확인 필요」 판단에 쓴다
-function planState(plan,todayStr){
-  if(plan.status==='canceled') return 'canceled'
-  if(plan.actual_id) return plan.as_planned===false?'changed':'done'
-  return plan.plan_date<todayStr?'needCheck':'planned'
-}
-const PLAN_STATE_MARK={done:'',changed:'↺',needCheck:'●',planned:'',canceled:'✕'}
 
-// 달력 배지 하나.
-// 이름은 «어느 기준으로 보든» 늘 보여 준다 — 장소·차량으로 볼 때는 「누구인가」 가
-// 핵심 정보이고, 사람 기준으로 볼 때도 한 칸에 여러 명이 겹칠 수 있다.
-// (전에는 showWorker 프로퍼티가 있었지만 본문이 쓰지 않아 늘 켜진 것과 같았다 — 걷어냈다)
-function PlanBadge({plan,workers,onClick,todayStr,compact=false}){
-  const color=workerColor(plan.worker_id,workers)
-  const st=planState(plan,todayStr)
-  const personal=plan.use_type==='personal'
-  const vacation=plan.use_type==='vacation'
-  return(
-    <div data-badge onClick={e=>{e.stopPropagation();onClick()}}
-      title={`${plan.worker_name} · ${SLOT_MAP[plan.slot]} · ${vacation?('휴가 · '+(plan.vacation_type||'')):personal?'개인 사용':(plan.place_name||plan.place_text||'장소 미정')}${plan.purpose?' · '+plan.purpose:''}${plan.vehicle_name?' · '+plan.vehicle_name:''}`}
-      style={{cursor:'pointer',
-        background:st==='planned'||st==='needCheck'?color+'22':color+'dd',
-        color:st==='planned'||st==='needCheck'?'#111827':'#fff',
-        border:`1px solid ${color}`,borderStyle:(personal||vacation)?'dashed':'solid',
-        borderRadius:4,padding:compact?'2px 5px':'2px 5px',fontSize:compact?10:11,
-        marginBottom:2,overflow:'hidden',
-        opacity:st==='canceled'?.45:1,
-        textDecoration:st==='canceled'?'line-through':'none'}}>
-      <div style={{display:'flex',alignItems:'center',gap:3,whiteSpace:'nowrap',overflow:'hidden'}}>
-        <span>{planIcon(plan)}</span>
-        <strong style={{fontSize:compact?10:11}}>{plan.worker_name}</strong>
-        {!compact&&<span style={{opacity:.9,overflow:'hidden',textOverflow:'ellipsis'}}>{shortPlace(plan)}</span>}
-        {/* 시간대는 종일이 아닐 때만 — 배차 겹침을 판단할 때 필요하다 */}
-        {plan.slot!=='allday'&&<span style={{opacity:.85,fontSize:compact?9:10}}>{SLOT_MAP[plan.slot]}</span>}
-        {st==='needCheck'&&<span style={{color:'#c2410c',fontWeight:700}}>{PLAN_STATE_MARK.needCheck}</span>}
-        {st==='changed'&&<span>{PLAN_STATE_MARK.changed}</span>}
-      </div>
-      {/* 월 달력은 칸이 넓은 대신 이름만 보였다. 둘째 줄에 «어디에·무엇으로·왕복»을 적는다. */}
-      {compact&&planDetail(plan)&&(
-        <div style={{fontSize:9,opacity:.85,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',
-          paddingLeft:1,lineHeight:1.35}}>{planDetail(plan)}</div>
-      )}
-    </div>
-  )
-}
 
 function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan,
                       onOpenCell,onOpenActual,showToast,focusDate,clipboard,onPaste,onCancelCopy,
@@ -2639,7 +2403,7 @@ function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan
         rows={groupRows} groupBy={groupBy} sortByGroup={sortByGroup}/>}
       {view==='day'&&<ScheduleDay date={anchor} byDate={byDate} workers={workers} vehicles={vehicles}
         todayStr={todayStr} onOpenPlan={onOpenPlan} onOpenCell={openCell} onOpenActual={onOpenActual}
-        rows={groupRows} groupBy={groupBy} sortByGroup={sortByGroup}/>}
+        rows={groupRows} groupBy={groupBy} sortByGroup={sortByGroup} Card={Card}/>}
       {view==='year'&&<ScheduleYear year={year} plans={shown}
         onPickMonth={m=>{setYm(m);setView('month')}}/>}
       {view==='settle'&&<ScheduleSettlement me={me} onLogout={onLogout}
@@ -2658,265 +2422,8 @@ function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan
 
 // 월 뷰 — 날짜 격자에 배지를 얹는다.
 // 빈 곳을 누르면 그 날짜로 계획 창이 열리고, 붙여넣기 모드면 칸을 골라 담는다.
-function ScheduleMonth({ym,byDate,workers,todayStr,onOpenPlan,onPickDate,onOpenCell,
-                        pasting,isPicked,togglePick}){
-  const days=monthGridDays(ym)
-  return(
-    <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,overflow:'hidden'}}>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)'}}>
-        {['월','화','수','목','금','토','일'].map((d,i)=>(
-          <div key={d} style={{...thS,borderRadius:0,padding:'7px 0',
-            color:i===5?'#93c5fd':i===6?'#fca5a5':'#fff'}}>{d}</div>
-        ))}
-      </div>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)'}}>
-        {days.map(d=>{
-          const list=byDate(d)
-          const out=!isSameMonth(d,ym)
-          const isToday=d===todayStr
-          const chosen=pasting&&isPicked(d,null)
-          return(
-            <div key={d}
-              onClick={e=>{
-                // 배지를 눌렀을 때는 칸 동작이 겹치지 않게 한다
-                if(e.target.closest('[data-badge]'))return
-                if(pasting) togglePick(d,null)
-                else onOpenCell({date:d})
-              }}
-              title={pasting?'누르면 붙일 칸으로 고릅니다':'누르면 이 날짜에 계획을 추가합니다'}
-              style={{minHeight:96,borderRight:'1px solid #f1f5f9',borderBottom:'1px solid #f1f5f9',
-                padding:'4px 5px',cursor:'pointer',
-                background:chosen?'#dbeafe':out?'#fafafa':isToday?'#eff6ff':'#fff',
-                boxShadow:chosen?'inset 0 0 0 2px #1a56db':'none',
-                opacity:out?.5:1,overflow:'hidden'}}>
-              <div style={{fontSize:11,fontWeight:isToday?700:500,marginBottom:3,
-                color:isToday?'#1a56db':'#6b7280'}}>
-                {Number(d.slice(8,10))}
-              </div>
-              {list.slice(0,4).map(p=>(
-                <PlanBadge key={p.id} plan={p} workers={workers} todayStr={todayStr}
-                  onClick={()=>onOpenPlan(p)} compact/>
-              ))}
-              {list.length>4&&(
-                <div data-badge onClick={()=>onPickDate(d)}
-                  style={{fontSize:10,color:'#1a56db',cursor:'pointer',fontWeight:600}}>
-                  +{list.length-4}건 더
-                </div>
-              )}
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
 
-// 주 뷰 — «기준 × 날짜» 격자.
-// 세로축은 고른 기준(사람·장소·차량)이 된다.
-//   사람  누가 어디 있는가 — 위치 파악
-//   장소  그 현장에 누가 언제 가는가 — 동행·중복 방문
-//   차량  배차표 — 한 줄에서 겹침이 드러난다
-// 칸을 누르면 «그 줄의 값 + 그 날짜» 가 계획 창에 미리 채워진다.
-function ScheduleWeek({anchor,shown,workers,todayStr,onOpenPlan,onOpenCell,
-                       pasting,isPicked,togglePick,rows,groupBy,sortByGroup}){
-  const days=calWeekDays(anchor)
-  return(
-    <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,overflowX:'auto'}}>
-      <table style={{width:'100%',borderCollapse:'collapse',minWidth:820}}>
-        <thead>
-          <tr>
-            <th style={{...thS,width:130,position:'sticky',left:0,zIndex:2}}>
-              {GROUP_BYS.find(g=>g.v===groupBy)?.label}
-            </th>
-            {days.map((d,i)=>(
-              <th key={d} style={{...thS,background:d===todayStr?'#1a56db':'#1e3a5f'}}>
-                <div style={{color:i===5?'#93c5fd':i===6?'#fca5a5':'#fff'}}>
-                  {mdLabel(d)} ({dayName(d)})
-                </div>
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.length===0&&(
-            <tr><td colSpan={8} style={{...tdS,color:'#6b7280',padding:'18px'}}>
-              표시할 줄이 없습니다.
-            </td></tr>
-          )}
-          {rows.map((row,ri)=>(
-            <tr key={row.key} style={{background:ri%2===0?'#fff':'#f8fbff'}}>
-              <td style={{...tdS,textAlign:'left',fontWeight:700,position:'sticky',left:0,
-                background:ri%2===0?'#fff':'#f8fbff',zIndex:1}}>
-                <span style={{display:'inline-block',width:8,height:8,borderRadius:2,marginRight:6,
-                  background:row.color}}/>
-                {row.label}
-                {row.sub&&<div style={{fontSize:10,color:'#6b7280',fontWeight:500,marginLeft:14}}>{row.sub}</div>}
-              </td>
-              {days.map(d=>{
-                const list=shown.filter(p=>p.plan_date===d&&row.match(p)).sort(sortByGroup)
-                // 붙여넣기 선택 키 — 사람 기준일 때만 사람이 정해진다
-                const wid=row.cellDefaults?.workerId??null
-                const chosen=pasting&&isPicked(d,wid)
-                return(
-                  <td key={d}
-                    onClick={e=>{
-                      if(e.target.closest('[data-badge]'))return
-                      if(pasting) togglePick(d,wid)
-                      else onOpenCell({date:d,...row.cellDefaults})
-                    }}
-                    title={pasting?`${row.label} · ${d} — 누르면 붙일 칸으로 고릅니다`
-                                  :`${row.label} · ${d} — 누르면 계획을 추가합니다`}
-                    style={{...tdS,verticalAlign:'top',minWidth:96,cursor:'pointer',
-                      background:chosen?'#dbeafe':d===todayStr?'#eff6ff':'transparent',
-                      boxShadow:chosen?'inset 0 0 0 2px #1a56db':'none'}}>
-                    {list.length===0
-                      ?<span style={{color:'#e2e8f0',fontSize:11}}>{pasting?'+':'-'}</span>
-                      :list.map(p=>(
-                        <PlanBadge key={p.id} plan={p} workers={workers} todayStr={todayStr}
-                          onClick={()=>onOpenPlan(p)}
-                          />
-                      ))}
-                    {/* 차량 기준에서 한 칸에 둘 이상이면 배차가 겹친 것이다 */}
-                    {groupBy==='vehicle'&&row.key.startsWith('v')&&list.length>1&&(
-                      <div style={{fontSize:10,color:'#991b1b',fontWeight:700}}>겹침 {list.length}건</div>
-                    )}
-                  </td>
-                )
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  )
-}
 
-// 일 뷰 — 그날 일정을 «고른 기준» 으로 묶어 보여 준다 + 차량 배정.
-// 한 표에 섞어 놓으면 여러 사람이 등록했을 때 누가 무엇인지 읽기 어렵다.
-function ScheduleDay({date,byDate,workers,vehicles,todayStr,onOpenPlan,onOpenCell,onOpenActual,
-                      rows,groupBy,sortByGroup}){
-  const list=byDate(date)
-  const noPlan=workers.filter(w=>!list.some(p=>p.worker_id===w.id))
-  const carRows=vehicles.filter(v=>v.kind==='company').map(v=>({
-    v, users:list.filter(p=>p.vehicle_id===v.id&&p.status!=='canceled')
-  }))
-  // 그 날 내용이 있는 묶음만 세운다
-  const filled=rows.map(r=>({row:r,items:list.filter(p=>r.match(p)).sort(sortByGroup)}))
-                   .filter(g=>g.items.length>0)
-
-  return(
-    <div style={{display:'grid',gridTemplateColumns:'minmax(0,1.4fr) minmax(0,1fr)',gap:16}}>
-      <Card title={`${date} (${dayName(date)}) 일정 ${list.length}건 · ${GROUP_BYS.find(g=>g.v===groupBy)?.label}별`}>
-        <div style={{marginBottom:10}}>
-          <button onClick={()=>onOpenCell({date})}
-            style={{padding:'7px 14px',borderRadius:7,border:'1px solid #1a56db',background:'#eff6ff',
-              color:'#1a56db',cursor:'pointer',fontSize:12,fontWeight:700}}>+ 이 날짜에 추가</button>
-        </div>
-        {list.length===0
-          ?<div style={{fontSize:12,color:'#6b7280'}}>등록된 일정이 없습니다.</div>
-          :filled.map(({row,items})=>(
-            <div key={row.key} style={{marginBottom:14}}>
-              <div style={{display:'flex',alignItems:'center',gap:6,padding:'6px 8px',
-                background:'#f1f5f9',borderRadius:6,marginBottom:6}}>
-                <span style={{display:'inline-block',width:8,height:8,borderRadius:2,background:row.color}}/>
-                <strong style={{fontSize:12}}>{row.label}</strong>
-                {row.sub&&<span style={{fontSize:10,color:'#6b7280'}}>{row.sub}</span>}
-                <span style={{fontSize:11,color:'#6b7280'}}>· {items.length}건</span>
-                {groupBy==='vehicle'&&row.key.startsWith('v')&&items.length>1&&(
-                  <span style={{fontSize:10,color:'#991b1b',fontWeight:700}}>겹침</span>
-                )}
-              </div>
-              <table style={{width:'100%',borderCollapse:'collapse'}}>
-                <tbody>
-                  {items.map(p=>{
-                    const tp=TRANSPORT_MAP[p.transport]||TRANSPORT_MAP.office
-                    const personal=p.use_type==='personal'
-                    const vacation=p.use_type==='vacation'
-                    const dist=p.est_distance_km!=null
-                      ?(p.round_trip?p.est_distance_km*2:p.est_distance_km):null
-                    return(
-                      <tr key={p.id} onClick={()=>onOpenPlan(p)} style={{cursor:'pointer'}}>
-                        <td style={{...tdS,textAlign:'left',width:96,fontWeight:700}}>
-                          <span style={{display:'inline-block',width:8,height:8,borderRadius:2,marginRight:6,
-                            background:workerColor(p.worker_id,workers)}}/>
-                          {p.worker_name}
-                        </td>
-                        <td style={{...tdS,width:64}}>{SLOT_MAP[p.slot]}</td>
-                        <td style={{...tdS,textAlign:'left'}}>
-                          {vacation
-                            ?<em style={{color:'#047857'}}>🌴 휴가 · {p.vacation_type||''}</em>
-                            :personal
-                              ?<em style={{color:'#6b7280'}}>개인 사용</em>
-                              :p.transport==='office'
-                                ?'사무실'
-                                :(p.place_name||p.place_text||'-')}
-                          {p.purpose&&<div style={{fontSize:10,color:'#6b7280'}}>{p.purpose}</div>}
-                        </td>
-                        <td style={{...tdS,width:120}}>
-                          {vacation?'-':`${tp.icon} ${p.vehicle_name||tp.label}`}
-                        </td>
-                        <td style={{...tdS,width:64}}>{dist!=null?`${dist}km`:'-'}</td>
-                        <td style={{...tdS,width:96}} onClick={e=>e.stopPropagation()}>
-                          {p.actual_id
-                            ?<button onClick={()=>onOpenActual(p)}
-                              style={{padding:'3px 8px',borderRadius:6,border:'1px solid #059669',
-                                background:'#ecfdf5',color:'#059669',cursor:'pointer',fontSize:11,fontWeight:700}}>
-                              {p.actual_distance_km!=null?`${p.actual_distance_km}km`:'완료'}
-                              {p.as_planned===false?' ↺':''}
-                            </button>
-                            :<button onClick={()=>onOpenActual(p)}
-                              style={{padding:'3px 8px',borderRadius:6,
-                                border:'1px solid '+(p.plan_date<todayStr?'#fdba74':'#e5e7eb'),
-                                background:'#fff',color:p.plan_date<todayStr?'#9a3412':'#6b7280',
-                                cursor:'pointer',fontSize:11,fontWeight:600}}>
-                              실적 입력
-                            </button>}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ))}
-      </Card>
-      <div>
-        <Card title="차량 배정">
-          <table style={{width:'100%',borderCollapse:'collapse'}}>
-            <thead><tr><th style={thS}>차량</th><th style={thS}>사용자</th></tr></thead>
-            <tbody>
-              {carRows.map(({v,users})=>(
-                <tr key={v.id} style={{background:users.length>1?'#fef2f2':'transparent'}}>
-                  <td style={{...tdS,textAlign:'left',fontWeight:600}}>
-                    {v.name}<div style={{fontSize:10,color:'#6b7280'}}>{v.plate}</div>
-                  </td>
-                  <td style={tdS}>
-                    {users.length===0
-                      ?<span style={{color:'#9ca3af',fontSize:11}}>비어 있음</span>
-                      :users.map(u=>(
-                        <div key={u.id} style={{fontSize:11}}>
-                          {u.worker_name} <span style={{color:'#6b7280'}}>({SLOT_MAP[u.slot]})</span>
-                          {u.use_type==='personal'&&<span style={{color:'#92400e'}}> 개인</span>}
-                        </div>
-                      ))}
-                    {users.length>1&&<div style={{fontSize:10,color:'#991b1b',fontWeight:700}}>겹침</div>}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Card>
-        {date>=todayStr&&noPlan.length>0&&(
-          <Card title="계획 미입력">
-            <div style={{fontSize:12,color:'#6b7280',lineHeight:1.7}}>
-              {noPlan.map(w=>w.name).join(' · ')}
-            </div>
-          </Card>
-        )}
-      </div>
-    </div>
-  )
-}
 
 // 연 뷰 — 월별 요약. 외근이 어느 달에 몰렸는지 본다.
 function ScheduleYear({year,plans,onPickMonth}){
