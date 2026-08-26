@@ -18,16 +18,24 @@ $nas       = 'root@vitron-nas'
 $remoteDir = '/volume1/docker-build-portal'
 $omvConf   = '/etc/nginx/openmediavault-webgui.d/zz-vitron-erp.conf'
 
-Write-Host "[1/3] portal 폴더 전송" -ForegroundColor Cyan
-ssh $nas "mkdir -p $remoteDir"
+Write-Host "[1/4] 포털 빌드" -ForegroundColor Cyan
+# ⚠ 빌드는 여기서 한다. 컨테이너 안에서 하려면 src/shared 까지 보내야 하고,
+#   그러면 대시보드 소스 전체가 포털 이미지에 들어간다.
+npx vite build --config vite.portal.config.js
+if ($LASTEXITCODE -ne 0) { throw "빌드 실패" }
+
+Write-Host "[2/4] portal 폴더 전송" -ForegroundColor Cyan
+ssh $nas "rm -rf $remoteDir/dist && mkdir -p $remoteDir"
 if ($LASTEXITCODE -ne 0) { throw "폴더 만들기 실패 (ssh exit $LASTEXITCODE)" }
 
 scp .\portal\Dockerfile .\portal\deploy.sh .\portal\docker-compose.yml `
-    .\portal\index.html .\portal\nginx.conf "${nas}:$remoteDir/"
+    .\portal\nginx.conf "${nas}:$remoteDir/"
 if ($LASTEXITCODE -ne 0) { throw "전송 실패 (scp exit $LASTEXITCODE)" }
+scp -r .\portal\dist "${nas}:$remoteDir/"
+if ($LASTEXITCODE -ne 0) { throw "빌드 결과 전송 실패 (scp exit $LASTEXITCODE)" }
 
 if ($WithOmv) {
-    Write-Host "[2/3] NAS 주소 설정(/ERP) 갱신" -ForegroundColor Cyan
+    Write-Host "[3/4] NAS 주소 설정(/ERP) 갱신" -ForegroundColor Cyan
     scp .\portal\omv-erp.conf "${nas}:$omvConf"
     if ($LASTEXITCODE -ne 0) { throw "설정 전송 실패 (scp exit $LASTEXITCODE)" }
     # 🔴 반드시 검사부터. 이 설정이 깨지면 NAS 관리 화면까지 함께 죽는다.
@@ -35,10 +43,10 @@ if ($WithOmv) {
     if ($LASTEXITCODE -ne 0) { throw "nginx 설정이 올바르지 않습니다 — reload 하지 않았습니다" }
 }
 else {
-    Write-Host "[2/3] NAS 주소 설정은 건드리지 않습니다 (-WithOmv 로 갱신)" -ForegroundColor DarkGray
+    Write-Host "[3/4] NAS 주소 설정은 건드리지 않습니다 (-WithOmv 로 갱신)" -ForegroundColor DarkGray
 }
 
-Write-Host "[3/3] 원격 빌드 및 컨테이너 교체" -ForegroundColor Cyan
+Write-Host "[4/4] 원격 이미지 교체" -ForegroundColor Cyan
 ssh $nas "chmod +x $remoteDir/deploy.sh && cd $remoteDir && ./deploy.sh"
 if ($LASTEXITCODE -ne 0) { throw "원격 배포 실패 (ssh exit $LASTEXITCODE)" }
 

@@ -9,7 +9,9 @@ export default defineConfig([
   //   그대로 두면 eslint 가 그 안의 소스까지 훑어, 내 코드가 멀쩡한데도
   //   `npm run lint` 가 실패한다 (2026-08-25 에 92건이 그렇게 떴다).
   //   남의 작업 폴더이므로 지우지 말고 검사에서만 뺀다.
-  globalIgnores(['dist', '.claude/**']),
+  // ⚠ `dist` 하나만 적으면 «맨 위» 것만 빠진다. 포털 빌드 결과(portal/dist)까지
+  //   검사해 남의 번들에서 오류 108건이 떴다(2026-08-26). 어느 깊이든 빼도록 고친다.
+  globalIgnores(['**/dist/**', '.claude/**']),
   {
     files: ['**/*.{js,jsx}'],
     extends: [
