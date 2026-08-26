@@ -81,6 +81,26 @@ const FIXED_PARENT='고정업무'
 const MODAL_MAX_H='calc(100vh - 80px)'
 
 const TABS=['today','daily','weekly','monthly','yearly','schedule','purchase','settings']
+// ── 주소로 탭을 연다 (2026-08-26 신설) ──────────────────────
+// 사내 포털의 타일이 «탭까지» 열어야 한다는 지시. 그전에는 # 를 아무도 읽지 않아
+// 링크에 #schedule 을 붙여 두어도 늘 첫 탭이 열렸다.
+//   #schedule       스케줄 탭
+//   #schedule/vac   스케줄 탭 + 🌴 휴가 보기
+//     🔑 휴가는 «탭» 이 아니라 스케줄 탭 «안의 보기» 라 두 단계가 필요하다.
+// ⚠ 모르는 값이면 아무것도 하지 않는다. 옛 주소나 오타로 빈 화면이 뜨면 안 된다.
+function parseHash(){
+  const raw=String(window.location.hash||'').replace(/^#/,'').trim()
+  if(!raw) return null
+  const [t,sub]=raw.split('/')
+  if(!TABS.includes(t)) return null
+  return {tab:t, view:sub||null}
+}
+// 지금 화면의 «올바른 주소». 한 곳에서만 만든다 —
+// 두 군데서 조립했더니 잘못된 주소를 되돌릴 때 보기가 빠져
+// 「화면은 휴가인데 주소는 #schedule」 이 됐다.
+// ⚠ 기본 보기(주간)는 붙이지 않는다. #schedule 이 가장 짧고 흔한 주소여야 한다.
+const hashFor=(tab,view)=>
+  '#'+tab+(tab==='schedule'&&view&&view!=='week'?'/'+view:'')
 const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'월간',yearly:'연간',
   schedule:'스케줄',purchase:'구매',settings:'설정'}
 
@@ -1052,7 +1072,36 @@ function NeedPasswordScreen({me,onBack}){
 }
 
 function Dashboard({me,onLoggedOut}){
-  const [tab,setTab]=useState('today')
+  // 주소에 적힌 탭으로 연다. 없으면 늘 보던 「오늘 업무」.
+  const [tab,setTab]=useState(()=>parseHash()?.tab||'today')
+  // 스케줄 탭 «안의 보기» — 포털의 「휴가」 타일이 #schedule/vac 으로 들어온다
+  const [schedView,setSchedView]=useState(()=>parseHash()?.view||'week')
+
+  // 이미 열린 창에서 주소만 바뀌어도 따라간다(뒤로 가기 포함)
+  useEffect(()=>{
+    const on=()=>{
+      const h=parseHash()
+      // 모르는 주소면 화면은 그대로 두고 «주소만» 되돌린다.
+      // 그냥 두면 «설정 화면인데 주소는 #nosuchtab» 처럼 어긋난 채로 남는다.
+      if(!h){ window.history.replaceState(null,'',hashFor(tab,schedView)); return }
+      setTab(h.tab)
+      // 🔑 뒤가 없으면 «기본 보기» 로 되돌린다. 안 그러면 #schedule 로 들어와도
+      //    앞서 보던 휴가 화면이 그대로 남는다(실제로 그랬다).
+      setSchedView(h.view||'week')
+    }
+    window.addEventListener('hashchange',on)
+    return ()=>window.removeEventListener('hashchange',on)
+    // ⚠ tab·schedView 를 함께 본다 — 듣는 함수가 «지금 화면» 을 알아야 모르는 주소를
+    //   제자리로 되돌릴 수 있다. 한 번만 등록하면 처음 값에 묶여 늘 「오늘 업무」가 된다.
+  },[tab,schedView])
+
+  // 탭을 옮기면 주소도 따라간다 — 그래야 지금 화면을 그대로 즐겨찾기할 수 있다.
+  // ⚠ pushState 가 아니라 replaceState 다. 탭을 옮길 때마다 방문 기록이 쌓이면
+  //   「뒤로」 를 여러 번 눌러야 앞 화면으로 돌아가게 된다.
+  useEffect(()=>{
+    const want=hashFor(tab,schedView)
+    if(window.location.hash!==want) window.history.replaceState(null,'',want)
+  },[tab,schedView])
   // 🔴 여기가 운영인가 테스트인가. 서버가 /api/health 로 알려 준다.
   //    ⚠ 화면에 박아 두지 않는 이유 — 그러면 «테스트용 빌드» 가 따로 생기고,
   //      언젠가 그 빌드가 운영에 올라간다. 서버가 말해 주는 편이 안전하다.
@@ -1342,6 +1391,7 @@ function Dashboard({me,onLoggedOut}){
           onOpenActual={p=>setActualDialog({plan:p})}
           actuals={actuals}
           me={me} mayEdit={mayEdit} onLogout={handleLogout}
+          view={schedView} setView={setSchedView}
           clipboard={clipboard} onPaste={handlePaste} onCancelCopy={()=>setClipboard(null)}/>}
         {tab==='purchase'&&<TabPurchase workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
           me={me} canEditOthers={canEditOthers} showToast={showToast}/>}
@@ -2156,7 +2206,7 @@ function TabYearly({history,workers,absences=[],restDays,plans=[],viewYear,setVi
 
 function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan,
                       onOpenCell,onOpenActual,showToast,focusDate,clipboard,onPaste,onCancelCopy,
-                      me,mayEdit=()=>true,onLogout}){
+                      me,mayEdit=()=>true,onLogout,view='week',setView=()=>{}}){
   // 빈 칸을 눌러 계획을 만들 때, 그 칸이 «남의 줄» 이면 막는다.
   // (주 뷰의 사람 기준 보기에서만 칸에 주인이 있다)
   const openCell=d=>{
@@ -2181,7 +2231,8 @@ function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan
 
   const picked = clipboard ? pickedRaw : []
 
-  const [view,setView]=useState('week')
+  // 🔑 보기는 «위(Dashboard)» 가 들고 있다. 주소(#schedule/vac)와 한 몸이라
+  //    여기에 또 두면 둘이 어긋난다 — 상태는 한 곳에만 둔다.
   const [groupBy,setGroupBy]=useState('worker')   // 보기 기준 — 주 뷰의 세로축이 된다
   // 차량 기준일 때 «차량이 안 걸린 일정» 까지 세울지. 기본은 감춤 (배차표로 쓰기 위함)
   const [showNoCar,setShowNoCar]=useState(false)
