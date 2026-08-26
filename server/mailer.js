@@ -26,11 +26,15 @@ const cfg = () => ({
   pass: process.env.MAIL_PASS || '',
   from: process.env.MAIL_FROM || '',
   to:   process.env.MAIL_TO || '',
-  // 완료 보고만 다른 사람에게 보낼 수 있게 열어 둔다.
-  // ⏳ 지금은 «시험 중» 이라 담당자 본인 주소로 돌려 두었다 (2026-08-26 사용자 지시).
-  //    MAIL_TO 를 통째로 바꾸면 «차량 예약 알림까지» 따라가므로 칸을 나눴다.
-  //    시험이 끝나면 .env 에서 MAIL_TO_REPORT 줄만 빼면 대표이사에게 간다.
-  toReport: process.env.MAIL_TO_REPORT || process.env.MAIL_TO || '',
+  // ⏳ 시험용 수신처. 있으면 «새로 만든 알림» 이 전부 이리로 온다 —
+  //    대표이사에게 갈 것(완료 보고·휴가 신청/취소)뿐 아니라
+  //    🔴 «직원에게 갈 것»(휴가 승인·반려)까지 포함한다. 시험 중에 남의 사서함으로
+  //    「휴가가 승인되었습니다」가 날아가면 안 되기 때문이다.
+  //    2026-08-26 사용자 지시로 담당자 본인 주소를 넣어 두었다.
+  //    🔑 MAIL_TO 를 통째로 바꾸지 않은 이유 — 그러면 «차량 예약 알림까지» 따라간다.
+  //    시험이 끝나면 .env 에서 MAIL_TO_TEST 줄만 빼면 제자리로 돌아간다.
+  testTo: process.env.MAIL_TO_TEST || '',
+  toBoss: process.env.MAIL_TO_TEST || process.env.MAIL_TO || '',
 })
 
 const isEnabled = () => {
@@ -211,7 +215,64 @@ function buildDone({ actorName, actorEmail, a }) {
   return {
     from: { name: `${actorName || '업무'} (업무 대시보드)`, address: c.from },
     replyTo: actorEmail ? `${actorName} <${actorEmail}>` : undefined,
-    to: c.toReport,
+    to: c.toBoss,
+    subject,
+    text: body.join('\n'),
+  }
+}
+
+// ── 휴가 신청 · 취소 · 승인 · 반려 (2026-08-26 신설) ─────────
+// 🔑 제목 머리말을 `[휴가]` 로 나눈다. 주소가 하나뿐이라 «제목» 이 유일한 분류 수단이다.
+// 🔑 가는 곳이 방향에 따라 다르다 — 신청·취소는 대표이사에게, 승인·반려는 «신청한 사람» 에게.
+const VAC_TITLE = { request: '신청', cancel: '취소', approved: '승인', rejected: '반려' }
+
+function vacLine(p) {
+  const bits = [dayLabel(p.plan_date)]
+  if (p.slot && p.slot !== 'allday') bits.push(SLOT[p.slot] || p.slot)
+  bits.push(p.vacation_type || '휴가')
+  return '  · ' + bits.join(' · ')
+}
+
+// 휴가가 며칠인가 — 종일 1일, 오전·오후 0.5일.
+// ⚠ 「시각 지정」은 휴가에서 고를 수 없게 막아 두었다(화면). 옛 기록이 있으면 0.5 로 센다.
+const vacDays = p => (p.slot === 'allday' ? 1 : 0.5)
+
+function buildVacation({ kind, actorName, actorEmail, plans, to, reason }) {
+  const c = cfg()
+  const first = plans[0] || {}
+  const who = first.worker_name || actorName || '누군가'
+  const many = plans.length > 1 ? ` 외 ${plans.length - 1}일` : ''
+  const total = plans.reduce((s, p) => s + vacDays(p), 0)
+
+  const subject = `[휴가] ${VAC_TITLE[kind]} · ${who} · ${dayLabel(first.plan_date)}${many}`
+
+  const head = {
+    request:  `${who} 님이 휴가를 신청했습니다.`,
+    cancel:   `${who} 님이 휴가 신청을 취소했습니다.`,
+    approved: `휴가가 승인되었습니다.`,
+    rejected: `휴가가 반려되었습니다.`,
+  }[kind]
+
+  const body = [head, '', ...plans.map(vacLine), '', `합계 ${total}일`, '']
+  if (kind === 'rejected' && reason) body.push(`사유 : ${reason}`, '')
+
+  if (kind === 'request') {
+    body.push('승인은 업무 현황 대시보드의 [스케줄] 탭 → 🌴 휴가 에서 하실 수 있습니다.')
+  } else if (kind === 'approved' || kind === 'rejected') {
+    body.push(`처리한 사람 : ${actorName || '-'}`)
+  }
+  body.push(
+    '',
+    'http://vitron-nas:8082',
+    '',
+    '— 바이트론 이앤에스 업무 현황 대시보드',
+  )
+
+  return {
+    from: { name: `${actorName || '업무'} (업무 대시보드)`, address: c.from },
+    replyTo: actorEmail ? `${actorName} <${actorEmail}>` : undefined,
+    // 🔴 시험 중이면 «신청자에게 갈 것도» 시험 주소로 돌린다 (위 cfg 주석 참고)
+    to: c.testTo || to || c.toBoss,
     subject,
     text: body.join('\n'),
   }
@@ -227,7 +288,9 @@ function buildDone({ actorName, actorEmail, a }) {
 const BATCH_MS = 4000
 const batches = new Map()
 
-function queue(key, payload) {
+// builder — 이 묶음을 무엇으로 조립할 것인가. 차량은 build, 휴가는 buildVacation.
+// 🔑 묶는 방법은 같고 «담는 글» 만 다르다. 그래서 묶기를 두 벌 만들지 않는다.
+function queue(key, payload, builder) {
   const cur = batches.get(key)
   if (cur) {
     clearTimeout(cur.timer)
@@ -239,6 +302,7 @@ function queue(key, payload) {
   batches.set(key, {
     ...payload,
     conflicts: payload.conflicts || [],
+    builder: builder || build,
     timer: setTimeout(() => flush(key), BATCH_MS),
   })
 }
@@ -248,7 +312,7 @@ async function flush(key) {
   batches.delete(key)
   if (!b) return
   b.plans.sort((x, y) => String(x.plan_date).localeCompare(String(y.plan_date)))
-  await send(build(b))
+  await send(b.builder(b))
 }
 
 // 🔑 한 번 실패했다고 포기하지 않는다.
@@ -336,4 +400,27 @@ function notifyDone({ actor, actual, onResult }) {
   }
 }
 
-module.exports = { notify, notifyDone, isEnabled, lastResult, isVehiclePlan }
+// 휴가 알림. 부르는 쪽은 await 하지 않아도 된다.
+// ⚠ 「보낼까요?」를 묻는 것은 «화면» 이 한다 (2026-08-26 사용자 지시 — 차량과 다른 점).
+//   여기까지 왔다는 것은 사람이 「보낸다」 고 답했다는 뜻이다.
+function notifyVacation({ kind, actor, plans, batchId, to, reason }) {
+  try {
+    if (!isEnabled()) return
+    const list = (Array.isArray(plans) ? plans : [plans]).filter(Boolean)
+    if (!list.length) return
+    const payload = {
+      kind,
+      actorName: actor?.name || null,
+      actorEmail: actor?.email || null,
+      plans: list, to, reason,
+    }
+    // 신청만 묶는다. 「사흘 휴가」는 날짜마다 따로 저장되므로 그대로 두면 세 통이 간다.
+    // 취소·승인·반려는 한 건씩 일어나므로 바로 보낸다.
+    if (kind === 'request' && batchId) queue(`vac|${kind}|${batchId}`, payload, buildVacation)
+    else send(buildVacation(payload))
+  } catch (e) {
+    console.error(`[mail] notifyVacation error :: ${e.message}`)
+  }
+}
+
+module.exports = { notify, notifyDone, notifyVacation, isEnabled, lastResult, isVehiclePlan, vacDays }

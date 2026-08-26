@@ -56,6 +56,14 @@ export const addPlan = (plan) => request('POST', '/plans', plan)
 export const updatePlan = (id, patch) => request('PATCH', `/plans/${id}`, patch)
 export const removePlan = (id) => request('DELETE', `/plans/${id}`)
 
+// ── 휴가 승인 (2026-08-26 신설) ──
+// 승인·반려는 대표이사만 할 수 있다. 서버가 막으므로 화면은 단추를 감추기만 한다.
+export const setApproval = (id, approval, rejectReason) =>
+  request('PATCH', `/plans/${id}/approval`, { approval, reject_reason: rejectReason })
+// 연차 부여·사용·잔여. 관리자가 아니면 서버가 «본인 것만» 돌려준다.
+export const getVacationSummary = (on) =>
+  request('GET', `/vacation-summary${on ? `?on=${on}` : ''}`)
+
 // ── 로그인 (정산 화면 전용) ──
 // 계정·세션을 KPI 추적 시스템과 공유한다 — KPI 에서 로그인했으면 여기서도 통한다.
 // credentials:'include' 가 없으면 쿠키가 실려 가지 않는다.

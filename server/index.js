@@ -827,7 +827,7 @@ app.patch('/api/schedule/vehicles/:id', async (req, res) => {
 // ── 계획 ──
 // 달력이 한 번에 그려지도록 장소·차량·직원 이름을 함께 돌려준다.
 const PLAN_SELECT = `
-  SELECT p.*, w.name AS worker_name, w.team AS worker_team,
+  SELECT p.*, w.name AS worker_name, w.team AS worker_team, w.email AS worker_email,
          pl.name AS place_name, pl.category AS place_category,
          v.name AS vehicle_name, v.plate AS vehicle_plate, v.kind AS vehicle_kind,
          v.assigned_worker_id AS vehicle_assigned_worker_id,
@@ -921,20 +921,27 @@ app.post('/api/schedule/plans', async (req, res) => {
       }
     }
     const roundTrip = b.round_trip === undefined ? true : !!b.round_trip
+    // 휴가는 등록하는 순간 «신청» 이 된다. 업무 일정은 승인 제도 밖이라 NULL 로 둔다.
+    const approval = useType === 'vacation' ? 'pending' : null
     const { rows } = await pool.query(
       `INSERT INTO schedule_plans
          (worker_id, plan_date, slot, start_time, end_time, use_type,
           place_id, place_text, purpose, transport, vehicle_id,
-          est_distance_km, est_travel_min, round_trip, vacation_type, one_way_dir)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+          est_distance_km, est_travel_min, round_trip, vacation_type, one_way_dir, approval)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,
       [b.worker_id, b.plan_date, b.slot || 'allday', b.start_time || null, b.end_time || null,
        useType, placeId, placeText, purpose, b.transport || 'office', b.vehicle_id ?? null,
        b.est_distance_km ?? null, b.est_travel_min ?? null,
-       roundTrip, vacationType, oneWayDir(roundTrip, b.one_way_dir)]
+       roundTrip, vacationType, oneWayDir(roundTrip, b.one_way_dir), approval]
     )
     // 🔑 차량 알림 — 저장은 이미 끝났다. 메일은 «덤» 이라 await 하지 않는다.
     //    이름(차량·장소·직원)이 붙은 줄이 필요해 조회용 SELECT 로 한 번 더 읽는다.
     notifyVehicle('create', rows[0].id, req, b.batch_id, b.conflicts_ack)
+    // 휴가 신청 알림 — 🔑 「보낼까요?」는 «화면» 이 묻는다(사용자 지시). 그 답이 b.notify 다.
+    //    ⚠ 안 보내기로 했어도 신청 자체는 그대로 남는다. 메일은 알림일 뿐 신청서가 아니다.
+    if (useType === 'vacation' && b.notify !== false) {
+      notifyVacationPlan('request', rows[0].id, req, b.batch_id)
+    }
     res.json(rows[0])
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -958,6 +965,22 @@ async function notifyVehicle(kind, planId, req, batchId, conflicts) {
     })
   } catch (e) {
     console.error(`[mail] notifyVehicle(${kind}) :: ${e.message}`)
+  }
+}
+
+// 휴가 알림용으로 «이름까지 붙은» 계획 한 줄을 읽어 mailer 에 넘긴다.
+// ⚠ 실패해도 삼킨다 — 알림 때문에 신청이 흔들리면 안 된다.
+async function notifyVacationPlan(kind, planId, req, batchId) {
+  try {
+    if (!mailer.isEnabled()) return
+    const { rows } = await pool.query(`${PLAN_SELECT} WHERE p.id = $1`, [planId])
+    if (!rows.length) return
+    mailer.notifyVacation({
+      kind, plans: rows[0], batchId,
+      actor: { name: req.session?.name, email: req.session?.login },
+    })
+  } catch (e) {
+    console.error(`[mail] notifyVacationPlan(${kind}) :: ${e.message}`)
   }
 }
 
@@ -1030,12 +1053,178 @@ app.delete('/api/schedule/plans/:id', async (req, res) => {
     const { rowCount } = await pool.query('DELETE FROM schedule_plans WHERE id = $1', [req.params.id])
     if (rowCount === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
     if (doomed) {
-      mailer.notify({
-        kind: 'delete', plans: doomed,
-        actor: { name: req.session?.name, email: req.session?.login },
-      })
+      const actor = { name: req.session?.name, email: req.session?.login }
+      if (doomed.use_type === 'vacation') {
+        // 🔑 휴가 취소는 «신청을 물린다» 는 뜻이라 대표이사에게 알려야 한다.
+        //    ⚠ 이미 반려된 건은 알리지 않는다 — 대표이사가 이미 아는 일이고,
+        //    반려당한 사람이 그 줄을 지웠다고 다시 메일이 가면 성가시기만 하다.
+        if (doomed.approval !== 'rejected') {
+          mailer.notifyVacation({ kind: 'cancel', plans: doomed, actor })
+        }
+      } else {
+        mailer.notify({ kind: 'delete', plans: doomed, actor })
+      }
     }
     res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ── 휴가 승인 (2026-08-26 신설) ──────────────────────────────
+// 🔑 승인 권한은 새 칸을 파지 않고 `can_approve_settlement` 를 그대로 쓴다.
+//    「대표이사인가」를 묻는 칸이 둘이 되면 언젠가 어긋난다.
+app.patch('/api/schedule/plans/:id/approval', async (req, res) => {
+  const want = String(req.body?.approval || '')
+  const reason = String(req.body?.reject_reason || '').trim() || null
+  if (!['approved', 'rejected'].includes(want)) {
+    return res.status(400).json({ error: '승인 또는 반려만 할 수 있습니다.' })
+  }
+  try {
+    if (!await canApprove(req.session.uid)) {
+      return res.status(403).json({ error: '휴가 승인은 대표이사만 할 수 있습니다.' })
+    }
+    const { rows } = await pool.query(`${PLAN_SELECT} WHERE p.id = $1`, [req.params.id])
+    if (!rows.length) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
+    if (rows[0].use_type !== 'vacation') {
+      return res.status(400).json({ error: '휴가만 승인할 수 있습니다.' })
+    }
+    // 🔑 반려는 «왜» 를 함께 받는다. 이유 없는 반려는 결국 말로 다시 물어보게 되고,
+    //    그러면 기록이 남지 않아 승인 제도를 둔 뜻이 없어진다.
+    if (want === 'rejected' && !reason) {
+      return res.status(400).json({ error: '반려 사유를 적어 주세요.' })
+    }
+    await pool.query(
+      `UPDATE schedule_plans
+          SET approval = $1, approved_at = now(), approved_by_id = $2,
+              reject_reason = $3, updated_at = now()
+        WHERE id = $4`,
+      [want, req.session.uid, want === 'rejected' ? reason : null, req.params.id])
+    notifyVacationResult(want, req.params.id, req, reason)
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 승인·반려 결과는 «신청한 사람» 에게 알린다.
+// ⚠ 회사 메일 주소가 없는 직원이면 보낼 곳이 없다. 그때는 조용히 넘기지 않고 로그에 남긴다 —
+//   「보냈겠지」 하고 넘어가면 당사자만 결과를 모른 채로 남는다.
+async function notifyVacationResult(kind, planId, req, reason) {
+  try {
+    if (!mailer.isEnabled()) return
+    const { rows } = await pool.query(`${PLAN_SELECT} WHERE p.id = $1`, [planId])
+    if (!rows.length) return
+    const to = rows[0].worker_email
+    if (!to) {
+      console.warn(`[mail] vacation ${kind}: ${rows[0].worker_name} 님의 메일 주소가 없어 못 보냄 (plan#${planId})`)
+      return
+    }
+    mailer.notifyVacation({
+      kind, plans: rows[0], to, reason,
+      actor: { name: req.session?.name, email: req.session?.login },
+    })
+  } catch (e) {
+    console.error(`[mail] notifyVacationResult(${kind}) :: ${e.message}`)
+  }
+}
+
+// ── 연차 부여·사용·잔여 (2026-08-26 신설) ────────────────────
+// 근로기준법 60조 기준.
+//   1년 미만  : 1개월 개근마다 1일 (최대 11일)
+//   1년 이상  : 15일
+//   3년 이상  : 15 + (근속연수 − 1) ÷ 2 의 몫,  상한 25일
+// ⚠ 「개근」은 시스템이 판단하지 않는다. 결근 데이터가 없어 «개근한 것으로 보고» 센다.
+//   1년 미만인 사람이 결근한 달이 있으면 실제보다 많게 나온다 — 화면에 이 단서를 적는다.
+function annualLeaveDays(hiredAt, on) {
+  if (!hiredAt) return null                      // 입사일이 없으면 셀 수 없다. 0 이 아니라 «모름» 이다
+  const h = new Date(`${String(hiredAt).slice(0, 10)}T00:00:00`)
+  const d = new Date(`${on}T00:00:00`)
+  if (d < h) return 0
+  let years = d.getFullYear() - h.getFullYear()
+  const before = (d.getMonth() < h.getMonth())
+    || (d.getMonth() === h.getMonth() && d.getDate() < h.getDate())
+  if (before) years -= 1
+  if (years < 1) {
+    let months = (d.getFullYear() - h.getFullYear()) * 12 + (d.getMonth() - h.getMonth())
+    if (d.getDate() < h.getDate()) months -= 1
+    return Math.max(0, Math.min(11, months))
+  }
+  return Math.min(25, 15 + Math.floor((years - 1) / 2))
+}
+
+// 그 사람의 «올해 연차 연도» — 입사일 기준으로 센다(법정 원칙).
+function leaveYearRange(hiredAt, on) {
+  if (!hiredAt) return null
+  const h = new Date(`${String(hiredAt).slice(0, 10)}T00:00:00`)
+  const d = new Date(`${on}T00:00:00`)
+  let start = new Date(d.getFullYear(), h.getMonth(), h.getDate())
+  if (start > d) start = new Date(d.getFullYear() - 1, h.getMonth(), h.getDate())
+  const end = new Date(start.getFullYear() + 1, start.getMonth(), start.getDate())
+  end.setDate(end.getDate() - 1)
+  const fmt = x => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`
+  return { from: fmt(start), to: fmt(end) }
+}
+
+app.get('/api/schedule/vacation-summary', async (req, res) => {
+  try {
+    const on = /^\d{4}-\d{2}-\d{2}$/.test(req.query.on || '') ? req.query.on : todayLocal()
+    // 🔴 남의 연차는 관리자만 본다. 본인 것은 누구나 본다.
+    const isAdmin = req.session?.role === 'admin'
+    const myWorkerId = req.session?.workerId ?? null
+
+    const { rows: workers } = await pool.query(
+      'SELECT id, name, hired_at FROM workers WHERE active ORDER BY name')
+    const targets = isAdmin ? workers : workers.filter(w => w.id === myWorkerId)
+
+    const out = []
+    for (const w of targets) {
+      const range = leaveYearRange(w.hired_at, on)
+      const granted = annualLeaveDays(w.hired_at, on)
+      let used = 0, waiting = 0, byType = {}, rows = []
+      if (range) {
+        const { rows: vac } = await pool.query(
+          `SELECT plan_date, slot, vacation_type, approval
+             FROM schedule_plans
+            WHERE worker_id = $1 AND use_type = 'vacation'
+              AND plan_date >= $2 AND plan_date <= $3
+              AND (approval IS NULL OR approval <> 'rejected')
+            ORDER BY plan_date`,
+          [w.id, range.from, range.to])
+        rows = vac
+        for (const v of vac) {
+          const days = mailer.vacDays(v)
+          byType[v.vacation_type || '기타'] = (byType[v.vacation_type || '기타'] || 0) + days
+          // 🔑 «연차» 만 잔여에서 깎는다. 병가·포상·기타는 세어 보여만 준다.
+          if (v.vacation_type !== '연차') continue
+          // 🔑 「쓴 것」과 「기다리는 것」을 갈라 센다. 대기 중인 신청을 «사용» 이라 부르면
+          //    아직 승인도 안 났는데 쓴 것처럼 읽힌다. 다만 잔여에서는 «둘 다» 뺀다 —
+          //    신청해 둔 날을 남은 것으로 세면 결국 있지도 않은 연차를 또 신청하게 된다.
+          if (v.approval === 'pending') waiting += days
+          else used += days
+        }
+      }
+      const round1 = n => Math.round(n * 10) / 10
+      out.push({
+        worker_id: w.id, name: w.name, hired_at: w.hired_at,
+        range, granted, used: round1(used), waiting: round1(waiting),
+        remaining: granted == null ? null : round1(granted - used - waiting),
+        by_type: byType, rows,
+      })
+    }
+    // 승인 대기 목록. 🔑 승인할 수 있는 사람에게만 내려보낸다 —
+    //    못 누르는 사람에게 보여 주면 「왜 안 눌리지」 만 남는다.
+    const canApproveNow = await canApprove(req.session.uid)
+    let pending = []
+    if (canApproveNow) {
+      const { rows: pend } = await pool.query(
+        `${PLAN_SELECT} WHERE p.approval = 'pending' ORDER BY p.plan_date ASC, w.name ASC`)
+      pending = pend
+    }
+    res.json({
+      on, scope: isAdmin ? 'all' : 'me', items: out,
+      can_approve: canApproveNow, pending,
+    })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }

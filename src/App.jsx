@@ -10,7 +10,7 @@ import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatu
 import { getPlaces, addPlace, updatePlace, hidePlace, getVehicles, addVehicle, updateVehicle,
          getPlans, getMailStatus, addPlan, updatePlan, removePlan, getActuals, addActual, updateActual,
          removeActual, login, logout, whoAmI, getSettlement, approveSettlement,
-         reopenSettlement } from './repositories/scheduleRepo'
+         reopenSettlement, setApproval, getVacationSummary } from './repositories/scheduleRepo'
 import { getHolidays, syncHolidays, addHoliday, setHolidayWorking, removeHoliday,
          restDaySet } from './repositories/holidayRepo'
 
@@ -112,7 +112,9 @@ const PLACE_CATEGORIES=['고객사','기타']
 const SLOTS=[{v:'allday',label:'종일'},{v:'am',label:'오전'},{v:'pm',label:'오후'},{v:'time',label:'시각 지정'}]
 const SLOT_MAP=Object.fromEntries(SLOTS.map(s=>[s.v,s.label]))
 const SCHEDULE_VIEWS=[{v:'month',label:'월'},{v:'week',label:'주'},{v:'day',label:'일'},
-                      {v:'year',label:'연'},{v:'settle',label:'💰 정산'}]
+                      {v:'year',label:'연'},{v:'settle',label:'💰 정산'},{v:'vac',label:'🌴 휴가'}]
+// 달력이 아닌 보기 — 기간 이동(◀ ▶)·범례가 뜻이 없다
+const NON_CALENDAR_VIEWS=['settle','vac']
 // 표 머리글은 데이터 행과 확실히 구분되는 진한 남색으로.
 // 연한 회색(#f9fafb)이던 때는 첫 데이터 행과 같은 색이라 머리글이 붙어 보였다.
 // 오늘 업무 입력표 머리글과 같은 색이라 화면 전체가 일관된다.
@@ -2415,7 +2417,7 @@ function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan
     setAnchor(todayStr); setYm(toMonth(todayStr)); setYear(toYear(todayStr))
   }
 
-  const isSettle=view==='settle'
+  const isSettle=NON_CALENDAR_VIEWS.includes(view)
   const periodLabel=view==='month'?`${ym.slice(0,4)}년 ${Number(ym.slice(5,7))}월`
     :view==='week'?`${mdLabel(calWeekDays(anchor)[0])} ~ ${mdLabel(calWeekDays(anchor)[6])}`
     :view==='day'?`${anchor} (${dayName(anchor)})`
@@ -2579,6 +2581,7 @@ function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan
         onPickMonth={m=>{setYm(m);setView('month')}}/>}
       {view==='settle'&&<ScheduleSettlement me={me} onLogout={onLogout}
         onOpenActual={onOpenActual} showToast={showToast}/>}
+      {view==='vac'&&<ScheduleVacation showToast={showToast} onOpenPlan={onOpenPlan}/>}
 
       {!isSettle&&<div style={{marginTop:14,fontSize:11,color:'#6b7280',display:'flex',gap:14,flexWrap:'wrap'}}>
         <span>🏢 사무실</span><span>🚗 법인차량</span><span>🚙 자차</span><span>🚌 대중교통</span><span>🌴 휴가</span>
@@ -3199,6 +3202,131 @@ function VehicleRates({canApprove,showToast}){
         ⚠ 연비를 <strong>낮추면 환급 리터가 늘어납니다.</strong> 그래서 본인이 아니라 대표이사가 정합니다.
       </div>
     </Card>
+  )
+}
+
+// ════════════════════════════════════════════════════════════
+// 🌴 휴가 — 승인 대기 + 사람별 부여·사용·잔여 (2026-08-26 신설)
+// ════════════════════════════════════════════════════════════
+// 🔴 남의 연차는 관리자만 본다. 서버가 «본인 것만» 돌려주므로 화면은 받은 대로 그린다.
+//    화면에서 거르면 데이터는 이미 브라우저까지 온 뒤라 가린 것에 지나지 않는다.
+function ScheduleVacation({showToast,onOpenPlan}){
+  const [data,setData]=useState(null)
+  const [err,setErr]=useState('')
+  const [busy,setBusy]=useState(0)     // 처리 중인 계획 번호
+
+  // effect 안에서 곧바로 setState 를 하면 렌더가 한 번 더 돌고 lint 도 막는다.
+  // 응답이 온 뒤에 담고, 화면을 떠났으면 담지 않는다.
+  const [tick,setTick]=useState(0)
+  const reload=()=>setTick(t=>t+1)
+  useEffect(()=>{
+    let alive=true
+    getVacationSummary()
+      .then(d=>{ if(alive){ setData(d); setErr('') } })
+      .catch(e=>{ if(alive) setErr(e.message) })
+    return ()=>{ alive=false }
+  },[tick])
+
+  async function decide(p,approval){
+    let reason=null
+    if(approval==='rejected'){
+      // 🔑 반려는 «왜» 를 함께 받는다. 이유 없는 반려는 결국 말로 다시 물어보게 되고,
+      //    그러면 기록이 남지 않아 승인 제도를 둔 뜻이 없어진다. 서버도 빈 사유를 막는다.
+      reason=prompt(`${p.worker_name} 님의 ${mdLabel(p.plan_date)} 휴가를 반려합니다.\n\n사유를 적어 주세요 (신청자에게 그대로 전달됩니다)`)
+      if(reason===null)return
+      if(!reason.trim()){ showToast('반려 사유를 적어 주세요'); return }
+    }else{
+      if(!confirm(`${p.worker_name} 님의 ${mdLabel(p.plan_date)} ${p.vacation_type||'휴가'}를 승인할까요?\n\n신청자에게 승인 메일이 갑니다.`))return
+    }
+    try{
+      setBusy(p.id)
+      await setApproval(p.id,approval,reason)
+      showToast(approval==='approved'?'승인했습니다':'반려했습니다')
+      reload()
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(0) }
+  }
+
+  if(err)return <Card title="🌴 휴가"><div style={{fontSize:12,color:'#b91c1c'}}>불러오지 못했습니다: {err}</div></Card>
+  if(!data)return <Card title="🌴 휴가"><div style={{fontSize:12,color:'#6b7280'}}>불러오는 중…</div></Card>
+
+  const pending=data.pending||[]
+  return(
+    <div style={{display:'flex',flexDirection:'column',gap:14}}>
+      {data.can_approve&&(
+        <Card title={`승인 대기 ${pending.length}건`}>
+          {pending.length===0
+            ?<div style={{fontSize:12,color:'#16a34a'}}>기다리는 신청이 없습니다.</div>
+            :<table style={{width:'100%',borderCollapse:'collapse'}}>
+              <thead><tr>
+                <th style={thS}>날짜</th><th style={thS}>이름</th><th style={thS}>시간대</th>
+                <th style={thS}>종류</th><th style={thS}>처리</th>
+              </tr></thead>
+              <tbody>
+                {pending.map(p=>(
+                  <tr key={p.id}>
+                    <td style={{...tdS,cursor:'pointer',color:'#1a56db',fontWeight:600}}
+                      onClick={()=>onOpenPlan&&onOpenPlan(p)}>{mdLabel(p.plan_date)} ({dayName(p.plan_date)})</td>
+                    <td style={tdS}>{p.worker_name}</td>
+                    <td style={tdS}>{SLOT_MAP[p.slot]||p.slot}</td>
+                    <td style={tdS}>{p.vacation_type||'-'}</td>
+                    <td style={tdS}>
+                      <button onClick={()=>decide(p,'approved')} disabled={busy===p.id}
+                        style={{padding:'4px 12px',borderRadius:6,border:'none',background:'#059669',
+                          color:'#fff',cursor:'pointer',fontSize:12,fontWeight:700,marginRight:6}}>승인</button>
+                      <button onClick={()=>decide(p,'rejected')} disabled={busy===p.id}
+                        style={{padding:'4px 12px',borderRadius:6,border:'1px solid #dc2626',background:'#fff',
+                          color:'#dc2626',cursor:'pointer',fontSize:12,fontWeight:700}}>반려</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>}
+        </Card>
+      )}
+
+      <Card title={data.scope==='all'?'연차 부여 · 사용 · 잔여':'내 연차'}>
+        <table style={{width:'100%',borderCollapse:'collapse'}}>
+          <thead><tr>
+            <th style={thS}>이름</th><th style={thS}>입사일</th><th style={thS}>연차 연도</th>
+            <th style={thS}>부여</th><th style={thS}>사용</th><th style={thS}>승인 대기</th>
+            <th style={thS}>잔여</th><th style={thS}>그 밖의 휴가</th>
+          </tr></thead>
+          <tbody>
+            {data.items.map(it=>{
+              const other=Object.entries(it.by_type).filter(([k])=>k!=='연차')
+              const low=it.remaining!=null&&it.remaining<=0
+              return(
+                <tr key={it.worker_id}>
+                  <td style={{...tdS,fontWeight:700}}>{it.name}</td>
+                  <td style={tdS}>{it.hired_at||<span style={{color:'#b91c1c'}}>없음</span>}</td>
+                  <td style={{...tdS,fontSize:11,color:'#6b7280'}}>
+                    {it.range?`${it.range.from} ~ ${it.range.to}`:'-'}</td>
+                  <td style={tdS}>{it.granted==null?'-':`${it.granted}일`}</td>
+                  <td style={tdS}>{it.used}일</td>
+                  <td style={{...tdS,color:it.waiting?'#92400e':'#9ca3af',
+                    fontWeight:it.waiting?700:400}}>{it.waiting?`${it.waiting}일`:'-'}</td>
+                  <td style={{...tdS,fontWeight:700,color:low?'#b91c1c':'#111827'}}>
+                    {it.remaining==null?'-':`${it.remaining}일`}</td>
+                  <td style={{...tdS,fontSize:11,color:'#6b7280'}}>
+                    {other.length?other.map(([k,v])=>`${k} ${v}일`).join(' · '):'-'}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+        <div style={{fontSize:11,color:'#6b7280',marginTop:10,lineHeight:1.7}}>
+          💡 <strong>부여</strong>는 근로기준법 60조 기준입니다 — 1년 미만은 <strong>1개월 개근마다 1일</strong>(최대 11일),
+          1년 이상은 15일, 3년 이상부터 2년마다 1일씩 늘어 최대 25일입니다. 연차 연도는 <strong>입사일 기준</strong>입니다.<br/>
+          ⚠ <strong>「개근」은 시스템이 판단하지 않습니다.</strong> 결근 자료가 없어 개근한 것으로 보고 셉니다 —
+          1년 미만인 분이 결근한 달이 있으면 실제보다 많게 나옵니다.<br/>
+          ⚠ <strong>「연차」만 잔여에서 깎습니다.</strong> 병가·포상·기타는 세어 보여 주기만 합니다.
+          반차(오전·오후)는 0.5일, <strong>반려된 신청은 세지 않습니다.</strong><br/>
+          ⚠ <strong>잔여 = 부여 − 사용 − 승인 대기</strong> 입니다. 아직 승인이 안 났어도 이미 신청해 둔 날이라,
+          남은 것으로 세면 없는 연차를 또 신청하게 됩니다.
+        </div>
+      </Card>
+    </div>
   )
 }
 
@@ -3842,9 +3970,19 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
       //    출장 3일을 넣으면 계획은 세 번 저장되는데, 대표이사에게 갈 알림 메일까지
       //    세 통이면 못 쓴다. 서버가 이 표로 묶어 한 통으로 보낸다.
       const batchId=`${Date.now()}-${Math.random().toString(36).slice(2,8)}`
+
+      // 🔑 휴가는 «보낼까요?» 를 묻고 보낸다 (2026-08-26 사용자 지시 — 차량과 다른 점).
+      //    잘못 눌러 들어간 휴가로 대표이사에게 신청 메일이 가면 되돌릴 방법이 없다.
+      //    ⚠ 「아니오」 여도 신청 자체는 그대로 남는다. 메일은 알림일 뿐 신청서가 아니다.
+      const notifyMail=!isVacation||confirm(
+        `휴가 ${targets.length}일을 등록합니다.\n\n· ${targets.join('\n· ')}\n\n`
+        +'대표이사에게 휴가 신청 메일을 보낼까요?\n'
+        +'(「취소」를 눌러도 휴가는 등록되고, 승인 대기 상태로 남습니다)'
+      )
+
       for(const d of targets){
         try{
-          await addPlan({...buildBody(d,usePlaceId,useKm,useMin),batch_id:batchId})
+          await addPlan({...buildBody(d,usePlaceId,useKm,useMin),batch_id:batchId,notify:notifyMail})
           done++
         }catch(e){
           if(e.status===409&&e.conflicts?.length){
@@ -3860,7 +3998,7 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
           for(const c of conflicts){
             // 겹친 줄도 같은 묶음이다. 겹쳤다는 사실은 메일에도 적힌다
             await addPlan({...buildBody(c.date,usePlaceId,useKm,useMin,true),
-              batch_id:batchId,
+              batch_id:batchId,notify:notifyMail,
               conflicts_ack:c.names.map(n=>({worker_name:n,slot:slot}))})
             done++
           }
@@ -3892,7 +4030,15 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   }
 
   async function handleDelete(){
-    if(!confirm('이 계획을 삭제할까요?'))return
+    // 휴가를 지우는 것은 «신청을 물린다» 는 뜻이라 대표이사에게 취소 메일이 간다.
+    // 지우기 전에 그 사실을 알려 준다 — 지운 뒤에 알려 봐야 늦다.
+    // ⚠ 이미 반려된 건은 메일이 가지 않는다(서버가 거른다). 문구도 그렇게 가른다.
+    const msg=editing.use_type==='vacation'
+      ? (editing.approval==='rejected'
+          ? '반려된 휴가 신청을 지울까요?\n\n이미 반려된 건이라 메일은 가지 않습니다.'
+          : '이 휴가 신청을 취소할까요?\n\n대표이사에게 취소 메일이 갑니다.')
+      : '이 계획을 삭제할까요?'
+    if(!confirm(msg))return
     try{
       setBusy(true)
       await removePlan(editing.id)
@@ -4005,8 +4151,12 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
           </div>
           <div>
             <label style={labelS}>시간대</label>
+            {/* 🔑 휴가에는 「시각 지정」을 두지 않는다 (2026-08-26).
+                「연차 · 14:00~16:00」 이 며칠인지는 회사가 제도로 정할 일이지
+                여기서 임의로 셀 수 없다. 종일 1일 · 오전/오후 0.5일 셋만 남긴다. */}
             <select value={slot} onChange={e=>setSlot(e.target.value)} disabled={!canEdit} style={inputS}>
-              {SLOTS.map(s=><option key={s.v} value={s.v}>{s.label}</option>)}
+              {SLOTS.filter(s=>!(isVacation&&s.v==='time'))
+                .map(s=><option key={s.v} value={s.v}>{s.label}</option>)}
             </select>
           </div>
         </div>
@@ -4053,7 +4203,9 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
                   // 유형을 바꾸면 그 유형에 없는 값은 비운다
                   if(k.v==='work'){ setPlaceId(OFFICE_PLACE); setTransport('office'); setVehicleId('') }
                   if(k.v==='vehicle'){ setPlaceId(''); setTransport('company_car'); setUseType('business') }
-                  if(k.v==='vacation'){ setPlaceId(''); setTransport('none'); setVehicleId('') }
+                  // 「시각 지정」인 채로 휴가로 바꾸면 고를 수 없는 값이 남는다. 종일로 되돌린다.
+                  if(k.v==='vacation'){ setPlaceId(''); setTransport('none'); setVehicleId('')
+                    setSlot(s=>s==='time'?'allday':s) }
                 }} disabled={!canEdit}
                 style={{flex:1,padding:'10px 4px',borderRadius:7,cursor:canEdit?'pointer':'default',
                   border:'1px solid '+(kind===k.v?'#1a56db':'#e5e7eb'),
