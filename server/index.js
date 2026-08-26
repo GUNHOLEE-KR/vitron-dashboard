@@ -922,24 +922,31 @@ app.post('/api/schedule/plans', async (req, res) => {
     }
     const roundTrip = b.round_trip === undefined ? true : !!b.round_trip
     // 휴가는 등록하는 순간 «신청» 이 된다. 업무 일정은 승인 제도 밖이라 NULL 로 둔다.
-    const approval = useType === 'vacation' ? 'pending' : null
+    // 🔑 넣은 사람이 «결재자» 면 그 자리에서 승인된 것으로 본다 (2026-08-26 사용자 지적).
+    //    대표이사가 자기 휴가를 넣고 자기에게 승인 요청 메일을 보낸 뒤 자기가 승인하는 것은
+    //    절차가 아니라 헛돌기다. 누가 승인했는지는 그대로 남는다.
+    const selfApprove = useType === 'vacation' && await canApprove(req.session.uid)
+    const approval = useType === 'vacation' ? (selfApprove ? 'approved' : 'pending') : null
     const { rows } = await pool.query(
       `INSERT INTO schedule_plans
          (worker_id, plan_date, slot, start_time, end_time, use_type,
           place_id, place_text, purpose, transport, vehicle_id,
-          est_distance_km, est_travel_min, round_trip, vacation_type, one_way_dir, approval)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,
+          est_distance_km, est_travel_min, round_trip, vacation_type, one_way_dir,
+          approval, approved_at, approved_by_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,
       [b.worker_id, b.plan_date, b.slot || 'allday', b.start_time || null, b.end_time || null,
        useType, placeId, placeText, purpose, b.transport || 'office', b.vehicle_id ?? null,
        b.est_distance_km ?? null, b.est_travel_min ?? null,
-       roundTrip, vacationType, oneWayDir(roundTrip, b.one_way_dir), approval]
+       roundTrip, vacationType, oneWayDir(roundTrip, b.one_way_dir),
+       approval, selfApprove ? new Date() : null, selfApprove ? req.session.uid : null]
     )
     // 🔑 차량 알림 — 저장은 이미 끝났다. 메일은 «덤» 이라 await 하지 않는다.
     //    이름(차량·장소·직원)이 붙은 줄이 필요해 조회용 SELECT 로 한 번 더 읽는다.
     notifyVehicle('create', rows[0].id, req, b.batch_id, b.conflicts_ack)
-    // 휴가 신청 알림 — 🔑 「보낼까요?」는 «화면» 이 묻는다(사용자 지시). 그 답이 b.notify 다.
-    //    ⚠ 안 보내기로 했어도 신청 자체는 그대로 남는다. 메일은 알림일 뿐 신청서가 아니다.
-    if (useType === 'vacation' && b.notify !== false) {
+    // 휴가 신청 알림 — 🔑 「신청할까요?」는 «화면» 이 등록 «전에» 묻는다(사용자 지시).
+    //    여기까지 왔다는 것은 사람이 「신청한다」 고 답했다는 뜻이다.
+    //    ⚠ 결재자가 스스로 넣은 것은 이미 승인이라 보낼 곳이 없다.
+    if (useType === 'vacation' && !selfApprove) {
       notifyVacationPlan('request', rows[0].id, req, b.batch_id)
     }
     res.json(rows[0])
@@ -1196,21 +1203,26 @@ app.get('/api/schedule/vacation-summary', async (req, res) => {
         for (const v of vac) {
           if (v.approval === 'rejected') continue
           const days = mailer.vacDays(v)
+          // 🔑 «승인된 것만» 쓴 것으로 센다 (2026-08-26 사용자 지시).
+          //    대기 중인 신청은 아직 결재가 안 난 것이라 「썼다」 고 말할 수 없다.
+          //    잔여에서도 빼지 않는다 — 반려될 수도 있는 날을 미리 깎으면
+          //    남은 연차가 실제보다 적게 보인다.
+          //    ⚠ approval 이 비어 있는 것은 승인 제도가 생기기 «전» 의 기록이다.
+          //      이미 다녀온 휴가이므로 «쓴 것» 으로 센다.
+          if (v.approval === 'pending') {
+            if (v.vacation_type === '연차') waiting += days
+            continue
+          }
           byType[v.vacation_type || '기타'] = (byType[v.vacation_type || '기타'] || 0) + days
           // 🔑 «연차» 만 잔여에서 깎는다. 병가·포상·기타는 세어 보여만 준다.
-          if (v.vacation_type !== '연차') continue
-          // 🔑 「쓴 것」과 「기다리는 것」을 갈라 센다. 대기 중인 신청을 «사용» 이라 부르면
-          //    아직 승인도 안 났는데 쓴 것처럼 읽힌다. 다만 잔여에서는 «둘 다» 뺀다 —
-          //    신청해 둔 날을 남은 것으로 세면 결국 있지도 않은 연차를 또 신청하게 된다.
-          if (v.approval === 'pending') waiting += days
-          else used += days
+          if (v.vacation_type === '연차') used += days
         }
       }
       const round1 = n => Math.round(n * 10) / 10
       out.push({
         worker_id: w.id, name: w.name, hired_at: w.hired_at,
         range, granted, used: round1(used), waiting: round1(waiting),
-        remaining: granted == null ? null : round1(granted - used - waiting),
+        remaining: granted == null ? null : round1(granted - used),
         by_type: byType, rows,
       })
     }

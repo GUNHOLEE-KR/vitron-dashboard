@@ -107,6 +107,8 @@ const PLAN_KINDS=[
 ]
 // 휴가 종류. 값이 늘거나 바뀔 수 있으므로 여기 한 곳에서만 관리한다.
 const VACATION_TYPES=['연차','병가','포상','기타']
+// 휴가일 때 시간대 고르개에 쓰는 말. 「오전」 만으로는 반차인지 알 수 없다는 지적(2026-08-26).
+const VAC_SLOT_LABEL={allday:'종일 — 1일',am:'오전 반차 — 0.5일',pm:'오후 반차 — 0.5일'}
 // 휴가 한 건의 상태. legacy = 승인 제도가 생기기 «전» 에 들어온 기록(approval 이 비어 있다).
 // 소급 승인을 요구하지 않기로 했으므로 「기록」이라 부르고 색도 중립으로 둔다.
 const VAC_STATE={
@@ -3388,8 +3390,8 @@ function ScheduleVacation({showToast,onOpenPlan}){
           1년 미만인 분이 결근한 달이 있으면 실제보다 많게 나옵니다.<br/>
           ⚠ <strong>「연차」만 잔여에서 깎습니다.</strong> 병가·포상·기타는 세어 보여 주기만 합니다.
           반차(오전·오후)는 0.5일, <strong>반려된 신청은 세지 않습니다.</strong><br/>
-          ⚠ <strong>잔여 = 부여 − 사용 − 승인 대기</strong> 입니다. 아직 승인이 안 났어도 이미 신청해 둔 날이라,
-          남은 것으로 세면 없는 연차를 또 신청하게 됩니다.
+          ⚠ <strong>잔여 = 부여 − 사용</strong> 입니다. <strong>승인된 것만 「사용」으로 셉니다</strong> —
+          승인 대기 중인 신청은 아직 결재가 안 난 것이라 잔여에서도 빼지 않습니다(옆 칸에 따로 보여 드립니다).
         </div>
       </Card>
     </div>
@@ -4037,18 +4039,22 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
       //    세 통이면 못 쓴다. 서버가 이 표로 묶어 한 통으로 보낸다.
       const batchId=`${Date.now()}-${Math.random().toString(36).slice(2,8)}`
 
-      // 🔑 휴가는 «보낼까요?» 를 묻고 보낸다 (2026-08-26 사용자 지시 — 차량과 다른 점).
+      // 🔑 휴가는 등록 «전에» 한 번 묻는다 (2026-08-26 사용자 지시 — 차량과 다른 점).
       //    잘못 눌러 들어간 휴가로 대표이사에게 신청 메일이 가면 되돌릴 방법이 없다.
-      //    ⚠ 「아니오」 여도 신청 자체는 그대로 남는다. 메일은 알림일 뿐 신청서가 아니다.
-      const notifyMail=!isVacation||confirm(
-        `휴가 ${targets.length}일을 등록합니다.\n\n· ${targets.join('\n· ')}\n\n`
-        +'대표이사에게 휴가 신청 메일을 보낼까요?\n'
-        +'(「취소」를 눌러도 휴가는 등록되고, 승인 대기 상태로 남습니다)'
-      )
+      // ⚠ 처음에는 「메일만」 묻고 취소해도 등록은 시켰는데, 「취소를 눌렀는데 등록된다」는
+      //    지적을 받았다(2026-08-26). 창 하나가 두 가지를 물으면 «취소»가 어느 쪽을
+      //    가리키는지 알 수 없다. 이제 취소는 «등록 자체»를 취소한다.
+      if(isVacation){
+        const days=targets.map(d=>`${d} (${dayName(d)}) · ${SLOT_MAP[slot]}${slot==='allday'?'':' 반차'} · ${vacationType}`)
+        if(!confirm(
+          `아래 휴가를 신청할까요?\n\n· ${days.join('\n· ')}\n\n합계 ${targets.length*(slot==='allday'?1:0.5)}일\n\n`
+          +'신청하면 대표이사에게 승인 요청 메일이 갑니다.'
+        ))return
+      }
 
       for(const d of targets){
         try{
-          await addPlan({...buildBody(d,usePlaceId,useKm,useMin),batch_id:batchId,notify:notifyMail})
+          await addPlan({...buildBody(d,usePlaceId,useKm,useMin),batch_id:batchId})
           done++
         }catch(e){
           if(e.status===409&&e.conflicts?.length){
@@ -4064,7 +4070,7 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
           for(const c of conflicts){
             // 겹친 줄도 같은 묶음이다. 겹쳤다는 사실은 메일에도 적힌다
             await addPlan({...buildBody(c.date,usePlaceId,useKm,useMin,true),
-              batch_id:batchId,notify:notifyMail,
+              batch_id:batchId,
               conflicts_ack:c.names.map(n=>({worker_name:n,slot:slot}))})
             done++
           }
@@ -4216,13 +4222,16 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
               disabled={!canEdit} style={inputS}/>
           </div>
           <div>
-            <label style={labelS}>시간대</label>
-            {/* 🔑 휴가에는 「시각 지정」을 두지 않는다 (2026-08-26).
-                「연차 · 14:00~16:00」 이 며칠인지는 회사가 제도로 정할 일이지
-                여기서 임의로 셀 수 없다. 종일 1일 · 오전/오후 0.5일 셋만 남긴다. */}
+            {/* 🔑 휴가에서는 «그 회사 말» 로 적는다 (2026-08-26 지적).
+                「시간대: 오전」 만 보고는 그것이 반차인지 알 수 없다는 지적을 받았다.
+                고르개는 원래 있었는데 이름이 일을 못 하고 있었다. */}
+            <label style={labelS}>{isVacation?'시간대 · 며칠로 셀까':'시간대'}</label>
+            {/* ⚠ 휴가에는 「시각 지정」을 두지 않는다 — 「연차 · 14:00~16:00」 이 며칠인지는
+                회사가 제도로 정할 일이지 여기서 임의로 셀 수 없다. */}
             <select value={slot} onChange={e=>setSlot(e.target.value)} disabled={!canEdit} style={inputS}>
               {SLOTS.filter(s=>!(isVacation&&s.v==='time'))
-                .map(s=><option key={s.v} value={s.v}>{s.label}</option>)}
+                .map(s=><option key={s.v} value={s.v}>
+                  {isVacation?(VAC_SLOT_LABEL[s.v]||s.label):s.label}</option>)}
             </select>
           </div>
         </div>
