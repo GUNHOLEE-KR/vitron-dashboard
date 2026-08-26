@@ -106,9 +106,25 @@ const PLAN_KINDS=[
   {v:'vacation',label:'휴가',      icon:'🌴', desc:'연차·병가 등'},
 ]
 // 휴가 종류. 값이 늘거나 바뀔 수 있으므로 여기 한 곳에서만 관리한다.
-const VACATION_TYPES=['연차','병가','포상','기타']
-// 휴가일 때 시간대 고르개에 쓰는 말. 「오전」 만으로는 반차인지 알 수 없다는 지적(2026-08-26).
-const VAC_SLOT_LABEL={allday:'종일 — 1일',am:'오전 반차 — 0.5일',pm:'오후 반차 — 0.5일'}
+// 화면에서 고르는 것은 이 다섯 가지다 (2026-08-26 지시).
+// 처음에는 길이를 위쪽 「시간대」에서 고르게 했는데 «찾기 어렵다» 는 지적을 받았다 —
+// 휴가에 관한 것은 휴가 자리에서 다 정해져야 한다.
+//
+// 🔑 저장은 «종류»(vacation_type)와 «길이»(slot)로 갈라 담는다.
+//    반차는 연차를 반나절 쓰는 것이므로 종류는 그대로 '연차' 다.
+//    ⚠ 종류 칸에 '반차' 를 담으면 연차 소진 집계가 '연차' 만 세다가 반차를 통째로 놓친다.
+const VAC_KINDS=[
+  {v:'annual',label:'연차',half:false,type:'연차'},
+  {v:'half',  label:'반차',half:true, type:'연차'},
+  {v:'sick',  label:'병가',half:false,type:'병가'},
+  {v:'reward',label:'포상',half:false,type:'포상'},
+  {v:'etc',   label:'기타',half:false,type:'기타'},
+]
+// 저장된 값 → 화면에서 고른 것. 「연차인데 종일이 아니면」 반차다.
+const vacKindOf=p=>{
+  if(p?.vacation_type==='연차'&&p.slot&&p.slot!=='allday')return 'half'
+  return VAC_KINDS.find(k=>!k.half&&k.type===p?.vacation_type)?.v||'annual'
+}
 // 휴가 한 건의 상태. legacy = 승인 제도가 생기기 «전» 에 들어온 기록(approval 이 비어 있다).
 // 소급 승인을 요구하지 않기로 했으므로 「기록」이라 부르고 색도 중립으로 둔다.
 const VAC_STATE={
@@ -3935,7 +3951,12 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
     src ? (src.use_type==='vacation'?'vacation':(src.use_type==='personal'?'vehicle':
           (src.place_id||src.transport==='office'?'work':'vehicle')))
         : (defaultKind||(defaultVehicleId?'vehicle':'work')))
-  const [vacationType,setVacationType]=useState(src?.vacation_type||VACATION_TYPES[0])
+  const [vacKind,setVacKind]=useState(()=>vacKindOf(src))
+  // 반차일 때만 뜻이 있다. 고쳐 넣을 때는 원래 잡아 둔 쪽을 그대로 살린다.
+  const [halfSlot,setHalfSlot]=useState(src?.slot==='pm'?'pm':'am')
+  const vk=VAC_KINDS.find(k=>k.v===vacKind)||VAC_KINDS[0]
+  // 휴가는 길이를 위쪽 시간대가 아니라 «종류» 에서 정한다
+  const vacSlot=vk.half?halfSlot:'allday'
   const [pickerOpen,setPickerOpen]=useState(false)   // 장소 선택 창
   // 장소가 상위 값이다. 사무실이면 이동 수단·차량·거리를 묻지 않는다.
   const [placeId,setPlaceId]=useState(
@@ -3984,7 +4005,7 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
     if(needsTransport&&!transport){showToast('이동 수단을 선택해 주세요');return false}
     if(isVehicleOnly&&!vehicleId){showToast('차량을 선택해 주세요');return false}
     if(isWork&&tp.needsVehicle&&!vehicleId){showToast('차량을 선택해 주세요');return false}
-    if(isVacation&&!vacationType){showToast('휴가 종류를 선택해 주세요');return false}
+    // 휴가 종류는 늘 하나가 골라져 있어 따로 검사할 것이 없다
     return true
   }
 
@@ -3995,7 +4016,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   function buildBody(planDate,placeIdToUse,km,min,force=false){
     const ut=isVacation?'vacation':(isVehicleOnly?(personal?'personal':'business'):'business')
     return {
-      worker_id:Number(workerId), plan_date:planDate, slot, use_type:ut,
+      // 🔑 휴가의 길이는 「종류」에서 정해진다 — 연차·병가는 종일, 반차는 오전/오후.
+      worker_id:Number(workerId), plan_date:planDate, slot:isVacation?vacSlot:slot, use_type:ut,
       place_id:isWork&&!atOffice&&placeIdToUse?Number(placeIdToUse):null,
       purpose:isWork?purpose:null,
       transport:isVacation?'none':(atOffice?'office':transport),
@@ -4004,7 +4026,7 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
       round_trip:(isWork&&!atOffice)?roundTrip:false,
       // 방향은 «편도 외부 업무» 일 때만 뜻이 있다. 그 밖에는 비워 보내 서버가 지우게 한다.
       one_way_dir:(isWork&&!atOffice&&!roundTrip)?oneWayDir:null,
-      vacation_type:isVacation?vacationType:null,
+      vacation_type:isVacation?vk.type:null,
       force,
     }
   }
@@ -4045,9 +4067,11 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
       //    지적을 받았다(2026-08-26). 창 하나가 두 가지를 물으면 «취소»가 어느 쪽을
       //    가리키는지 알 수 없다. 이제 취소는 «등록 자체»를 취소한다.
       if(isVacation){
-        const days=targets.map(d=>`${d} (${dayName(d)}) · ${SLOT_MAP[slot]}${slot==='allday'?'':' 반차'} · ${vacationType}`)
+        const one=vk.half?0.5:1
+        const what=vk.half?`반차 (${SLOT_MAP[halfSlot]})`:vk.label
+        const days=targets.map(d=>`${d} (${dayName(d)}) · ${what} · ${one}일`)
         if(!confirm(
-          `아래 휴가를 신청할까요?\n\n· ${days.join('\n· ')}\n\n합계 ${targets.length*(slot==='allday'?1:0.5)}일\n\n`
+          `아래 휴가를 신청할까요?\n\n· ${days.join('\n· ')}\n\n합계 ${targets.length*one}일\n\n`
           +'신청하면 대표이사에게 승인 요청 메일이 갑니다.'
         ))return
       }
@@ -4215,25 +4239,23 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
           </select>
         </div>
 
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,...rowS}}>
+        {/* 🔑 휴가는 시간대를 여기서 묻지 않는다 (2026-08-26 지시).
+            위쪽 「시간대」에서 반차를 고르게 했더니 «찾기 어렵다» 는 지적을 받았다.
+            휴가에 관한 것은 아래 「휴가 종류」 한 자리에서 다 정해진다. */}
+        <div style={{display:'grid',gridTemplateColumns:isVacation?'1fr':'1fr 1fr',gap:10,...rowS}}>
           <div>
             <label style={labelS}>날짜</label>
             <input type="date" value={date} onChange={e=>{setDate(e.target.value);if(isNew)addDate(e.target.value)}}
               disabled={!canEdit} style={inputS}/>
           </div>
-          <div>
-            {/* 🔑 휴가에서는 «그 회사 말» 로 적는다 (2026-08-26 지적).
-                「시간대: 오전」 만 보고는 그것이 반차인지 알 수 없다는 지적을 받았다.
-                고르개는 원래 있었는데 이름이 일을 못 하고 있었다. */}
-            <label style={labelS}>{isVacation?'시간대 · 며칠로 셀까':'시간대'}</label>
-            {/* ⚠ 휴가에는 「시각 지정」을 두지 않는다 — 「연차 · 14:00~16:00」 이 며칠인지는
-                회사가 제도로 정할 일이지 여기서 임의로 셀 수 없다. */}
-            <select value={slot} onChange={e=>setSlot(e.target.value)} disabled={!canEdit} style={inputS}>
-              {SLOTS.filter(s=>!(isVacation&&s.v==='time'))
-                .map(s=><option key={s.v} value={s.v}>
-                  {isVacation?(VAC_SLOT_LABEL[s.v]||s.label):s.label}</option>)}
-            </select>
-          </div>
+          {!isVacation&&(
+            <div>
+              <label style={labelS}>시간대</label>
+              <select value={slot} onChange={e=>setSlot(e.target.value)} disabled={!canEdit} style={inputS}>
+                {SLOTS.map(s=><option key={s.v} value={s.v}>{s.label}</option>)}
+              </select>
+            </div>
+          )}
         </div>
 
         {/* 같은 일정을 여러 날 넣는 일이 잦다. 고른 날짜가 태그로 쌓인다. */}
@@ -4278,7 +4300,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
                   // 유형을 바꾸면 그 유형에 없는 값은 비운다
                   if(k.v==='work'){ setPlaceId(OFFICE_PLACE); setTransport('office'); setVehicleId('') }
                   if(k.v==='vehicle'){ setPlaceId(''); setTransport('company_car'); setUseType('business') }
-                  // 「시각 지정」인 채로 휴가로 바꾸면 고를 수 없는 값이 남는다. 종일로 되돌린다.
+                  // 휴가는 위쪽 시간대를 쓰지 않는다(길이는 「휴가 종류」에서 정해진다).
+                  // 다만 되돌아왔을 때 「시각 지정」이 남아 있으면 어색하므로 종일로 되돌린다.
                   if(k.v==='vacation'){ setPlaceId(''); setTransport('none'); setVehicleId('')
                     setSlot(s=>s==='time'?'allday':s) }
                 }} disabled={!canEdit}
@@ -4397,22 +4420,38 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
           </>
         )}
 
-        {/* ── 휴가 — 종류만 묻는다 ── */}
+        {/* ── 휴가 — 종류에서 «길이까지» 정해진다 (2026-08-26 지시) ── */}
         {isVacation&&(
           <div style={rowS}>
             <label style={labelS}>휴가 종류</label>
             <div style={{display:'flex',gap:6}}>
-              {VACATION_TYPES.map(v=>(
-                <button key={v} onClick={()=>canEdit&&setVacationType(v)} disabled={!canEdit}
+              {VAC_KINDS.map(k=>(
+                <button key={k.v} onClick={()=>canEdit&&setVacKind(k.v)} disabled={!canEdit}
                   style={{flex:1,padding:'9px 4px',borderRadius:7,cursor:canEdit?'pointer':'default',fontSize:13,
-                    fontWeight:vacationType===v?700:500,
-                    border:'1px solid '+(vacationType===v?'#1a56db':'#e5e7eb'),
-                    background:vacationType===v?'#eff6ff':'#fff',
-                    color:vacationType===v?'#1a56db':'#6b7280'}}>{v}</button>
+                    fontWeight:vacKind===k.v?700:500,
+                    border:'1px solid '+(vacKind===k.v?'#1a56db':'#e5e7eb'),
+                    background:vacKind===k.v?'#eff6ff':'#fff',
+                    color:vacKind===k.v?'#1a56db':'#6b7280'}}>{k.label}</button>
               ))}
             </div>
-            <div style={{fontSize:11,color:'#6b7280',marginTop:6}}>
-              휴가는 장소·차량을 적지 않습니다. 달력에 🌴 로 표시됩니다.
+            {/* 반차를 고른 때에만 «어느 반나절인가» 를 묻는다. 늘 띄우면 종일 휴가에도
+                고를 것이 있는 것처럼 보인다. */}
+            {vk.half&&(
+              <div style={{display:'flex',gap:6,marginTop:8}}>
+                {[['am','오전 반차'],['pm','오후 반차']].map(([v,label])=>(
+                  <button key={v} onClick={()=>canEdit&&setHalfSlot(v)} disabled={!canEdit}
+                    style={{flex:1,padding:'8px 4px',borderRadius:7,cursor:canEdit?'pointer':'default',fontSize:12,
+                      fontWeight:halfSlot===v?700:500,
+                      border:'1px solid '+(halfSlot===v?'#059669':'#e5e7eb'),
+                      background:halfSlot===v?'#ecfdf5':'#fff',
+                      color:halfSlot===v?'#047857':'#6b7280'}}>{label}</button>
+                ))}
+              </div>
+            )}
+            <div style={{fontSize:11,color:'#6b7280',marginTop:6,lineHeight:1.7}}>
+              연차에서 깎이는 일수 — <strong>{vk.half?'0.5일 (반차)':'1일 (종일)'}</strong>
+              {vk.type!=='연차'&&<> · <strong>{vk.label}</strong>는 연차에서 깎지 않고 따로 셉니다</>}
+              <br/>휴가는 장소·차량을 적지 않습니다. 달력에 🌴 로 표시됩니다.
             </div>
           </div>
         )}
