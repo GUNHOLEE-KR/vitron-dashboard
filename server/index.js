@@ -1183,16 +1183,18 @@ app.get('/api/schedule/vacation-summary', async (req, res) => {
       const granted = annualLeaveDays(w.hired_at, on)
       let used = 0, waiting = 0, byType = {}, rows = []
       if (range) {
+        // 🔑 반려된 건도 «목록에는» 담는다. 빼 버리면 신청한 사람이 「내 9/4 는 어디 갔나」를
+        //    화면에서 알 수 없다. 세는 데서만 뺀다 — 어느 쪽인지는 approval 로 구분된다.
         const { rows: vac } = await pool.query(
           `SELECT plan_date, slot, vacation_type, approval
              FROM schedule_plans
             WHERE worker_id = $1 AND use_type = 'vacation'
               AND plan_date >= $2 AND plan_date <= $3
-              AND (approval IS NULL OR approval <> 'rejected')
             ORDER BY plan_date`,
           [w.id, range.from, range.to])
         rows = vac
         for (const v of vac) {
+          if (v.approval === 'rejected') continue
           const days = mailer.vacDays(v)
           byType[v.vacation_type || '기타'] = (byType[v.vacation_type || '기타'] || 0) + days
           // 🔑 «연차» 만 잔여에서 깎는다. 병가·포상·기타는 세어 보여만 준다.

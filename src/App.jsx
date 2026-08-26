@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, Fragment } from 'react'
 import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, LabelList, Treemap,
          RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
          ComposedChart, XAxis, YAxis, Tooltip, Legend, ReferenceLine, ResponsiveContainer } from 'recharts'
@@ -107,6 +107,18 @@ const PLAN_KINDS=[
 ]
 // 휴가 종류. 값이 늘거나 바뀔 수 있으므로 여기 한 곳에서만 관리한다.
 const VACATION_TYPES=['연차','병가','포상','기타']
+// 휴가 한 건의 상태. legacy = 승인 제도가 생기기 «전» 에 들어온 기록(approval 이 비어 있다).
+// 소급 승인을 요구하지 않기로 했으므로 「기록」이라 부르고 색도 중립으로 둔다.
+const VAC_STATE={
+  approved:{label:'승인',bg:'#dcfce7',border:'#86efac',fg:'#166534'},
+  pending :{label:'대기',bg:'#fef3c7',border:'#fde68a',fg:'#92400e'},
+  rejected:{label:'반려',bg:'#fee2e2',border:'#fecaca',fg:'#b91c1c'},
+  legacy  :{label:'기록',bg:'#f1f5f9',border:'#e2e8f0',fg:'#475569'},
+}
+// 합계는 «모르는 값(null)» 을 0 으로 치지 않는다 — 입사일이 없어 못 센 사람을
+// 0일로 더하면 회사 전체 부여일수가 조용히 줄어든다.
+const sumDays=(items,key)=>
+  Math.round(items.reduce((s,x)=>s+(x[key]==null?0:Number(x[key])),0)*10)/10
 // 장소 분류 — 「현장」과 「고객사」를 굳이 나눌 이유가 없어 합쳤다.
 const PLACE_CATEGORIES=['고객사','기타']
 const SLOTS=[{v:'allday',label:'종일'},{v:'am',label:'오전'},{v:'pm',label:'오후'},{v:'time',label:'시각 지정'}]
@@ -3214,6 +3226,8 @@ function ScheduleVacation({showToast,onOpenPlan}){
   const [data,setData]=useState(null)
   const [err,setErr]=useState('')
   const [busy,setBusy]=useState(0)     // 처리 중인 계획 번호
+  const [opened,setOpened]=useState([]) // 사용 일자를 펼친 사람들
+  const toggleRow=id=>setOpened(v=>v.includes(id)?v.filter(x=>x!==id):[...v,id])
 
   // effect 안에서 곧바로 setState 를 하면 렌더가 한 번 더 돌고 lint 도 막는다.
   // 응답이 온 뒤에 담고, 화면을 떠났으면 담지 않는다.
@@ -3285,19 +3299,36 @@ function ScheduleVacation({showToast,onOpenPlan}){
         </Card>
       )}
 
-      <Card title={data.scope==='all'?'연차 부여 · 사용 · 잔여':'내 연차'}>
+      <Card title={data.scope==='all'?'휴가 현황 — 부여 · 사용 · 잔여':'내 휴가 현황'}>
+        {/* 전체 합계 — 「지금 회사가 어디쯤인가」 를 한 줄로 먼저 보여 준다 */}
+        {data.scope==='all'&&<div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:12}}>
+          {[['인원',`${data.items.length}명`,'#111827'],
+            ['부여 합계',`${sumDays(data.items,'granted')}일`,'#111827'],
+            ['사용',`${sumDays(data.items,'used')}일`,'#1a56db'],
+            ['승인 대기',`${sumDays(data.items,'waiting')}일`,'#92400e'],
+            ['잔여',`${sumDays(data.items,'remaining')}일`,'#047857']].map(([k,v,c])=>(
+            <div key={k} style={{flex:'1 1 110px',background:'#f9fafb',border:'1px solid #e5e7eb',
+              borderRadius:8,padding:'8px 12px'}}>
+              <div style={{fontSize:11,color:'#6b7280'}}>{k}</div>
+              <div style={{fontSize:17,fontWeight:800,color:c}}>{v}</div>
+            </div>
+          ))}
+        </div>}
         <table style={{width:'100%',borderCollapse:'collapse'}}>
           <thead><tr>
             <th style={thS}>이름</th><th style={thS}>입사일</th><th style={thS}>연차 연도</th>
             <th style={thS}>부여</th><th style={thS}>사용</th><th style={thS}>승인 대기</th>
-            <th style={thS}>잔여</th><th style={thS}>그 밖의 휴가</th>
+            <th style={thS}>잔여</th><th style={thS}>그 밖의 휴가</th><th style={thS}>사용 일자</th>
           </tr></thead>
           <tbody>
             {data.items.map(it=>{
               const other=Object.entries(it.by_type).filter(([k])=>k!=='연차')
               const low=it.remaining!=null&&it.remaining<=0
+              const days=it.rows||[]
+              const open=opened.includes(it.worker_id)
               return(
-                <tr key={it.worker_id}>
+                <Fragment key={it.worker_id}>
+                <tr>
                   <td style={{...tdS,fontWeight:700}}>{it.name}</td>
                   <td style={tdS}>{it.hired_at||<span style={{color:'#b91c1c'}}>없음</span>}</td>
                   <td style={{...tdS,fontSize:11,color:'#6b7280'}}>
@@ -3310,7 +3341,42 @@ function ScheduleVacation({showToast,onOpenPlan}){
                     {it.remaining==null?'-':`${it.remaining}일`}</td>
                   <td style={{...tdS,fontSize:11,color:'#6b7280'}}>
                     {other.length?other.map(([k,v])=>`${k} ${v}일`).join(' · '):'-'}</td>
+                  {/* 🔑 「며칠 썼나」 만으로는 확인이 안 된다. 언제 썼는지가 있어야
+                      본인이 「그날 맞다」 를 가릴 수 있다. 길어서 접어 둔다. */}
+                  <td style={tdS}>
+                    {days.length===0
+                      ?<span style={{color:'#9ca3af',fontSize:11}}>없음</span>
+                      /* 건수는 «반려 포함» 이다. 세는 값과 다르므로 펼쳐 보면 색으로 갈린다 */
+                      :<button onClick={()=>toggleRow(it.worker_id)}
+                        style={{padding:'3px 10px',borderRadius:6,border:'1px solid #1a56db',
+                          background:open?'#1a56db':'#eff6ff',color:open?'#fff':'#1a56db',
+                          cursor:'pointer',fontSize:11,fontWeight:700}}>
+                        {open?'▾':'▸'} {days.length}건
+                      </button>}
+                  </td>
                 </tr>
+                {open&&(
+                  <tr>
+                    <td colSpan={9} style={{...tdS,textAlign:'left',background:'#f9fafb',padding:'8px 12px'}}>
+                      <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+                        {days.map((v,i)=>{
+                          const st=VAC_STATE[v.approval]||VAC_STATE.legacy
+                          return(
+                            <span key={i} style={{fontSize:11,padding:'3px 9px',borderRadius:12,
+                              background:st.bg,border:`1px solid ${st.border}`,color:st.fg,fontWeight:600}}>
+                              {v.plan_date} ({dayName(v.plan_date)})
+                              {v.slot!=='allday'&&` · ${SLOT_MAP[v.slot]||v.slot}`}
+                              {` · ${v.vacation_type||'휴가'}`}
+                              {` · ${v.slot==='allday'?1:0.5}일`}
+                              {` · ${st.label}`}
+                            </span>
+                          )
+                        })}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               )
             })}
           </tbody>
