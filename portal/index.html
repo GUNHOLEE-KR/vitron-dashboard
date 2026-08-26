@@ -86,8 +86,13 @@
 
 <script>
 // 이 쪽이 /ERP/ 아래 있으므로 상대 경로로 부른다. 앞에 «/» 를 붙이면 안 된다.
+// 🔑 실패에 «상태» 를 실어 보낸다. 404(그런 API 가 없다 = 아직 배포 전)와
+//    진짜 고장을 같은 문구로 보여 주면, 멀쩡한 화면이 온통 오류처럼 읽힌다.
 const api = (p) => fetch('api/' + p, { credentials: 'same-origin' })
-  .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+  .then(r => {
+    if (r.ok) return r.json()
+    const e = new Error('HTTP ' + r.status); e.status = r.status; throw e
+  })
 
 // 바깥 주소는 한 곳에 모아 둔다. 포트가 바뀌면 여기만 고친다.
 const URLS = {
@@ -110,7 +115,9 @@ const MAIN = [
     desc:'휴가를 신청하고 연차가 얼마나 남았는지 봅니다' },
   { k:'purchase', icon:'🛒', name:'구매 요청',          url:URLS.dashboard + '#purchase',
     desc:'물품 구매를 요청하고 지난 구매 이력을 봅니다' },
-  { k:'kpi',      icon:'📊', name:'KPI 추적 시스템',    url:URLS.kpi,
+  // ⚠ KPI 점수는 아직 붙이지 않았다(3단계). 숫자가 없는 타일에 빈 줄을 두면
+  //   「무언가 안 나온다」 로 읽히므로 그 줄 자체를 두지 않는다.
+  { k:'kpi',      icon:'📊', name:'KPI 추적 시스템',    url:URLS.kpi, noStat:true,
     desc:'분기별 개인·프로젝트 KPI 점수와 평가 내역' },
 ]
 const ATLASSIAN = [
@@ -136,7 +143,8 @@ function tile(t, withStat) {
     '<div class="t-top"><span class="icon">' + t.icon + '</span>' +
     '<span class="t-name">' + t.name + '</span></div>' +
     (t.desc ? '<div class="t-desc">' + t.desc + '</div>' : '') +
-    (withStat ? '<div class="t-stat" data-stat="' + t.k + '"><span class="muted">…</span></div>' : '')
+    (withStat && !t.noStat
+      ? '<div class="t-stat" data-stat="' + t.k + '"><span class="muted">…</span></div>' : '')
   return a
 }
 const fill = (id, list, withStat) => {
@@ -174,7 +182,11 @@ api('dash/auth/me')
 // ⚠ 한 곳이 실패해도 나머지는 그대로 보여 준다. 하나 때문에 화면 전체가
 //   비면 「무엇이 고장인지」 알 수 없다.
 function loadStats(me) {
-  const fail = (k) => setStat(k, '<span class="muted">불러오지 못했습니다</span>')
+  // 🔑 404 는 «아직 그 기능이 배포되지 않았다» 는 뜻이라 줄을 조용히 비운다.
+  //    오류 문구를 띄우면 멀쩡한 화면이 온통 고장난 것처럼 보인다.
+  //    그 밖의 실패만 사람에게 알린다 — 삼키면 「왜 비었지」 를 알 수 없다.
+  const fail = (k) => (e) => setStat(k, e && e.status === 404
+    ? '' : '<span class="muted">불러오지 못했습니다</span>')
 
   api('dash/schedule/vacation-summary')
     .then(d => {
@@ -185,7 +197,7 @@ function loadStats(me) {
         bits.push('<span class="warn">승인 대기 ' + d.pending.length + '건</span>')
       setStat('vacation', bits.join(' · ') || '<span class="muted">신청한 휴가가 없습니다</span>')
     })
-    .catch(() => fail('vacation'))
+    .catch(fail('vacation'))
 
   api('dash/purchases')
     .then(d => {
@@ -195,7 +207,7 @@ function loadStats(me) {
       bits.push('누적 <b>' + Number(d.total.approved || 0).toLocaleString('ko-KR') + '원</b>')
       setStat('purchase', bits.join(' · '))
     })
-    .catch(() => fail('purchase'))
+    .catch(fail('purchase'))
 
   // 오늘 내 일정 — 어디에 있는지가 가장 자주 찾는 정보다
   const t = new Date()
@@ -212,10 +224,18 @@ function loadStats(me) {
         (p.vehicle_name ? ' · ' + p.vehicle_name : '') +
         (mine.length > 1 ? ' 외 ' + (mine.length - 1) + '건' : ''))
     })
-    .catch(() => fail('schedule'))
+    .catch(fail('schedule'))
 
-  setStat('work', '<span class="muted">오늘 업무를 적어 주세요</span>')
-  setStat('kpi', '<span class="muted">열어서 확인</span>')
+  // 오늘 업무를 적었는가 — 「적어야 하는데 잊었다」 가 가장 흔한 일이다
+  api('dash/history/date/' + ymd)
+    .then(rows => {
+      const mine = (rows || []).filter(r => r.worker_id === me.worker_id)
+      if (!mine.length) return setStat('work', '<span class="warn">오늘 업무를 아직 안 적었습니다</span>')
+      // 한 칸이 한 시간이다. 같은 업무가 여러 칸이면 그만큼 시간이 쌓인다.
+      const kinds = new Set(mine.map(r => (r.work_text || '').trim()).filter(Boolean))
+      setStat('work', '오늘 <b>' + mine.length + '시간</b> 적음 · ' + kinds.size + '종')
+    })
+    .catch(fail('work'))
 }
 </script>
 </body>
