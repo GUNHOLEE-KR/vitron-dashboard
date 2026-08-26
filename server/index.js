@@ -1244,6 +1244,152 @@ app.get('/api/schedule/vacation-summary', async (req, res) => {
   }
 })
 
+// ── 구매 요청 (2026-08-26 신설) ──────────────────────────────
+// 승인된 것이 곧 «구매 이력» 이다. 표를 따로 두지 않는 이유는, 요청과 이력을 나누면
+// 같은 건이 두 곳에 생겨 어느 쪽이 맞는지 알 수 없게 되기 때문이다.
+const PURCHASE_SELECT = `
+  SELECT p.*, w.name AS worker_name, w.email AS worker_email,
+         a.display_name AS approved_by_name
+    FROM purchase_requests p
+    LEFT JOIN workers w   ON w.id = p.worker_id
+    LEFT JOIN kpi_users a ON a.id = p.approved_by_id`
+
+// 돈은 한 곳에서만 정한다 — 화면이 보낸 금액을 믿지 않고 여기서 다시 곱한다.
+const purchaseAmount = (qty, unitPrice) =>
+  Math.round(Number(qty || 0) * Number(unitPrice || 0))
+
+async function notifyPurchaseById(kind, id, req, reason) {
+  try {
+    if (!mailer.isEnabled()) return
+    const { rows } = await pool.query(`${PURCHASE_SELECT} WHERE p.id = $1`, [id])
+    if (!rows.length) return
+    const p = rows[0]
+    // 요청은 대표이사에게, 결과는 «요청한 사람» 에게
+    const to = kind === 'request' ? null : p.worker_email
+    if (kind !== 'request' && !to) {
+      console.warn(`[mail] purchase ${kind}: ${p.worker_name} 님의 메일 주소가 없어 못 보냄 (#${id})`)
+      return
+    }
+    mailer.notifyPurchase({
+      kind, purchase: p, to, reason,
+      actor: { name: req.session?.name, email: req.session?.login },
+    })
+  } catch (e) {
+    console.error(`[mail] notifyPurchaseById(${kind}) :: ${e.message}`)
+  }
+}
+
+app.get('/api/purchases', async (req, res) => {
+  try {
+    // 🔴 남의 구매는 관리자만 본다. 본인 것은 누구나 본다 — 휴가와 같은 규칙이다.
+    const isAdmin = req.session?.role === 'admin'
+    const mine = req.session?.workerId ?? -1
+    const { from, to, status } = req.query
+    const { rows } = await pool.query(
+      `${PURCHASE_SELECT}
+        WHERE ($1::boolean OR p.worker_id = $2::int)
+          AND ($3::date IS NULL OR p.created_at >= $3::date)
+          AND ($4::date IS NULL OR p.created_at < ($4::date + 1))
+          AND ($5::text IS NULL OR p.status = $5::text)
+        ORDER BY p.created_at DESC`,
+      [isAdmin, mine, from || null, to || null, status || null])
+
+    // 누적 금액 — 🔑 «승인된 것만» 더한다. 대기·반려를 섞으면 「얼마 썼나」가 아니라
+    //    「얼마 달라고 했나」가 된다.
+    const sum = k => rows.filter(r => r.status === k)
+      .reduce((s, r) => s + Number(r.amount || 0), 0)
+    res.json({
+      scope: isAdmin ? 'all' : 'me',
+      can_approve: await canApprove(req.session.uid),
+      items: rows,
+      total: { approved: sum('approved'), pending: sum('pending'), rejected: sum('rejected') },
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/purchases', async (req, res) => {
+  const b = req.body
+  const itemName = String(b.item_name || '').trim()
+  if (!itemName) return res.status(400).json({ error: '물품명을 적어 주세요.' })
+  const qty = Number(b.qty)
+  const unitPrice = Number(b.unit_price)
+  if (!(qty > 0)) return res.status(400).json({ error: '수량은 0보다 커야 합니다.' })
+  if (!(unitPrice >= 0)) return res.status(400).json({ error: '단가가 올바르지 않습니다.' })
+  try {
+    // 남의 이름으로 요청할 수 있는 것은 관리자뿐이다
+    const workerId = b.worker_id ?? req.session?.workerId ?? null
+    if (!canEditWorker(req.session, workerId)) return denyOther(res)
+
+    // 🔑 결재자가 낸 요청은 그 자리에서 승인으로 둔다 — 자기에게 요청 메일을 보내고
+    //    자기가 승인하는 것은 절차가 아니라 헛돌기다 (휴가와 같은 결).
+    const selfApprove = await canApprove(req.session.uid)
+    const { rows } = await pool.query(
+      `INSERT INTO purchase_requests
+         (requester_id, worker_id, item_name, qty, unit_price, amount,
+          link, used_for, note, status, approved_at, approved_by_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [req.session.uid, workerId, itemName, qty, unitPrice,
+       purchaseAmount(qty, unitPrice),
+       (b.link || '').trim() || null, (b.used_for || '').trim() || null,
+       (b.note || '').trim() || null,
+       selfApprove ? 'approved' : 'pending',
+       selfApprove ? new Date() : null, selfApprove ? req.session.uid : null])
+
+    if (!selfApprove) notifyPurchaseById('request', rows[0].id, req)
+    res.json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.patch('/api/purchases/:id/approval', async (req, res) => {
+  const want = String(req.body?.status || '')
+  const reason = String(req.body?.reject_reason || '').trim() || null
+  if (!['approved', 'rejected'].includes(want)) {
+    return res.status(400).json({ error: '승인 또는 반려만 할 수 있습니다.' })
+  }
+  try {
+    if (!await canApprove(req.session.uid)) {
+      return res.status(403).json({ error: '구매 승인은 대표이사만 할 수 있습니다.' })
+    }
+    if (want === 'rejected' && !reason) {
+      return res.status(400).json({ error: '반려 사유를 적어 주세요.' })
+    }
+    const { rowCount } = await pool.query(
+      `UPDATE purchase_requests
+          SET status = $1, approved_at = now(), approved_by_id = $2,
+              reject_reason = $3, updated_at = now()
+        WHERE id = $4`,
+      [want, req.session.uid, want === 'rejected' ? reason : null, req.params.id])
+    if (rowCount === 0) return res.status(404).json({ error: '해당 요청을 찾을 수 없습니다.' })
+    notifyPurchaseById(want, req.params.id, req, reason)
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.delete('/api/purchases/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT worker_id, status FROM purchase_requests WHERE id = $1', [req.params.id])
+    if (!rows.length) return res.status(404).json({ error: '해당 요청을 찾을 수 없습니다.' })
+    if (!canEditWorker(req.session, rows[0].worker_id)) return denyOther(res)
+    // 🔑 승인된 건은 지우지 못한다. 그것은 «요청» 이 아니라 이미 «구매 이력» 이고,
+    //    지우면 누적 금액이 조용히 줄어든다. 잘못 승인했으면 반려로 되돌린다.
+    if (rows[0].status === 'approved') {
+      return res.status(409).json({
+        error: '이미 승인된 건은 지울 수 없습니다. 잘못 승인했다면 반려로 되돌려 주십시오.' })
+    }
+    await pool.query('DELETE FROM purchase_requests WHERE id = $1', [req.params.id])
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 // ── 실적 ──
 app.get('/api/schedule/actuals', async (req, res) => {
   const { from, to, worker_id } = req.query

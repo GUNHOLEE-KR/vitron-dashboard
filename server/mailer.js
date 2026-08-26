@@ -278,6 +278,52 @@ function buildVacation({ kind, actorName, actorEmail, plans, to, reason }) {
   }
 }
 
+// ── 구매 요청 · 승인 · 반려 (2026-08-26 신설) ────────────────
+// 🔑 제목 머리말 `[구매]`. 주소가 하나뿐이라 «제목» 이 유일한 분류 수단이다.
+// 🔑 요청은 대표이사에게, 승인·반려는 «요청한 사람» 에게 — 휴가와 같은 결이다.
+const BUY_TITLE = { request: '요청', approved: '승인', rejected: '반려' }
+
+function buildPurchase({ kind, actorName, actorEmail, p, to, reason }) {
+  const c = cfg()
+  const who = p.worker_name || actorName || '누군가'
+  const money = `${won(p.amount)}원`
+  const subject = `[구매] ${BUY_TITLE[kind]} · ${who} · ${p.item_name} · ${money}`
+
+  const head = {
+    request:  `${who} 님이 구매를 요청했습니다.`,
+    approved: '구매 요청이 승인되었습니다.',
+    rejected: '구매 요청이 반려되었습니다.',
+  }[kind]
+
+  const body = [head, '',
+    `  물품 : ${p.item_name}`,
+    `  수량 : ${Number(p.qty)}`,
+    `  단가 : ${won(p.unit_price)}원`,
+    `  금액 : ${money}`,
+  ]
+  if (p.used_for) body.push(`  사용처 : ${p.used_for}`)
+  if (p.note)     body.push(`  기타 : ${p.note}`)
+  if (p.link)     body.push('', `  구매 링크 : ${p.link}`)
+  body.push('')
+  if (kind === 'rejected' && reason) body.push(`사유 : ${reason}`, '')
+
+  if (kind === 'request') {
+    body.push('승인은 업무 현황 대시보드의 [구매] 탭에서 하실 수 있습니다.')
+  } else {
+    body.push(`처리한 사람 : ${actorName || '-'}`)
+  }
+  body.push('', 'http://vitron-nas:8082', '', '— 바이트론 이앤에스 업무 현황 대시보드')
+
+  return {
+    from: { name: `${actorName || '업무'} (업무 대시보드)`, address: c.from },
+    replyTo: actorEmail ? `${actorName} <${actorEmail}>` : undefined,
+    // 🔴 시험 중이면 «요청자에게 갈 것도» 시험 주소로 돌린다 (위 cfg 주석 참고)
+    to: c.testTo || to || c.toBoss,
+    subject,
+    text: body.join('\n'),
+  }
+}
+
 // ── 여러 날짜를 한 통으로 묶기 ───────────────────────────────
 // 화면이 「출장 3일」을 넣으면 계획을 «날짜마다 따로» 저장한다(addPlan 반복).
 // 그대로 두면 메일이 세 통 간다. 화면이 한 번의 등록마다 붙여 보내는
@@ -423,4 +469,20 @@ function notifyVacation({ kind, actor, plans, batchId, to, reason }) {
   }
 }
 
-module.exports = { notify, notifyDone, notifyVacation, isEnabled, lastResult, isVehiclePlan, vacDays }
+// 구매 알림. 묶지 않는다 — 요청은 한 건씩 일어난다.
+function notifyPurchase({ kind, actor, purchase, to, reason }) {
+  try {
+    if (!isEnabled()) return
+    if (!purchase) return
+    send(buildPurchase({
+      kind, p: purchase, to, reason,
+      actorName: actor?.name || null,
+      actorEmail: actor?.email || null,
+    }))
+  } catch (e) {
+    console.error(`[mail] notifyPurchase error :: ${e.message}`)
+  }
+}
+
+module.exports = { notify, notifyDone, notifyVacation, notifyPurchase,
+  isEnabled, lastResult, isVehiclePlan, vacDays }

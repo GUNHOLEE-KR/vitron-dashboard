@@ -13,6 +13,8 @@ import { getPlaces, addPlace, updatePlace, hidePlace, getVehicles, addVehicle, u
          reopenSettlement, setApproval, getVacationSummary } from './repositories/scheduleRepo'
 import { getHolidays, syncHolidays, addHoliday, setHolidayWorking, removeHoliday,
          restDaySet } from './repositories/holidayRepo'
+import { getPurchases, addPurchase, setPurchaseStatus,
+         removePurchase } from './repositories/purchaseRepo'
 
 const WORK_HOURS=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
 // 정규 근무시간 (09:00 시작 ~ 18:00 종료 → 17:00 행까지 포함) — 입력표에서 노랗게 강조
@@ -68,8 +70,9 @@ const FIXED_PARENT='고정업무'
 // 값 80 = 배경의 위아래 여백 40+40 (여백이 다른 팝업은 제 값을 따로 쓴다).
 const MODAL_MAX_H='calc(100vh - 80px)'
 
-const TABS=['today','daily','weekly','monthly','yearly','schedule','settings']
-const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'월간',yearly:'연간',schedule:'스케줄',settings:'설정'}
+const TABS=['today','daily','weekly','monthly','yearly','schedule','purchase','settings']
+const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'월간',yearly:'연간',
+  schedule:'스케줄',purchase:'구매',settings:'설정'}
 
 // ── 스케줄 상수 ──────────────────────────────────────────
 // 이동 수단.
@@ -1357,6 +1360,8 @@ function Dashboard({me,onLoggedOut}){
           actuals={actuals}
           me={me} mayEdit={mayEdit} onLogout={handleLogout}
           clipboard={clipboard} onPaste={handlePaste} onCancelCopy={()=>setClipboard(null)}/>}
+        {tab==='purchase'&&<TabPurchase workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
+          me={me} canEditOthers={canEditOthers} showToast={showToast}/>}
         {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers} dupNames={dupNames}
           holidays={holidays} setHolidays={setHolidays}
           jiraTree={jiraTree} jiraDone={jiraDone} reloadJira={reloadJira} showToast={showToast} tokenStatus={tokenStatus}
@@ -3232,6 +3237,274 @@ function VehicleRates({canApprove,showToast}){
         ⚠ 연비를 <strong>낮추면 환급 리터가 늘어납니다.</strong> 그래서 본인이 아니라 대표이사가 정합니다.
       </div>
     </Card>
+  )
+}
+
+// ════════════════════════════════════════════════════════════
+// 🛒 구매 — 요청 · 승인 · 이력 (2026-08-26 신설)
+// ════════════════════════════════════════════════════════════
+// 🔑 요청과 이력을 나누지 않는다. «승인된 요청» 이 곧 구매 이력이다.
+//    표를 나누면 같은 건이 두 곳에 생겨 어느 쪽이 맞는지 알 수 없게 된다.
+// 🔴 남의 구매는 관리자만 본다. 서버가 «본인 것만» 돌려주므로 화면은 받은 대로 그린다.
+const BUY_STATE={
+  approved:{label:'승인',bg:'#dcfce7',border:'#86efac',fg:'#166534'},
+  pending :{label:'대기',bg:'#fef3c7',border:'#fde68a',fg:'#92400e'},
+  rejected:{label:'반려',bg:'#fee2e2',border:'#fecaca',fg:'#b91c1c'},
+}
+const wonFmt=n=>Number(n||0).toLocaleString('ko-KR')
+
+function TabPurchase({workers,me,canEditOthers,showToast}){
+  const [data,setData]=useState(null)
+  const [err,setErr]=useState('')
+  const [tick,setTick]=useState(0)
+  const [busy,setBusy]=useState(0)
+  const reload=()=>setTick(t=>t+1)
+
+  // 입력 칸 — 물품명 · 수량 · 단가 · 구매 링크 · 사용처 · 기타
+  const [workerId,setWorkerId]=useState(me?.worker_id??'')
+  const [itemName,setItemName]=useState('')
+  const [qty,setQty]=useState('1')
+  const [unitPrice,setUnitPrice]=useState('')
+  const [link,setLink]=useState('')
+  const [usedFor,setUsedFor]=useState('')
+  const [note,setNote]=useState('')
+
+  useEffect(()=>{
+    let alive=true
+    getPurchases()
+      .then(d=>{ if(alive){ setData(d); setErr('') } })
+      .catch(e=>{ if(alive) setErr(e.message) })
+    return ()=>{ alive=false }
+  },[tick])
+
+  const amount=Math.round((Number(qty)||0)*(Number(unitPrice)||0))
+
+  async function submit(){
+    if(!itemName.trim()){ showToast('물품명을 적어 주세요'); return }
+    if(!(Number(qty)>0)){ showToast('수량은 0보다 커야 합니다'); return }
+    if(!(Number(unitPrice)>=0)){ showToast('단가를 적어 주세요'); return }
+    // 🔑 대표이사에게 결재가 올라가는 일이라 «오눌림» 을 그대로 통과시키지 않는다.
+    if(!confirm(
+      `아래 구매를 요청할까요?\n\n· ${itemName.trim()}\n· 수량 ${Number(qty)} × 단가 ${wonFmt(unitPrice)}원\n`
+      +`· 금액 ${wonFmt(amount)}원\n\n대표이사에게 승인 요청 메일이 갑니다.`
+    ))return
+    try{
+      setBusy(-1)
+      await addPurchase({worker_id:Number(workerId)||null,item_name:itemName.trim(),
+        qty:Number(qty),unit_price:Number(unitPrice),
+        link:link.trim(),used_for:usedFor.trim(),note:note.trim()})
+      showToast('구매를 요청했습니다')
+      setItemName(''); setQty('1'); setUnitPrice(''); setLink(''); setUsedFor(''); setNote('')
+      reload()
+    }catch(e){ showToast('요청 실패: '+e.message) }
+    finally{ setBusy(0) }
+  }
+
+  async function decide(p,status){
+    let reason=null
+    if(status==='rejected'){
+      // 🔑 반려는 «왜» 를 함께 받는다. 서버도 빈 사유를 막는다.
+      reason=prompt(`${p.worker_name} 님의 「${p.item_name}」 구매를 반려합니다.\n\n사유를 적어 주세요 (요청자에게 그대로 전달됩니다)`)
+      if(reason===null)return
+      if(!reason.trim()){ showToast('반려 사유를 적어 주세요'); return }
+    }else{
+      if(!confirm(`「${p.item_name}」 ${wonFmt(p.amount)}원을 승인할까요?\n\n요청자에게 승인 메일이 갑니다.`))return
+    }
+    try{
+      setBusy(p.id)
+      await setPurchaseStatus(p.id,status,reason)
+      showToast(status==='approved'?'승인했습니다':'반려했습니다')
+      reload()
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(0) }
+  }
+
+  async function remove(p){
+    if(!confirm(`「${p.item_name}」 요청을 지울까요?`))return
+    try{
+      setBusy(p.id)
+      await removePurchase(p.id)
+      showToast('지웠습니다')
+      reload()
+    }catch(e){ showToast(e.status===409?e.message:'삭제 실패: '+e.message) }
+    finally{ setBusy(0) }
+  }
+
+  if(err)return <Card title="🛒 구매"><div style={{fontSize:12,color:'#b91c1c'}}>불러오지 못했습니다: {err}</div></Card>
+  if(!data)return <Card title="🛒 구매"><div style={{fontSize:12,color:'#6b7280'}}>불러오는 중…</div></Card>
+
+  const items=data.items||[]
+  const pending=items.filter(p=>p.status==='pending')
+  const inputS={padding:'8px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,width:'100%'}
+  const labelS={fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:4,display:'block'}
+
+  return(
+    <div style={{display:'flex',flexDirection:'column',gap:14}}>
+      <Card title="구매 요청">
+        <div style={{display:'grid',gridTemplateColumns:'2fr 1fr 1fr 1fr',gap:10,marginBottom:10}}>
+          <div>
+            <label style={labelS}>물품명</label>
+            <input value={itemName} onChange={e=>setItemName(e.target.value)}
+              placeholder="예: 디지털 멀티미터" style={inputS}/>
+          </div>
+          <div>
+            <label style={labelS}>수량</label>
+            <input value={qty} onChange={e=>setQty(e.target.value)} inputMode="decimal" style={inputS}/>
+          </div>
+          <div>
+            <label style={labelS}>단가 (원)</label>
+            <input value={unitPrice} onChange={e=>setUnitPrice(e.target.value)}
+              inputMode="numeric" placeholder="0" style={inputS}/>
+          </div>
+          <div>
+            <label style={labelS}>금액</label>
+            {/* 금액은 적는 것이 아니라 «나오는» 것이다. 손으로 고치게 두면 수량·단가와 어긋난다 */}
+            <div style={{...inputS,background:'#f9fafb',fontWeight:800,color:'#1a56db'}}>
+              {wonFmt(amount)}원</div>
+          </div>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'2fr 1fr 1fr',gap:10,marginBottom:10}}>
+          <div>
+            <label style={labelS}>구매 링크 (선택)</label>
+            <input value={link} onChange={e=>setLink(e.target.value)}
+              placeholder="https://…" style={inputS}/>
+          </div>
+          <div>
+            <label style={labelS}>사용처 (선택)</label>
+            <input value={usedFor} onChange={e=>setUsedFor(e.target.value)}
+              placeholder="예: 파주 현장" style={inputS}/>
+          </div>
+          <div>
+            <label style={labelS}>기타 (선택)</label>
+            <input value={note} onChange={e=>setNote(e.target.value)} style={inputS}/>
+          </div>
+        </div>
+        <div style={{display:'flex',gap:10,alignItems:'flex-end'}}>
+          {canEditOthers&&(
+            <div style={{width:180}}>
+              <label style={labelS}>요청자</label>
+              <select value={workerId} onChange={e=>setWorkerId(e.target.value)} style={inputS}>
+                <option value="">선택</option>
+                {workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
+              </select>
+            </div>
+          )}
+          <button onClick={submit} disabled={busy===-1}
+            style={{padding:'11px 22px',borderRadius:8,border:'none',background:'#1a56db',
+              color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
+            {busy===-1?'요청 중…':'구매 요청'}
+          </button>
+        </div>
+      </Card>
+
+      {data.can_approve&&(
+        <Card title={`승인 대기 ${pending.length}건 · ${wonFmt(data.total.pending)}원`}>
+          {pending.length===0
+            ?<div style={{fontSize:12,color:'#16a34a'}}>기다리는 요청이 없습니다.</div>
+            :<table style={{width:'100%',borderCollapse:'collapse'}}>
+              <thead><tr>
+                <th style={thS}>요청일</th><th style={thS}>이름</th><th style={thS}>물품</th>
+                <th style={thS}>수량</th><th style={thS}>단가</th><th style={thS}>금액</th>
+                <th style={thS}>사용처</th><th style={thS}>처리</th>
+              </tr></thead>
+              <tbody>
+                {pending.map(p=>(
+                  <tr key={p.id}>
+                    <td style={tdS}>{String(p.created_at).slice(0,10)}</td>
+                    <td style={tdS}>{p.worker_name||'-'}</td>
+                    <td style={{...tdS,textAlign:'left'}}>
+                      {p.link
+                        ?<a href={p.link} target="_blank" rel="noreferrer"
+                          style={{color:'#1a56db',fontWeight:600}}>{p.item_name} ↗</a>
+                        :p.item_name}
+                    </td>
+                    <td style={tdS}>{Number(p.qty)}</td>
+                    <td style={tdS}>{wonFmt(p.unit_price)}</td>
+                    <td style={{...tdS,fontWeight:700}}>{wonFmt(p.amount)}</td>
+                    <td style={{...tdS,fontSize:11,color:'#6b7280'}}>{p.used_for||'-'}</td>
+                    <td style={tdS}>
+                      <button onClick={()=>decide(p,'approved')} disabled={busy===p.id}
+                        style={{padding:'4px 12px',borderRadius:6,border:'none',background:'#059669',
+                          color:'#fff',cursor:'pointer',fontSize:12,fontWeight:700,marginRight:6}}>승인</button>
+                      <button onClick={()=>decide(p,'rejected')} disabled={busy===p.id}
+                        style={{padding:'4px 12px',borderRadius:6,border:'1px solid #dc2626',background:'#fff',
+                          color:'#dc2626',cursor:'pointer',fontSize:12,fontWeight:700}}>반려</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>}
+        </Card>
+      )}
+
+      <Card title={data.scope==='all'?'구매 이력 — 전체':'내 구매 이력'}>
+        <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:12}}>
+          {[['건수',`${items.length}건`,'#111827'],
+            ['승인 누적',`${wonFmt(data.total.approved)}원`,'#047857'],
+            ['대기',`${wonFmt(data.total.pending)}원`,'#92400e'],
+            ['반려',`${wonFmt(data.total.rejected)}원`,'#b91c1c']].map(([k,v,c])=>(
+            <div key={k} style={{flex:'1 1 140px',background:'#f9fafb',border:'1px solid #e5e7eb',
+              borderRadius:8,padding:'8px 12px'}}>
+              <div style={{fontSize:11,color:'#6b7280'}}>{k}</div>
+              <div style={{fontSize:17,fontWeight:800,color:c}}>{v}</div>
+            </div>
+          ))}
+        </div>
+        {items.length===0
+          ?<div style={{fontSize:12,color:'#6b7280'}}>아직 요청한 구매가 없습니다.</div>
+          :<table style={{width:'100%',borderCollapse:'collapse'}}>
+            <thead><tr>
+              <th style={thS}>요청일</th><th style={thS}>상태</th><th style={thS}>이름</th>
+              <th style={thS}>물품</th><th style={thS}>수량</th><th style={thS}>단가</th>
+              <th style={thS}>금액</th><th style={thS}>사용처</th><th style={thS}>기타</th><th style={thS}></th>
+            </tr></thead>
+            <tbody>
+              {items.map(p=>{
+                const st=BUY_STATE[p.status]||BUY_STATE.pending
+                const mine=Number(p.worker_id)===Number(me?.worker_id)
+                return(
+                  <tr key={p.id}>
+                    <td style={tdS}>{String(p.created_at).slice(0,10)}</td>
+                    <td style={tdS}>
+                      <span title={p.status==='rejected'?(p.reject_reason||''):''}
+                        style={{fontSize:11,padding:'2px 9px',borderRadius:12,fontWeight:700,
+                          background:st.bg,border:`1px solid ${st.border}`,color:st.fg}}>{st.label}</span>
+                    </td>
+                    <td style={tdS}>{p.worker_name||'-'}</td>
+                    <td style={{...tdS,textAlign:'left'}}>
+                      {p.link
+                        ?<a href={p.link} target="_blank" rel="noreferrer"
+                          style={{color:'#1a56db',fontWeight:600}}>{p.item_name} ↗</a>
+                        :p.item_name}
+                      {p.status==='rejected'&&p.reject_reason&&
+                        <div style={{fontSize:11,color:'#b91c1c'}}>사유 — {p.reject_reason}</div>}
+                    </td>
+                    <td style={tdS}>{Number(p.qty)}</td>
+                    <td style={tdS}>{wonFmt(p.unit_price)}</td>
+                    <td style={{...tdS,fontWeight:700}}>{wonFmt(p.amount)}</td>
+                    <td style={{...tdS,fontSize:11,color:'#6b7280'}}>{p.used_for||'-'}</td>
+                    <td style={{...tdS,fontSize:11,color:'#6b7280'}}>{p.note||'-'}</td>
+                    <td style={tdS}>
+                      {/* ⚠ 승인된 건은 지우지 못한다 — 이미 이력이라 지우면 누적 금액이 줄어든다 */}
+                      {p.status!=='approved'&&(mine||canEditOthers)&&(
+                        <button onClick={()=>remove(p)} disabled={busy===p.id}
+                          style={{padding:'3px 9px',borderRadius:6,border:'1px solid #e5e7eb',
+                            background:'#fff',color:'#6b7280',cursor:'pointer',fontSize:11}}>삭제</button>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>}
+        <div style={{fontSize:11,color:'#6b7280',marginTop:10,lineHeight:1.7}}>
+          💡 <strong>승인 누적</strong>은 <strong>승인된 것만</strong> 더합니다 — 대기·반려를 섞으면
+          「얼마 썼나」가 아니라 「얼마 달라고 했나」가 됩니다.<br/>
+          ⚠ <strong>승인된 건은 지울 수 없습니다.</strong> 이미 구매 이력이라 지우면 누적 금액이 조용히 줄어듭니다.
+          잘못 승인했다면 <strong>반려로 되돌려</strong> 주십시오.
+        </div>
+      </Card>
+    </div>
   )
 }
 
