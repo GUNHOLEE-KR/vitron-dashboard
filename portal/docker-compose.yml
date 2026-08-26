@@ -1,0 +1,30 @@
+# 바이트론 업무 포털 — NAS 운영 배포용
+#
+# 🔑 대시보드·KPI 와 «별개 스택» 이다. 한 스택에 넣으면 포털을 손볼 때마다
+#    운영 중인 두 앱까지 함께 재배포된다.
+#
+# 🔑 두 백엔드는 포트를 바깥에 열지 않으므로, 포털을 그 스택들의 네트워크에
+#    «함께 붙여» 컨테이너 이름으로 부른다.
+services:
+  portal:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vitron-portal:latest
+    # OMV 의 nginx(:80)가 /ERP/ 를 여기로 넘긴다. 사람이 직접 8085 로 들어와도 열린다.
+    ports:
+      - "8085:80"
+    networks:
+      - default
+      - dashboard
+      - kpi
+    restart: unless-stopped
+
+networks:
+  # 이미 떠 있는 두 스택의 네트워크를 «빌려» 쓴다. 만들지 않는다(external).
+  dashboard:
+    external: true
+    name: vitron-dashboard_default
+  kpi:
+    external: true
+    name: vitron-kpi_default

@@ -5,3 +5,5 @@
 nginx.conf text eol=lf
 Dockerfile* text eol=lf
 *.yml text eol=lf
+# NAS 의 nginx 설정 자리에 그대로 얹는 파일이라 LF 여야 한다
+portal/omv-erp.conf text eol=lf

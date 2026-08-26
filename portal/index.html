@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<!--
+  바이트론 업무 포털 — VITRON ERP
+  ────────────────────────────────────────────────────────────
+  왜 빌드 도구를 쓰지 않는가
+    타일 몇 개와 숫자 몇 개가 전부다. 빌드가 없으면 배포도 «파일을 얹는 것» 으로 끝난다.
+    나중에 화면이 커지면 그때 Vite 로 옮긴다 — 지금 옮기면 도구가 일보다 커진다.
+
+  🔑 주소는 언제나 «상대 경로» 로 부른다 (api/... ). 이 쪽은 /ERP/ 아래에 놓이므로
+     절대 경로(/api/...)로 부르면 OMV 관리 화면 쪽으로 가 버린다.
+
+  🔑 로그인은 새로 만들지 않는다. 대시보드·KPI 와 «같은 쿠키»(kpi_session)를 쓴다.
+     쿠키는 포트를 가리지 않아 :8082 에서 로그인해 두면 여기서도 그대로 통한다.
+-->
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>바이트론 업무 포털 — VITRON ERP</title>
+<style>
+  :root{
+    --navy:#1e3a5f; --blue:#1a56db; --line:#e5e7eb; --ink:#111827; --dim:#6b7280;
+    --bg:#f3f4f6; --card:#ffffff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:'맑은 고딕','Malgun Gothic',system-ui,-apple-system,sans-serif}
+  header{background:var(--navy);color:#fff;padding:18px 24px}
+  .wrap{max-width:1100px;margin:0 auto}
+  h1{margin:0;font-size:19px;font-weight:800;letter-spacing:-.3px}
+  .sub{font-size:12px;opacity:.75;margin-top:3px}
+  .who{float:right;text-align:right;font-size:12px;line-height:1.6}
+  .who b{font-size:13px}
+  .badge{display:inline-block;font-size:10px;font-weight:700;padding:1px 7px;
+    border-radius:9px;background:rgba(255,255,255,.18);margin-left:5px}
+  main{padding:22px 24px 40px}
+  h2{font-size:12px;color:var(--dim);font-weight:700;margin:26px 0 10px;letter-spacing:.3px}
+  h2:first-child{margin-top:0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+  a.tile{display:block;background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:15px 16px;text-decoration:none;color:inherit;transition:.12s}
+  a.tile:hover{border-color:var(--blue);box-shadow:0 2px 10px rgba(26,86,219,.10);transform:translateY(-1px)}
+  .t-top{display:flex;align-items:center;gap:9px}
+  .icon{font-size:21px;line-height:1}
+  .t-name{font-size:14px;font-weight:800}
+  .t-desc{font-size:11px;color:var(--dim);margin-top:6px;line-height:1.6}
+  .t-stat{margin-top:9px;font-size:12px;color:var(--blue);font-weight:700;min-height:17px}
+  .t-stat .muted{color:#9ca3af;font-weight:500}
+  .t-stat .warn{color:#b45309}
+  .small a.tile{padding:11px 13px}
+  .small .t-name{font-size:13px}
+  .note{margin-top:26px;font-size:11px;color:var(--dim);line-height:1.8}
+  .login{background:#fffbeb;border:1px solid #fde68a;color:#92400e;border-radius:10px;
+    padding:11px 14px;font-size:12.5px;margin-bottom:16px}
+  .login a{color:#92400e;font-weight:700}
+</style>
+</head>
+<body>
+<header><div class="wrap">
+  <div class="who" id="who">확인 중…</div>
+  <h1>바이트론 업무 포털</h1>
+  <div class="sub">VITRON ERP · 사내 업무 시스템을 한 자리에서</div>
+</div></header>
+
+<main class="wrap">
+  <div id="loginBox" class="login" hidden>
+    로그인하지 않으셨습니다. 숫자는 로그인해야 보입니다 —
+    <a href="/ERP/go/dashboard">업무 현황 대시보드에서 로그인</a>하시면 이 쪽도 그대로 열립니다.
+  </div>
+
+  <h2>업무</h2>
+  <div class="grid" id="mainTiles"></div>
+
+  <h2>문서 · 일감</h2>
+  <div class="grid" id="atlassianTiles"></div>
+
+  <h2 class="small">사내 도구</h2>
+  <div class="grid small" id="toolTiles"></div>
+
+  <div class="note">
+    💡 <b>로그인은 하나입니다.</b> 업무 대시보드·KPI 추적 시스템이 같은 계정을 씁니다 —
+    한 곳에서 로그인하면 나머지도 그대로 열립니다.<br>
+    ⚠ <b>Confluence·Jira 는 별도 계정</b>(Atlassian)입니다. 사내 계정과 다릅니다.
+  </div>
+</main>
+
+<script>
+// 이 쪽이 /ERP/ 아래 있으므로 상대 경로로 부른다. 앞에 «/» 를 붙이면 안 된다.
+const api = (p) => fetch('api/' + p, { credentials: 'same-origin' })
+  .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+
+// 바깥 주소는 한 곳에 모아 둔다. 포트가 바뀌면 여기만 고친다.
+const URLS = {
+  dashboard : 'http://vitron-nas:8082',
+  kpi       : 'http://vitron-nas:8083',
+  confluence: 'https://vi-tron.atlassian.net/wiki/spaces/ViTron',
+  jira      : 'https://vi-tron.atlassian.net/jira',
+  gitea     : 'http://vitron-nas:8084',
+  files     : 'http://vitron-nas:8081',
+  nextcloud : 'http://vitron-nas:8080',
+  portainer : 'http://vitron-nas:9000',
+}
+
+const MAIN = [
+  { k:'work',     icon:'📋', name:'업무 현황 대시보드', url:URLS.dashboard,
+    desc:'하루 업무를 시간대로 적고 일간·주간·월간으로 모아 봅니다' },
+  { k:'schedule', icon:'🗓', name:'스케줄 · 차량',      url:URLS.dashboard + '#schedule',
+    desc:'어디에 있는지 · 무엇을 타고 가는지 · 월말 정산' },
+  { k:'vacation', icon:'🌴', name:'휴가',              url:URLS.dashboard + '#vacation',
+    desc:'휴가를 신청하고 연차가 얼마나 남았는지 봅니다' },
+  { k:'purchase', icon:'🛒', name:'구매 요청',          url:URLS.dashboard + '#purchase',
+    desc:'물품 구매를 요청하고 지난 구매 이력을 봅니다' },
+  { k:'kpi',      icon:'📊', name:'KPI 추적 시스템',    url:URLS.kpi,
+    desc:'분기별 개인·프로젝트 KPI 점수와 평가 내역' },
+]
+const ATLASSIAN = [
+  { k:'confluence', icon:'📚', name:'Confluence', url:URLS.confluence,
+    desc:'제품 문서 · 기준 문서 · 매뉴얼' },
+  { k:'jira',       icon:'🐞', name:'Jira',       url:URLS.jira,
+    desc:'업무(일감) 등록과 진행 상태' },
+]
+const TOOLS = [
+  { icon:'🗄', name:'Gitea (소스)', url:URLS.gitea },
+  { icon:'📁', name:'파일 브라우저', url:URLS.files },
+  { icon:'☁',  name:'Nextcloud',   url:URLS.nextcloud },
+  { icon:'🐳', name:'Portainer',   url:URLS.portainer },
+]
+
+function tile(t, withStat) {
+  const a = document.createElement('a')
+  a.className = 'tile'
+  a.href = t.url
+  a.target = '_blank'
+  a.rel = 'noreferrer'
+  a.innerHTML =
+    '<div class="t-top"><span class="icon">' + t.icon + '</span>' +
+    '<span class="t-name">' + t.name + '</span></div>' +
+    (t.desc ? '<div class="t-desc">' + t.desc + '</div>' : '') +
+    (withStat ? '<div class="t-stat" data-stat="' + t.k + '"><span class="muted">…</span></div>' : '')
+  return a
+}
+const fill = (id, list, withStat) => {
+  const box = document.getElementById(id)
+  list.forEach(t => box.appendChild(tile(t, withStat)))
+}
+fill('mainTiles', MAIN, true)
+fill('atlassianTiles', ATLASSIAN, false)
+fill('toolTiles', TOOLS, false)
+
+const setStat = (k, html) => {
+  const el = document.querySelector('[data-stat="' + k + '"]')
+  if (el) el.innerHTML = html
+}
+
+// ── 로그인한 사람 ───────────────────────────────────────────
+// 🔑 실패를 조용히 넘기지 않는다. 「숫자가 안 보인다」의 이유가 로그인인지
+//    서버인지 사람이 알 수 있어야 한다.
+api('dash/auth/me')
+  .then(me => {
+    if (!me || !me.login_id) throw new Error('anonymous')
+    document.getElementById('who').innerHTML =
+      '<b>' + (me.name || me.login_id) + '</b>' +
+      '<span class="badge">' + (me.role === 'admin' ? '관리자' : '일반') + '</span>' +
+      '<div style="opacity:.7">' + me.login_id + '</div>'
+    loadStats(me)
+  })
+  .catch(() => {
+    document.getElementById('who').textContent = '로그인하지 않음'
+    document.getElementById('loginBox').hidden = false
+    MAIN.forEach(t => setStat(t.k, '<span class="muted">로그인하면 보입니다</span>'))
+  })
+
+// ── 타일에 곁들일 숫자 ──────────────────────────────────────
+// ⚠ 한 곳이 실패해도 나머지는 그대로 보여 준다. 하나 때문에 화면 전체가
+//   비면 「무엇이 고장인지」 알 수 없다.
+function loadStats(me) {
+  const fail = (k) => setStat(k, '<span class="muted">불러오지 못했습니다</span>')
+
+  api('dash/schedule/vacation-summary')
+    .then(d => {
+      const mine = (d.items || []).find(x => x.worker_id === me.worker_id)
+      const bits = []
+      if (mine && mine.remaining != null) bits.push('잔여 <b>' + mine.remaining + '일</b>')
+      if (d.can_approve && (d.pending || []).length)
+        bits.push('<span class="warn">승인 대기 ' + d.pending.length + '건</span>')
+      setStat('vacation', bits.join(' · ') || '<span class="muted">신청한 휴가가 없습니다</span>')
+    })
+    .catch(() => fail('vacation'))
+
+  api('dash/purchases')
+    .then(d => {
+      const bits = []
+      const pend = (d.items || []).filter(x => x.status === 'pending').length
+      if (d.can_approve && pend) bits.push('<span class="warn">승인 대기 ' + pend + '건</span>')
+      bits.push('누적 <b>' + Number(d.total.approved || 0).toLocaleString('ko-KR') + '원</b>')
+      setStat('purchase', bits.join(' · '))
+    })
+    .catch(() => fail('purchase'))
+
+  // 오늘 내 일정 — 어디에 있는지가 가장 자주 찾는 정보다
+  const t = new Date()
+  const ymd = t.getFullYear() + '-' + String(t.getMonth() + 1).padStart(2, '0') +
+              '-' + String(t.getDate()).padStart(2, '0')
+  api('dash/schedule/plans?from=' + ymd + '&to=' + ymd)
+    .then(rows => {
+      const mine = (rows || []).filter(p => p.worker_id === me.worker_id)
+      if (!mine.length) return setStat('schedule', '<span class="muted">오늘 등록한 일정이 없습니다</span>')
+      const p = mine[0]
+      const where = p.use_type === 'vacation' ? '🌴 휴가'
+        : (p.place_name || p.place_text || '사무실')
+      setStat('schedule', '오늘 · <b>' + where + '</b>' +
+        (p.vehicle_name ? ' · ' + p.vehicle_name : '') +
+        (mine.length > 1 ? ' 외 ' + (mine.length - 1) + '건' : ''))
+    })
+    .catch(() => fail('schedule'))
+
+  setStat('work', '<span class="muted">오늘 업무를 적어 주세요</span>')
+  setStat('kpi', '<span class="muted">열어서 확인</span>')
+}
+</script>
+</body>
+</html>
