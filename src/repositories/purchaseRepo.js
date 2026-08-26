@@ -24,11 +24,13 @@ async function request(method, path, body) {
 }
 
 // 관리자가 아니면 서버가 «본인 것만» 돌려준다. 화면에서 거르지 않는다.
-export function getPurchases({ from, to, status } = {}) {
+// ⚠ workerId 는 관리자에게만 뜻이 있다 — 일반 직원이 남의 번호를 넣어도 서버가 막는다.
+export function getPurchases({ from, to, status, workerId } = {}) {
   const q = new URLSearchParams()
   if (from) q.set('from', from)
   if (to) q.set('to', to)
   if (status) q.set('status', status)
+  if (workerId) q.set('worker_id', workerId)
   const s = q.toString()
   return request('GET', s ? `?${s}` : '')
 }

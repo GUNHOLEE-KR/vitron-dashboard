@@ -2839,12 +2839,40 @@ const BUY_STATE={
 }
 const wonFmt=n=>Number(n||0).toLocaleString('ko-KR')
 
+// 기간 빠른 단추 — 「이번 달 얼마 썼나」 가 가장 잦은 물음이라 기본을 이번 달로 둔다.
+// 🔑 계산은 «현지 시각» 으로 한다. toISOString() 을 쓰면 UTC 로 밀려 1일이 지난달로 간다.
+const BUY_RANGES=[
+  {key:'thisMonth',label:'이번 달'},
+  {key:'lastMonth',label:'지난 달'},
+  {key:'thisYear' ,label:'올해'},
+  {key:'all'      ,label:'전체'},
+]
+function buyRange(key){
+  const n=new Date(), y=n.getFullYear(), m=n.getMonth()
+  const at=(yy,mm,dd)=>ymd(new Date(yy,mm,dd))
+  if(key==='thisMonth')return {from:at(y,m,1),   to:at(y,m+1,0)}
+  if(key==='lastMonth')return {from:at(y,m-1,1), to:at(y,m,0)}
+  if(key==='thisYear') return {from:at(y,0,1),   to:at(y,11,31)}
+  return {from:'',to:''}
+}
+
 function TabPurchase({workers,me,canEditOthers,showToast}){
   const [data,setData]=useState(null)
   const [err,setErr]=useState('')
   const [tick,setTick]=useState(0)
   const [busy,setBusy]=useState(0)
   const reload=()=>setTick(t=>t+1)
+
+  // 🔑 요청 폼은 «접어 둔다». 요청은 가끔 하는 일이고 이력·승인은 늘 보는 것이라
+  //    자주 보는 쪽을 위로 올린다. 한 화면에 세 덩어리를 다 펴 두면 표가 접혀 안 보인다.
+  const [openForm,setOpenForm]=useState(false)
+
+  // 이력 거르개 — 기간 · 직원 · 상태. 서버가 걸러 준다 (화면에서 자르면 누적 금액이 어긋난다)
+  const [range,setRange]=useState('thisMonth')
+  const [from,setFrom]=useState(()=>buyRange('thisMonth').from)
+  const [to,setTo]=useState(()=>buyRange('thisMonth').to)
+  const [fStatus,setFStatus]=useState('')
+  const [fWorker,setFWorker]=useState('')
 
   // 입력 칸 — 물품명 · 수량 · 단가 · 구매 링크 · 사용처 · 기타
   const [workerId,setWorkerId]=useState(me?.worker_id??'')
@@ -2857,11 +2885,17 @@ function TabPurchase({workers,me,canEditOthers,showToast}){
 
   useEffect(()=>{
     let alive=true
-    getPurchases()
+    getPurchases({from,to,status:fStatus||undefined,workerId:fWorker||undefined})
       .then(d=>{ if(alive){ setData(d); setErr('') } })
       .catch(e=>{ if(alive) setErr(e.message) })
     return ()=>{ alive=false }
-  },[tick])
+  },[tick,from,to,fStatus,fWorker])
+
+  function pickRange(key){
+    setRange(key)
+    const r=buyRange(key)
+    setFrom(r.from); setTo(r.to)
+  }
 
   const amount=Math.round((Number(qty)||0)*(Number(unitPrice)||0))
 
@@ -2920,12 +2954,23 @@ function TabPurchase({workers,me,canEditOthers,showToast}){
   if(!data)return <Card title="🛒 구매"><div style={{fontSize:12,color:'#6b7280'}}>불러오는 중…</div></Card>
 
   const items=data.items||[]
-  const pending=items.filter(p=>p.status==='pending')
+  // 🔑 승인 대기는 서버가 «거르개와 무관하게» 따로 내려준다.
+  //    기간을 지난달로 잡았다고 결재할 것이 사라지면 안 된다.
+  const pending=data.pending||[]
   const inputS={padding:'8px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,width:'100%'}
   const labelS={fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:4,display:'block'}
 
   return(
     <div style={{display:'flex',flexDirection:'column',gap:14}}>
+      {!openForm&&(
+        <button onClick={()=>setOpenForm(true)}
+          style={{alignSelf:'flex-start',padding:'10px 20px',borderRadius:8,border:'1px dashed #93c5fd',
+            background:'#eff6ff',color:'#1a56db',cursor:'pointer',fontSize:14,fontWeight:700}}>
+          ＋ 구매 요청
+        </button>
+      )}
+
+      {openForm&&(
       <Card title="구매 요청">
         <div style={{display:'grid',gridTemplateColumns:'2fr 1fr 1fr 1fr',gap:10,marginBottom:10}}>
           <div>
@@ -2980,11 +3025,18 @@ function TabPurchase({workers,me,canEditOthers,showToast}){
               color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
             {busy===-1?'요청 중…':'구매 요청'}
           </button>
+          <button onClick={()=>setOpenForm(false)}
+            style={{padding:'11px 18px',borderRadius:8,border:'1px solid #e5e7eb',background:'#fff',
+              color:'#6b7280',cursor:'pointer',fontSize:13,fontWeight:700}}>접기</button>
         </div>
       </Card>
+      )}
 
+      {/* ⚠ 금액을 data.total.pending 로 쓰면 안 된다 — 그것은 «걸러진» 합계라
+          목록(전체 대기)과 어긋난다. 보이는 줄에서 직접 더한다. */}
       {data.can_approve&&(
-        <Card title={`승인 대기 ${pending.length}건 · ${wonFmt(data.total.pending)}원`}>
+        <Card title={`승인 대기 ${pending.length}건 · `
+          +`${wonFmt(pending.reduce((s,p)=>s+Number(p.amount||0),0))}원`}>
           {pending.length===0
             ?<div style={{fontSize:12,color:'#16a34a'}}>기다리는 요청이 없습니다.</div>
             :<table style={{width:'100%',borderCollapse:'collapse'}}>
@@ -3023,7 +3075,47 @@ function TabPurchase({workers,me,canEditOthers,showToast}){
         </Card>
       )}
 
-      <Card title={data.scope==='all'?'구매 이력 — 전체':'내 구매 이력'}>
+      <Card title={data.scope!=='all'
+        ? '내 구매 이력'
+        : fWorker
+          ? `구매 이력 — ${workers.find(w=>String(w.id)===String(fWorker))?.name||''}`
+          : '구매 이력 — 전 직원'}>
+
+        {/* 거르개 — 기간 · 직원 · 상태. 🔑 직원 고르개는 «전체를 보는 사람» 에게만 뜻이 있다 */}
+        <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',marginBottom:12,
+          paddingBottom:12,borderBottom:'1px solid #f3f4f6'}}>
+          <div style={{display:'flex',gap:4}}>
+            {BUY_RANGES.map(r=>(
+              <button key={r.key} onClick={()=>pickRange(r.key)}
+                style={{padding:'6px 12px',borderRadius:7,fontSize:12,fontWeight:700,cursor:'pointer',
+                  border:'1px solid '+(range===r.key?'#1a56db':'#e5e7eb'),
+                  background:range===r.key?'#1a56db':'#fff',
+                  color:range===r.key?'#fff':'#6b7280'}}>{r.label}</button>
+            ))}
+          </div>
+          {/* 날짜를 직접 고치면 빠른 단추의 선택 표시를 푼다 — 「이번 달」 이라 써 놓고
+              딴 기간을 보여 주면 안 된다 */}
+          <input type="date" value={from} onChange={e=>{setFrom(e.target.value); setRange('')}}
+            style={{...inputS,width:'auto'}}/>
+          <span style={{color:'#9ca3af',fontSize:12}}>~</span>
+          <input type="date" value={to} onChange={e=>{setTo(e.target.value); setRange('')}}
+            style={{...inputS,width:'auto'}}/>
+          {data.scope==='all'&&(
+            <select value={fWorker} onChange={e=>setFWorker(e.target.value)}
+              style={{...inputS,width:'auto'}}>
+              <option value="">전 직원</option>
+              {workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
+            </select>
+          )}
+          <select value={fStatus} onChange={e=>setFStatus(e.target.value)}
+            style={{...inputS,width:'auto'}}>
+            <option value="">모든 상태</option>
+            <option value="pending">대기</option>
+            <option value="approved">승인</option>
+            <option value="rejected">반려</option>
+          </select>
+        </div>
+
         <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:12}}>
           {[['건수',`${items.length}건`,'#111827'],
             ['승인 누적',`${wonFmt(data.total.approved)}원`,'#047857'],
@@ -3037,7 +3129,13 @@ function TabPurchase({workers,me,canEditOthers,showToast}){
           ))}
         </div>
         {items.length===0
-          ?<div style={{fontSize:12,color:'#6b7280'}}>아직 요청한 구매가 없습니다.</div>
+          ?<div style={{fontSize:12,color:'#6b7280'}}>
+            {/* 🔑 「없다」와 「걸러져서 안 보인다」를 구분한다 —
+                기간을 좁혀 둔 것을 잊고 자료가 사라졌다고 여기기 쉽다 */}
+            {from||to||fStatus||fWorker
+              ?'고른 조건에 맞는 구매가 없습니다. 기간이나 상태를 넓혀 보세요.'
+              :'아직 요청한 구매가 없습니다.'}
+          </div>
           :<table style={{width:'100%',borderCollapse:'collapse'}}>
             <thead><tr>
               <th style={thS}>요청일</th><th style={thS}>상태</th><th style={thS}>이름</th>

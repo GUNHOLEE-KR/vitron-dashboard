@@ -1285,23 +1285,41 @@ app.get('/api/purchases', async (req, res) => {
     const isAdmin = req.session?.role === 'admin'
     const mine = req.session?.workerId ?? -1
     const { from, to, status } = req.query
+    // 🔴 직원 고르개는 «관리자에게만» 뜻이 있다. 일반 직원이 남의 번호를 넣어 보내도
+    //    첫 줄($1이 false)이 본인 것으로 이미 묶어 두므로 새어 나가지 않는다.
+    const pickWorker = isAdmin && req.query.worker_id ? Number(req.query.worker_id) : null
+    // ⚠ 기간은 «요청일»(created_at) 기준이다. 승인일로 잡으면 아직 결재 안 난 건이
+    //   기간에서 통째로 빠져 「이 달에 얼마 달라고 했나」 를 볼 수 없다.
     const { rows } = await pool.query(
       `${PURCHASE_SELECT}
         WHERE ($1::boolean OR p.worker_id = $2::int)
           AND ($3::date IS NULL OR p.created_at >= $3::date)
           AND ($4::date IS NULL OR p.created_at < ($4::date + 1))
           AND ($5::text IS NULL OR p.status = $5::text)
+          AND ($6::int  IS NULL OR p.worker_id = $6::int)
         ORDER BY p.created_at DESC`,
-      [isAdmin, mine, from || null, to || null, status || null])
+      [isAdmin, mine, from || null, to || null, status || null, pickWorker])
 
     // 누적 금액 — 🔑 «승인된 것만» 더한다. 대기·반려를 섞으면 「얼마 썼나」가 아니라
     //    「얼마 달라고 했나」가 된다.
     const sum = k => rows.filter(r => r.status === k)
       .reduce((s, r) => s + Number(r.amount || 0), 0)
+
+    // 🔑 승인 대기는 «필터와 무관하게» 전부 내려보낸다.
+    //    기간을 지난달로 잡았다고 결재할 것이 사라지면 안 된다 —
+    //    필터는 「이력을 들여다보는 도구」 이지 「할 일을 감추는 도구」 가 아니다.
+    const canApproveNow = await canApprove(req.session.uid)
+    let pending = []
+    if (canApproveNow) {
+      const { rows: p } = await pool.query(
+        `${PURCHASE_SELECT} WHERE p.status = 'pending' ORDER BY p.created_at ASC`)
+      pending = p
+    }
     res.json({
       scope: isAdmin ? 'all' : 'me',
-      can_approve: await canApprove(req.session.uid),
+      can_approve: canApproveNow,
       items: rows,
+      pending,
       total: { approved: sum('approved'), pending: sum('pending'), rejected: sum('rejected') },
     })
   } catch (e) {
