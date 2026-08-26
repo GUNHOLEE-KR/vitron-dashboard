@@ -16,14 +16,18 @@ import { URLS } from './api'
 // ── 타일 ────────────────────────────────────────────────────
 // href 뒤의 # 가 대시보드에서 «어느 탭을 열지» 를 정한다.
 // 휴가는 탭이 아니라 스케줄 탭 «안의 보기» 라 두 단계다(#schedule/vac).
-const MAIN = [
-  { k: 'work', icon: '📋', name: '업무 현황', url: URLS.dashboard + '#today',
+//
+// 🔑 주소를 «지금 보고 있는 대시보드» 에 맞춰 만든다. 박아 두었더니 시험 중에도
+//    타일이 운영(:8082)으로 가 버렸고, 거기엔 아직 # 를 읽는 코드가 없어
+//    무엇을 눌러도 「오늘 업무」가 열렸다 (2026-08-26 지적).
+const mainTiles = (dash) => [
+  { k: 'work', icon: '📋', name: '업무 현황', url: dash + '/#today',
     desc: '하루 업무를 시간대로 적고 모아 봅니다' },
-  { k: 'schedule', icon: '🗓', name: '스케줄 · 차량', url: URLS.dashboard + '#schedule',
+  { k: 'schedule', icon: '🗓', name: '스케줄 · 차량', url: dash + '/#schedule',
     desc: '어디에 있는지 · 무엇을 타고 가는지' },
-  { k: 'vacation', icon: '🌴', name: '휴가', url: URLS.dashboard + '#schedule/vac',
+  { k: 'vacation', icon: '🌴', name: '휴가', url: dash + '/#schedule/vac',
     desc: '휴가 신청과 남은 연차' },
-  { k: 'purchase', icon: '🛒', name: '구매 요청', url: URLS.dashboard + '#purchase',
+  { k: 'purchase', icon: '🛒', name: '구매 요청', url: dash + '/#purchase',
     desc: '물품 구매 요청과 이력' },
   // ⚠ KPI 점수는 아직 붙이지 않았다. 숫자가 없는 타일에 빈 줄을 두면
   //   「무언가 안 나온다」 로 읽히므로 그 줄 자체를 두지 않는다.
@@ -140,12 +144,17 @@ export default function Portal() {
   const canApprove = !!(vac?.can_approve || buy?.can_approve)
   const myId = me?.worker_id ?? null
 
+  // 🔑 «지금 보고 있는» 대시보드로 보낸다. 뒤쪽이 테스트면 링크도 테스트로 —
+  //    안 그러면 타일을 눌러 운영으로 가 시험한 자료가 하나도 보이지 않는다.
+  //    운영 배포 때 nginx 한 줄만 되돌리면 링크도 함께 제자리로 온다.
+  const dash = env?.env === 'test' ? URLS.dashboardTest : URLS.dashboard
+
   // 🔴 결재자가 봐야 할 것 — 최상단과 각 타일 «양쪽» 에 같은 숫자를 띄운다
   const pendVac = (vac?.pending || []).length
   const pendBuy = (buy?.items || []).filter(x => x.status === 'pending').length
   const todo = []
-  if (pendBuy) todo.push({ k: 'purchase', label: '구매 요청', n: pendBuy, url: URLS.dashboard + '#purchase' })
-  if (pendVac) todo.push({ k: 'vacation', label: '휴가 신청', n: pendVac, url: URLS.dashboard + '#schedule/vac' })
+  if (pendBuy) todo.push({ k: 'purchase', label: '구매 요청', n: pendBuy, url: dash + '/#purchase' })
+  if (pendVac) todo.push({ k: 'vacation', label: '휴가 신청', n: pendVac, url: dash + '/#schedule/vac' })
 
   // 스케줄 패널에 보여 줄 계획
   const shown = useMemo(() => {
@@ -178,10 +187,10 @@ export default function Portal() {
     return (
       <Shell env={env}>
         <div style={{ ...box, padding: 22, background: '#fffbeb', borderColor: '#fde68a', color: '#92400e' }}>
-          로그인하지 않으셨습니다. <a href={URLS.dashboard} style={{ color: '#92400e', fontWeight: 700 }}>
+          로그인하지 않으셨습니다. <a href={dash} style={{ color: '#92400e', fontWeight: 700 }}>
             업무 현황 대시보드에서 로그인</a>하시면 이 쪽도 그대로 열립니다.
         </div>
-        <Tiles />
+        <Tiles dash={dash} />
       </Shell>
     )
   }
@@ -286,12 +295,12 @@ export default function Portal() {
               rows={rows} groupBy="worker" sortByGroup={sortByGroup} readOnly />
           : <ScheduleMonth ym={ym} byDate={byDate} workers={shownWorkers} todayStr={todayStr} readOnly />}
         <div style={{ fontSize: 11, color: C.dim, marginTop: 9 }}>
-          💡 여기서는 보기만 합니다 — 고치시려면 <a href={URLS.dashboard + '#schedule'}
+          💡 여기서는 보기만 합니다 — 고치시려면 <a href={dash + '/#schedule'}
             style={{ color: C.blue, fontWeight: 700 }}>스케줄 화면</a>으로 가십시오.
         </div>
       </div>
 
-      <Tiles me={me} vac={vac} buy={buy} hist={hist} myId={myId} canApprove={canApprove}
+      <Tiles dash={dash} me={me} vac={vac} buy={buy} hist={hist} myId={myId} canApprove={canApprove}
         pendVac={pendVac} pendBuy={pendBuy} />
     </Shell>
   )
@@ -345,7 +354,7 @@ function Shell({ me, env, children }) {
 
 // ── 타일 ────────────────────────────────────────────────────
 // 업무 다섯 개는 «한 줄» 로 넓게 (2026-08-26 지시). 화면이 좁으면 접힌다.
-function Tiles({ me, vac, buy, hist, myId, canApprove, pendVac, pendBuy }) {
+function Tiles({ dash, me, vac, buy, hist, myId, canApprove, pendVac, pendBuy }) {
   const stat = (k) => {
     if (!me) return <span style={{ color: '#9ca3af' }}>로그인하면 보입니다</span>
     if (k === 'vacation') {
@@ -375,7 +384,7 @@ function Tiles({ me, vac, buy, hist, myId, canApprove, pendVac, pendBuy }) {
     <>
       <H>업무</H>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(200px,1fr))', gap: 12 }}>
-        {MAIN.map(t => <Tile key={t.k} t={t} stat={t.noStat ? null : stat(t.k)} />)}
+        {mainTiles(dash).map(t => <Tile key={t.k} t={t} stat={t.noStat ? null : stat(t.k)} />)}
       </div>
       <H>문서 · 일감</H>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(230px,1fr))', gap: 12 }}>

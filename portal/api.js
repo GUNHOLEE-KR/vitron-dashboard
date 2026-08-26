@@ -32,6 +32,9 @@ export const getHistoryOn = (date) => call('dash/history/date/' + date)
 // 바깥 주소는 한 곳에 모아 둔다. 포트가 바뀌면 여기만 고친다.
 export const URLS = {
   dashboard: 'http://vitron-nas:8082',
+  // ⏳ 시험용 대시보드. 포털이 «테스트 백엔드» 를 보고 있으면 링크도 이리로 간다 —
+  //    안 그러면 타일을 눌러 운영으로 가 버려 시험한 자료가 보이지 않는다.
+  dashboardTest: 'http://vitron-nas:8092',
   kpi: 'http://vitron-nas:8083',
   confluence: 'https://vi-tron.atlassian.net/wiki/spaces/ViTron',
   jira: 'https://vi-tron.atlassian.net/jira',
