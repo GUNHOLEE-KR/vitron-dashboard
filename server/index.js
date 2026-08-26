@@ -2079,7 +2079,15 @@ app.delete('/api/holidays/:date', async (req, res) => {
 app.get('/api/health', async (req, res) => {
   try {
     await pool.query('SELECT 1')
-    res.json({ ok: true, db: 'connected' })
+    // 🔑 «여기가 어디인가» 를 함께 알린다 (2026-08-26 신설).
+    //    화면이 이 값을 보고 테스트 서버에 빨간 띠를 답니다 —
+    //    운영인 줄 알고 만지거나, 반대로 운영을 테스트인 줄 알고 만지는 것을 막는다.
+    //    ⚠ 로그인 없이 답하는 자리라 «환경 이름과 DB 이름» 말고는 담지 않는다.
+    res.json({
+      ok: true, db: 'connected',
+      env: process.env.APP_ENV || 'prod',
+      db_name: process.env.DB_NAME || null,
+    })
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message })
   }

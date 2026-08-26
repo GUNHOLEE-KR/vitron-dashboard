@@ -1098,6 +1098,17 @@ function NeedPasswordScreen({me,onBack}){
 
 function Dashboard({me,onLoggedOut}){
   const [tab,setTab]=useState('today')
+  // 🔴 여기가 운영인가 테스트인가. 서버가 /api/health 로 알려 준다.
+  //    ⚠ 화면에 박아 두지 않는 이유 — 그러면 «테스트용 빌드» 가 따로 생기고,
+  //      언젠가 그 빌드가 운영에 올라간다. 서버가 말해 주는 편이 안전하다.
+  const [envInfo,setEnvInfo]=useState(null)
+  useEffect(()=>{
+    let alive=true
+    fetch('/api/health').then(r=>r.json())
+      .then(d=>{ if(alive) setEnvInfo(d) })
+      .catch(()=>{ /* 띠가 안 뜰 뿐, 화면은 그대로 돈다 */ })
+    return ()=>{ alive=false }
+  },[])
   const [workers,setWorkers]=useState([])
   const [history,setHistory]=useState([])
   const [absences,setAbsences]=useState([])   // 장기출장·휴직·파견 기간
@@ -1311,6 +1322,23 @@ function Dashboard({me,onLoggedOut}){
         </div>
       )}
       <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      {/* 🔴 테스트 서버라는 사실이 «한눈에» 보여야 한다 (2026-08-26 신설).
+          운영인 줄 알고 만지거나, 반대로 운영을 테스트인 줄 알고 만지는 것을 막는다.
+          띠는 sticky 헤더보다 위에 두어 화면을 내려도 계속 보이게 한다. */}
+      {envInfo?.env==='test'&&(
+        <div style={{position:'sticky',top:0,zIndex:200,background:'#b91c1c',color:'#fff',
+          padding:'6px 20px',fontSize:12.5,fontWeight:700,letterSpacing:'.3px',
+          display:'flex',gap:12,alignItems:'center',flexWrap:'wrap'}}>
+          <span>🔴 테스트 서버</span>
+          <span style={{fontWeight:400,opacity:.9}}>
+            여기서 넣고 지운 것은 운영에 반영되지 않습니다
+            {envInfo.db_name?` · DB ${envInfo.db_name}`:''}
+          </span>
+          <a href="http://vitron-nas:8082" style={{marginLeft:'auto',color:'#fff',fontWeight:700}}>
+            운영으로 가기 ↗
+          </a>
+        </div>
+      )}
       <header style={{background:'#fff',borderBottom:'1px solid #e5e7eb',padding:'12px 20px',display:'flex',alignItems:'center',justifyContent:'space-between',position:'sticky',top:0,zIndex:100}}>
         <div>
           <div style={{fontSize:16,fontWeight:700}}>바이트론 이앤에스 업무 현황</div>

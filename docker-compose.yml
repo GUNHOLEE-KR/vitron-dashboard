@@ -1,12 +1,19 @@
-# NAS(vitron-nas) 운영 배포용. 갱신은 ./deploy.sh 하나로 끝난다.
+# NAS(vitron-nas) 배포용. 갱신은 ./deploy.sh 하나로 끝난다.
+#
+# 🔑 운영과 «테스트» 가 같은 파일을 쓴다. 다른 것은 .env 세 줄뿐이다.
+#      IMAGE_TAG      운영 latest / 테스트 test
+#      FRONTEND_PORT  운영 8082   / 테스트 8092
+#      DB_NAME        운영 vitron_dashboard / 테스트 vitron_dashboard_test
+#    ⚠ IMAGE_TAG 를 나누지 않으면 테스트를 빌드할 때 운영 이미지를 덮어써,
+#      운영을 재시작하는 순간 «시험 중인 코드» 가 올라간다.
 services:
   frontend:
     build:
       context: .
       dockerfile: Dockerfile.frontend
-    image: vitron-frontend:latest
+    image: vitron-frontend:${IMAGE_TAG:-latest}
     ports:
-      - "8082:80"
+      - "${FRONTEND_PORT:-8082}:80"
     depends_on:
       - backend
     restart: unless-stopped
@@ -15,7 +22,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    image: vitron-backend:latest
+    image: vitron-backend:${IMAGE_TAG:-latest}
     env_file: .env
     # ⚠️ 시간대를 지정하지 않으면 컨테이너가 UTC 로 동작한다.
     # 그러면 서버가 만드는 「오늘」이 한국 시간과 9시간 어긋나
