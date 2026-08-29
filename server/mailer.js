@@ -26,12 +26,19 @@ const cfg = () => ({
   pass: process.env.MAIL_PASS || '',
   from: process.env.MAIL_FROM || '',
   to:   process.env.MAIL_TO || '',
-  // ⏳ 시험용 수신처. 있으면 «새로 만든 알림» 이 전부 이리로 온다 —
-  //    대표이사에게 갈 것(완료 보고·휴가 신청/취소)뿐 아니라
-  //    🔴 «직원에게 갈 것»(휴가 승인·반려)까지 포함한다. 시험 중에 남의 사서함으로
+  // ⏳ 시험용 수신처. 있으면 «나가는 메일이 전부» 이리로 온다 —
+  //    대표이사에게 갈 것(차량 예약·완료 보고·휴가/구매 신청)뿐 아니라
+  //    🔴 «직원에게 갈 것»(휴가·구매 승인/반려)까지 포함한다. 시험 중에 남의 사서함으로
   //    「휴가가 승인되었습니다」가 날아가면 안 되기 때문이다.
-  //    2026-08-26 사용자 지시로 담당자 본인 주소를 넣어 두었다.
-  //    🔑 MAIL_TO 를 통째로 바꾸지 않은 이유 — 그러면 «차량 예약 알림까지» 따라간다.
+  //    2026-08-26 사용자 지시로 담당자 본인 주소(이건호)를 넣어 두었다.
+  //
+  //    🔴 2026-08-29 «차량 예약 알림도» 이리로 돌렸다 (사용자 지시 —
+  //       「개발·테스트 하는 동안에는 대표이사께 갈 메일을 모두 이건호로」).
+  //       그전에는 build() 만 c.to(=MAIL_TO)를 직접 써서, 시험 중에 차를 잡을
+  //       때마다 «진짜» 대표이사께 [차량] 메일이 갔다 — 유일하게 새던 구멍이었다.
+  //       ⚠ MAIL_TO 자체는 그대로 둔다. isEnabled() 가 「설정이 갖춰졌는가」를
+  //         이 값으로 판정하고, 운영에는 MAIL_TO_TEST 가 «없어» toBoss 가
+  //         그대로 MAIL_TO 로 떨어지므로 운영 동작은 달라지지 않는다.
   //    시험이 끝나면 .env 에서 MAIL_TO_TEST 줄만 빼면 제자리로 돌아간다.
   testTo: process.env.MAIL_TO_TEST || '',
   toBoss: process.env.MAIL_TO_TEST || process.env.MAIL_TO || '',
@@ -151,7 +158,9 @@ function build({ kind, actorName, actorEmail, plans, conflicts }) {
     from: { name: `${actorName || '업무'} (업무 대시보드)`, address: c.from },
     // 🔑 답장은 «등록한 사람» 에게 간다. 주소를 하나로 묶은 것을 이걸로 메운다.
     replyTo: actorEmail ? `${actorName} <${actorEmail}>` : undefined,
-    to: c.to,
+    // 🔴 c.to 가 아니라 c.toBoss 다 — 시험 중이면 대표이사 대신 시험 주소로 간다.
+    //   (2026-08-29. 운영에는 MAIL_TO_TEST 가 없어 결국 MAIL_TO 로 떨어진다)
+    to: c.toBoss,
     subject,
     text: body.join('\n'),
   }
