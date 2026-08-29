@@ -18,6 +18,24 @@ param([switch]$Force, [switch]$Test)
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
+# 🔴 PowerShell 5.1 의 함정 — native 명령의 stderr 가 «오류» 로 둔갑한다 (2026-08-29 겪음).
+#    ssh·scp·git 은 진행 상황을 stderr 로 낸다. docker 의 "Image ... Building" 도 그렇다.
+#    그런데 5.1 은 $ErrorActionPreference='Stop' 일 때 그 줄들을 NativeCommandError 로
+#    감싸 «종료 오류» 로 만든다. 실제로 배포가 [3/3] 한복판에서 끊겨,
+#    «전송은 됐는데 빌드는 안 된» 상태로 남았다. 화면에는 오류가 떴지만 컨테이너는
+#    옛것 그대로였다 — 「실패했다」와 「반쯤 됐다」를 구분할 수 없는 것이 가장 나쁘다.
+#
+# 🔑 그래서 native 를 부르는 «그 구간만» Continue 로 낮추고, 성패는 stderr 가 아니라
+#    «종료 코드» 로 판정한다. 그것이 원래 옳은 판정 기준이다.
+#    ⚠ cmdlet 에 대한 Stop 은 그대로 살려 둔다 — 그쪽은 stderr 문제가 없다.
+function Invoke-Native {
+    param([scriptblock]$Command, [string]$What)
+    $saved = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Command } finally { $ErrorActionPreference = $saved }
+    if ($LASTEXITCODE -ne 0) { throw "$What 실패 (exit $LASTEXITCODE)" }
+}
+
 $nas     = 'root@vitron-nas'
 $archive = 'vitron-src.tar.gz'
 
@@ -52,16 +70,14 @@ if ($dirty -and -not $Force) {
 
 $commit = (git rev-parse --short HEAD).Trim()
 Write-Host "[1/3] 압축 (커밋 $commit)" -ForegroundColor Cyan
-git archive --format=tar.gz -o $archive HEAD
+Invoke-Native { git archive --format=tar.gz -o $archive HEAD } '압축'
 
 try {
     Write-Host "[2/3] NAS 전송" -ForegroundColor Cyan
-    scp ".\$archive" "${nas}:$remoteDir/"
-    if ($LASTEXITCODE -ne 0) { throw "전송 실패 (scp exit $LASTEXITCODE)" }
+    Invoke-Native { scp ".\$archive" "${nas}:$remoteDir/" } '전송'
 
     Write-Host "[3/3] 원격 빌드 및 컨테이너 교체" -ForegroundColor Cyan
-    ssh $nas "cd $remoteDir && tar -xzf $archive && ./deploy.sh $project"
-    if ($LASTEXITCODE -ne 0) { throw "원격 배포 실패 (ssh exit $LASTEXITCODE)" }
+    Invoke-Native { ssh $nas "cd $remoteDir && tar -xzf $archive && ./deploy.sh $project" } '원격 배포'
 }
 finally {
     if (Test-Path $archive) { Remove-Item $archive }
