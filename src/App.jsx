@@ -21,7 +21,7 @@ import { getPurchases, addPurchase, setPurchaseStatus,
 import { OUT_TRANSPORTS, TRANSPORT_MAP, OFFICE_PLACE, SLOTS, SLOT_MAP, thS, tdS,
          ymd, today, dayName, mdLabel, addDays, calWeekDays,
          monthGridDays, isSameMonth, shiftMonth,
-         workerColor, vehicleColor, GROUP_BYS, buildGroupRows,
+         workerColor, vehicleColor, VEHICLE_COLORS, GROUP_BYS, buildGroupRows,
          planIcon, planState } from './shared/schedule-core'
 import { ScheduleMonth, ScheduleWeek, ScheduleDay } from './shared/ScheduleCalendar'
 import { Card } from './shared/ui'
@@ -4547,6 +4547,10 @@ const FUEL_TYPES=['가솔린','디젤','LPG','전기']
 function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
   const [adding,setAdding]=useState(false)
   const [form,setForm]=useState({owner_worker_id:'',name:'',plate:'',fuel_type:'가솔린',km_per_liter:''})
+  // 법인차량 양식은 «따로» 둔다 — 하나를 돌려 쓰면 자차를 쓰다 만 값이
+  // 법인차량 등록에 딸려 들어간다 (소유 직원·연비는 법인차량에 없는 칸이다).
+  const [addingCo,setAddingCo]=useState(false)
+  const [coForm,setCoForm]=useState({name:'',plate:'',fuel_type:'가솔린',color:VEHICLE_COLORS[0]})
   const [editingId,setEditingId]=useState(null)
   const [edit,setEdit]=useState({})
   const [busy,setBusy]=useState(false)
@@ -4570,6 +4574,40 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
       setAdding(false); await onChanged()
     }catch(e){showToast('등록 실패: '+e.message)}
     finally{setBusy(false)}
+  }
+
+  // 새 차에 붙일 색 — 팔레트에서 «아직 안 쓴» 색을 고른다.
+  // 🔑 vehicleColor 는 색을 안 정한 차에 «목록 순번» 으로 색을 주므로,
+  //   아무 색이나 고르면 이미 있는 차와 겹쳐 배차표에서 구분이 안 된다.
+  function nextColor(){
+    const used=new Set(vehicles.map(v=>vehicleColor(v,vehicles)))
+    return VEHICLE_COLORS.find(c=>!used.has(c))
+        || VEHICLE_COLORS[vehicles.length%VEHICLE_COLORS.length]
+  }
+
+  // 법인차량 등록 (2026-08-29 신설). 그전에는 화면이 없어 DB 로만 넣을 수 있었다.
+  // ⚠ 받는 칸은 차종·번호판·연료·색 넷뿐이다.
+  //   개인사용 «단가» 는 정산 금액을 그대로 정하는 값이라 정산 화면에서
+  //   대표이사가 채운다 (자차 연비와 같은 이유 — 서버도 PATCH 를 403 으로 막는다).
+  async function addCompany(){
+    if(!coForm.name.trim()){showToast('차종을 입력해 주세요');return}
+    try{
+      setBusy(true)
+      await addVehicle({kind:'company',name:coForm.name.trim(),
+        plate:coForm.plate.trim()||null,
+        fuel_type:coForm.fuel_type||null, color:coForm.color})
+      showToast('법인차량을 등록했습니다')
+      setAddingCo(false); await onChanged()
+    }catch(e){showToast('등록 실패: '+e.message)}
+    finally{setBusy(false)}
+  }
+
+  // 양식을 열 때마다 «그때» 안 쓰는 색을 다시 고른다 — 열어 둔 채로 다른 차가
+  // 등록되면 처음 고른 색이 이미 남의 색이 돼 있을 수 있다.
+  function toggleCoForm(){
+    if(addingCo){setAddingCo(false);return}
+    setCoForm({name:'',plate:'',fuel_type:'가솔린',color:nextColor()})
+    setAddingCo(true)
   }
 
   async function saveEdit(){
@@ -4656,8 +4694,14 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
           <th style={{...thS,width:70}}>연료</th>
           <th style={{...thS,width:88}}>개인사용 단가</th>
           <th style={{...thS,width:112}}>주 사용자</th>
+          <th style={{...thS,width:52}}>관리</th>
         </tr></thead>
         <tbody>
+          {company.length===0&&(
+            <tr><td colSpan={6} style={{...tdS,color:'#6b7280',fontSize:12,padding:'10px 0'}}>
+              등록된 법인차량이 없습니다.
+            </td></tr>
+          )}
           {company.map(v=>(
             <tr key={v.id}>
               <td style={tdS}>
@@ -4669,8 +4713,12 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
                           borderRadius:5,cursor:'pointer',background:'none'}}/>
               </td>
               <td style={{...tdS,textAlign:'left'}}>
-                <strong style={{fontSize:12}}>{v.name}</strong>
-                <div style={{fontSize:10,color:'#6b7280'}}>{v.plate}</div>
+                {/* 🔑 번호판이 «위·큰 글자», 차종이 «아래·작은 글자» 다 (2026-08-29 사용자 지시).
+                    법인차를 가리키는 것은 차종이 아니라 번호판이다 — 카니발이 두 대라
+                    차종만 크게 두면 표에서 어느 차인지 가려낼 수 없다.
+                    ⚠ 번호판은 선택 입력이다. 없으면 큰 줄이 비어 버리므로 차종을 올린다. */}
+                <strong style={{fontSize:12}}>{v.plate||v.name}</strong>
+                {v.plate&&<div style={{fontSize:10,color:'#6b7280'}}>{v.name}</div>}
               </td>
               <td style={tdS}>{fuelCell(v)}</td>
               <td style={tdS}>{v.rate_per_km!=null?`${v.rate_per_km}원/km`:'-'}</td>
@@ -4685,10 +4733,51 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
                   ))}
                 </select>
               </td>
+              <td style={{...tdS,whiteSpace:'nowrap'}}>
+                <button onClick={()=>hide(v)} disabled={busy}
+                  style={{...smallBtn,border:'1px solid #fca5a5',background:'#fff',color:'#dc2626'}}>숨김</button>
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
+
+      <div style={{marginBottom:12}}>
+        <button onClick={toggleCoForm}
+          style={{...smallBtn,border:'1px solid #1a56db',background:'#eff6ff',color:'#1a56db'}}>
+          {addingCo?'취소':'+ 법인차량 등록'}
+        </button>
+      </div>
+
+      {addingCo&&(
+        <div style={{border:'1px dashed #93c5fd',borderRadius:8,padding:12,marginBottom:12,background:'#f8fbff'}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+            <input placeholder="차종 (예: 카니발)" value={coForm.name}
+              onChange={e=>setCoForm({...coForm,name:e.target.value})} style={inputS}/>
+            <input placeholder="번호판 (선택)" value={coForm.plate}
+              onChange={e=>setCoForm({...coForm,plate:e.target.value})} style={inputS}/>
+            <select value={coForm.fuel_type} onChange={e=>setCoForm({...coForm,fuel_type:e.target.value})} style={inputS}>
+              {FUEL_TYPES.map(f=><option key={f} value={f}>{f}</option>)}
+            </select>
+            <label style={{display:'flex',alignItems:'center',gap:8,fontSize:12,color:'#374151'}}>
+              <input type="color" value={coForm.color}
+                onChange={e=>setCoForm({...coForm,color:e.target.value})}
+                style={{width:34,height:26,padding:0,border:'1px solid #e5e7eb',
+                        borderRadius:5,cursor:'pointer',background:'none',flexShrink:0}}/>
+              달력·배차표 색
+            </label>
+          </div>
+          <div style={{fontSize:11,color:'#92400e',margin:'8px 0'}}>
+            <strong>개인사용 단가</strong>는 여기서 받지 않습니다 — 정산 금액을 그대로 정하는 값이라
+            등록 후 <strong>스케줄 → 💰 정산</strong> 화면에서 대표이사가 채웁니다.
+          </div>
+          <button onClick={addCompany} disabled={busy}
+            style={{width:'100%',...smallBtn,padding:'8px',border:'none',background:'#1a56db',color:'#fff',fontSize:12}}>
+            등록
+          </button>
+        </div>
+      )}
+
       <div style={{fontSize:11,color:'#6b7280',marginBottom:16}}>
         법인차량 <strong>단가</strong>와 자차 <strong>연비</strong>는 정산 금액에 직접 영향을 주므로
         <strong> 스케줄 → 💰 정산</strong> 화면의 「차량 단가 · 연비」 에서 <strong>대표이사만</strong> 고칩니다.

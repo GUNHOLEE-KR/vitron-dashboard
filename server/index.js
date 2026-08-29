@@ -749,13 +749,20 @@ app.post('/api/schedule/vehicles', async (req, res) => {
   if (kind === 'own' && !owner_worker_id) {
     return res.status(400).json({ error: '자차는 소유 직원을 지정해 주세요.' })
   }
+  // 색도 등록할 때 함께 받는다 (2026-08-29). 예전에는 여기서 «조용히 버려져»
+  // 등록 화면에서 고른 색이 표에 나타나지 않았다. 검사는 PATCH 와 같은 규칙이다.
+  const color = String(req.body.color || '').trim().toLowerCase()
+  if (color && !/^#[0-9a-f]{6}$/.test(color)) {
+    return res.status(400).json({ error: '색은 #rrggbb 형식이어야 합니다.' })
+  }
   try {
     const { rows } = await pool.query(
       `INSERT INTO schedule_vehicles
-         (kind, name, plate, owner_worker_id, fuel_type, rate_per_km, km_per_liter, memo)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+         (kind, name, plate, owner_worker_id, fuel_type, rate_per_km, km_per_liter, memo, color)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
       [kind || 'company', String(name).trim(), plate || null, owner_worker_id ?? null,
-       fuel_type || null, rate_per_km ?? null, km_per_liter ?? null, memo || null]
+       fuel_type || null, rate_per_km ?? null, km_per_liter ?? null, memo || null,
+       color || null]
     )
     res.json(rows[0])
   } catch (e) {
