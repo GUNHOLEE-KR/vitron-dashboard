@@ -33,6 +33,22 @@ export async function updateWorkerEmail(id, email) {
   }
 }
 
+// 직책. 빈 문자열을 보내면 «직책 없음» 으로 지운다.
+// ⚠ 값은 서버(server/index.js 의 POSITIONS)가 검사한다 — 목록에 없으면 400 이 온다.
+export async function updateWorkerPosition(id, position) {
+  const res = await fetch(`${BASE}/workers/${id}/position`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ position })
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    let message = text
+    try { message = JSON.parse(text).error || text } catch { /* JSON 이 아니면 원문을 쓴다 */ }
+    throw new Error(message)
+  }
+}
+
 // 달력·차트에서 이 사람을 나타내는 색. 빈 문자열을 보내면 «자동 배정» 으로 되돌아간다.
 export async function updateWorkerColor(id, color) {
   const res = await fetch(`${BASE}/workers/${id}/color`, {

@@ -3,7 +3,7 @@ import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, L
          RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
          ComposedChart, XAxis, YAxis, Tooltip, Legend, ReferenceLine, ResponsiveContainer } from 'recharts'
 import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates, updateWorkerEmail,
-         updateWorkerColor } from './repositories/workerRepo'
+         updateWorkerColor, updateWorkerPosition } from './repositories/workerRepo'
 import { getAbsences, addAbsence, removeAbsence } from './repositories/absenceRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
 import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
@@ -304,6 +304,17 @@ function NonZeroTooltip({active,payload,label,unit='h',percent=false}){
 // ⚠ 이 판정이 서버(server/index.js 의 notifyDone)에도 있다. 두 곳인 이유는
 //   화면은 «누르기 전에» 알려 줘야 하고, 실제로 보낼지 말지는 서버가 정하기 때문이다.
 //   문구가 어긋나도 데이터는 서버 판정을 따른다.
+// 직책 — 위가 높다 (2026-08-29 사용자 지시).
+// ⚠ 서버(server/index.js 의 POSITIONS)에도 같은 목록이 있고 «서버가 정본» 이다.
+//   여기만 고치면 저장할 때 400 으로 막힌다.
+// 🔑 KPI 서열(kpi_users.rank_order)과 «별개» 다 — 그쪽은 「누가 누구를 평가하는가」를
+//   정하는 값이라 직책을 밀어 넣으면 평가가 어긋난다 (020 마이그레이션 주석 참고).
+const POSITIONS = ['대표이사', '이사', '부장', '차장', '과장', '대리', '주임', '사원']
+// 「대표이사인가」는 «오직 이 칸» 으로 판정한다 (2026-08-29 사용자 지시).
+// can_approve_settlement 로 판정하면 안 된다 — 지금 그 값이 참인 사람이 둘이다
+// (고광용, 그리고 임시 승인 권한을 받은 이건호).
+const isBoss = w => w?.position === '대표이사'
+
 const willReport = workDate => String(workDate) === today()
 const reportNotice = workDate => willReport(workDate)
   ? '기록하면 대표이사에게 작업 완료 보고 메일이 갑니다.'
@@ -5161,6 +5172,7 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
   const [editResignedAt,setEditResignedAt]=useState('')
   const [editEmail,setEditEmail]=useState('')
   const [editColor,setEditColor]=useState('')
+  const [editPosition,setEditPosition]=useState('')
   const [newJira,setNewJira]=useState('')
   const [newJiraParent,setNewJiraParent]=useState('')
   const [newFixed,setNewFixed]=useState('')
@@ -5183,6 +5195,7 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
     // 아직 정한 적이 없으면 «지금 보이는 색» 을 시작값으로 준다.
     // 빈 칸을 주면 색 고르개가 검정에서 출발해 엉뚱한 색을 저장하기 쉽다.
     setEditColor(w.color||workerColor(w.id,workers))
+    setEditPosition(w.position||'')
     setResigningWorkerId(null)
   }
 
@@ -5196,9 +5209,11 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
       if ((target?.email||'') !== editEmail) await updateWorkerEmail(editingWorkerId, editEmail)
       // 색도 바뀌었을 때만 보낸다. 빈 값이면 «자동 배정» 으로 되돌아간다.
       if ((target?.color||'') !== editColor) await updateWorkerColor(editingWorkerId, editColor)
+      // 직책도 바뀌었을 때만 보낸다. 목록에 없는 값은 서버가 400 으로 막는다.
+      if ((target?.position||'') !== editPosition) await updateWorkerPosition(editingWorkerId, editPosition)
       setWorkers(workers.map(w => w.id===editingWorkerId
         ? {...w, hired_at:editHiredAt||null, resigned_at:editResignedAt||null,
-           email:editEmail||null, color:editColor||null}
+           email:editEmail||null, color:editColor||null, position:editPosition||null}
         : w))
       showToast(label+' 정보 수정 완료')
       setEditingWorkerId(null)
@@ -5314,6 +5329,23 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
                         background:workerColor(w.id,workers),
                         border:'1px solid rgba(0,0,0,.15)'}}/>
                     <span style={{fontWeight:600}}>{w.name}</span>
+                    {/* 직책 — 대표이사는 눈에 띄게 둔다. 「대표이사로 등록한 사람만
+                        대표이사로 처리」하므로, 누가 그 자리인지 한눈에 보여야 한다. */}
+                    {w.position&&(
+                      <span style={{fontSize:11,padding:'2px 8px',borderRadius:10,fontWeight:700,
+                        background:isBoss(w)?'#eef2ff':'#f3f4f6',
+                        color:isBoss(w)?'#3730a3':'#4b5563',
+                        border:`1px solid ${isBoss(w)?'#c7d2fe':'#e5e7eb'}`}}>
+                        {w.position}
+                      </span>
+                    )}
+                    {!w.position&&w.active&&(
+                      <span title="정보수정에서 직책을 골라 주십시오"
+                        style={{fontSize:11,padding:'2px 8px',borderRadius:10,fontWeight:600,
+                          background:'#fffbeb',color:'#92400e',border:'1px solid #fcd34d'}}>
+                        직책 없음
+                      </span>
+                    )}
                     {dupNames.has(w.name)&&(
                       <span title="같은 이름의 직원이 둘 이상 있어 입사일로 구분합니다"
                         style={{fontSize:10,padding:'2px 6px',borderRadius:8,background:'#fffbeb',color:'#92400e',border:'1px solid #fcd34d'}}>
@@ -5360,6 +5392,14 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
                       <div style={{fontSize:11,color:'#6b7280',marginBottom:4}}>퇴사일 (없으면 비워두세요)</div>
                       <input type="date" value={editResignedAt} onChange={e=>setEditResignedAt(e.target.value)}
                         style={{padding:'6px 10px',border:'1px solid #fca5a5',borderRadius:6,fontSize:13}}/>
+                    </div>
+                    <div>
+                      <div style={{fontSize:11,color:'#6b7280',marginBottom:4}}>직책</div>
+                      <select value={editPosition} onChange={e=>setEditPosition(e.target.value)}
+                        style={{padding:'6px 10px',border:'1px solid #7dd3fc',borderRadius:6,fontSize:13,minWidth:110}}>
+                        <option value="">직책 없음</option>
+                        {POSITIONS.map(p=><option key={p} value={p}>{p}</option>)}
+                      </select>
                     </div>
                     <div style={{flex:'1 1 200px',minWidth:180}}>
                       <div style={{fontSize:11,color:'#6b7280',marginBottom:4}}>회사 메일 주소 (KPI 로그인 아이디)</div>

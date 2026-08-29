@@ -110,6 +110,31 @@ app.patch('/api/workers/:id/color', async (req, res) => {
   }
 })
 
+// 직책 (2026-08-29 신설). 여덟 단계 중 하나이거나 «비움» 이다.
+// 🔑 KPI 서열(kpi_users.rank_order)과 «별개» 다 — 그쪽은 「누가 누구를 평가하는가」와
+//    「어느 평가 양식을 쓰는가」를 정하는 값이라, 직책을 밀어 넣으면 평가가 어긋난다.
+//    자세한 까닭은 db/migrations/020-worker-position.sql 에 적어 두었다.
+// ⚠ 이 목록은 화면(src/App.jsx 의 POSITIONS)에도 있다. 둘은 같아야 한다.
+//   서버가 정본이다 — 화면을 고쳐도 여기서 막힌다.
+const POSITIONS = ['대표이사', '이사', '부장', '차장', '과장', '대리', '주임', '사원']
+
+app.patch('/api/workers/:id/position', async (req, res) => {
+  const raw = String(req.body?.position || '').trim()
+  // 빈 값은 «직책 없음» 이다. 목록에 없는 값만 막는다.
+  if (raw && !POSITIONS.includes(raw)) {
+    return res.status(400).json({ error: `직책은 ${POSITIONS.join(' · ')} 중 하나여야 합니다.` })
+  }
+  try {
+    const { rowCount } = await pool.query(
+      'UPDATE workers SET position = $1 WHERE id = $2', [raw || null, req.params.id]
+    )
+    if (rowCount === 0) return res.status(404).json({ error: '해당 직원을 찾을 수 없습니다.' })
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 app.patch('/api/workers/:id/email', async (req, res) => {
   const { email } = req.body
   const value = String(email || '').trim()
