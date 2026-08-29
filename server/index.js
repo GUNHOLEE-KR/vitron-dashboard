@@ -6,6 +6,7 @@ const cors = require('cors')
 
 // DATE 타입을 JS Date 객체가 아닌 YYYY-MM-DD 문자열로 반환
 const mailer = require('./mailer')
+const mailcred = require('./mailcred')
 const { types } = require('pg')
 types.setTypeParser(1082, val => val)
 
@@ -1001,6 +1002,8 @@ async function notifyVehicle(kind, planId, req, batchId, conflicts) {
       batchId,
       // 답장은 «등록한 사람» 에게 간다. session.login 이 회사 메일 주소다.
       actor: { name: req.session?.name, email: req.session?.login },
+      // 등록해 두었으면 «본인 주소» 로 나간다. 없으면 공용 계정이다 (2026-08-29).
+      sender: await senderFor(req.session?.uid),
     })
   } catch (e) {
     console.error(`[mail] notifyVehicle(${kind}) :: ${e.message}`)
@@ -1017,6 +1020,7 @@ async function notifyVacationPlan(kind, planId, req, batchId) {
     mailer.notifyVacation({
       kind, plans: rows[0], batchId,
       actor: { name: req.session?.name, email: req.session?.login },
+      sender: await senderFor(req.session?.uid),
     })
   } catch (e) {
     console.error(`[mail] notifyVacationPlan(${kind}) :: ${e.message}`)
@@ -1093,15 +1097,16 @@ app.delete('/api/schedule/plans/:id', async (req, res) => {
     if (rowCount === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
     if (doomed) {
       const actor = { name: req.session?.name, email: req.session?.login }
+      const sender = await senderFor(req.session?.uid)
       if (doomed.use_type === 'vacation') {
         // 🔑 휴가 취소는 «신청을 물린다» 는 뜻이라 대표이사에게 알려야 한다.
         //    ⚠ 이미 반려된 건은 알리지 않는다 — 대표이사가 이미 아는 일이고,
         //    반려당한 사람이 그 줄을 지웠다고 다시 메일이 가면 성가시기만 하다.
         if (doomed.approval !== 'rejected') {
-          mailer.notifyVacation({ kind: 'cancel', plans: doomed, actor })
+          mailer.notifyVacation({ kind: 'cancel', plans: doomed, actor, sender })
         }
       } else {
-        mailer.notify({ kind: 'delete', plans: doomed, actor })
+        mailer.notify({ kind: 'delete', plans: doomed, actor, sender })
       }
     }
     res.json({ ok: true })
@@ -1162,6 +1167,9 @@ async function notifyVacationResult(kind, planId, req, reason) {
     mailer.notifyVacation({
       kind, plans: rows[0], to, reason,
       actor: { name: req.session?.name, email: req.session?.login },
+      // 승인·반려는 «대표이사» 가 보내는 것이다. 그분은 등록 예외라 보통 null 이고,
+      // 그러면 예전처럼 공용 주소로 나간다.
+      sender: await senderFor(req.session?.uid),
     })
   } catch (e) {
     console.error(`[mail] notifyVacationResult(${kind}) :: ${e.message}`)
@@ -1305,6 +1313,7 @@ async function notifyPurchaseById(kind, id, req, reason) {
     mailer.notifyPurchase({
       kind, purchase: p, to, reason,
       actor: { name: req.session?.name, email: req.session?.login },
+      sender: await senderFor(req.session?.uid),
     })
   } catch (e) {
     console.error(`[mail] notifyPurchaseById(${kind}) :: ${e.message}`)
@@ -1503,6 +1512,7 @@ async function notifyDone(actualId, req) {
     mailer.notifyDone({
       actual: a,
       actor: { name: req.session?.name, email: req.session?.login },
+      sender: await senderFor(req.session?.uid),
       onResult: ok => markReport(actualId, ok ? new Date() : null, ok ? null : 'failed')
         .catch(e => console.error(`[mail] markReport(${actualId}) :: ${e.message}`)),
     })
@@ -1722,6 +1732,113 @@ async function canApprove(uid) {
   return !!rows[0]?.can_approve_settlement
 }
 
+// ── 사람마다 자기 주소로 보내기 (2026-08-29 신설) ─────────────
+// 🔑 「대표이사인가」는 «오직 workers.position» 으로 판정한다 (2026-08-29 사용자 지시).
+//    can_approve_settlement 로 판정하면 안 된다 — 지금 그 값이 참인 사람이 둘이다
+//    (고광용, 그리고 임시 승인 권한을 받은 이건호). 그걸 쓰면 이건호도 예외가 된다.
+async function isBossUser(uid) {
+  const { rows } = await pool.query(
+    `SELECT w.position FROM kpi_users u
+       JOIN workers w ON w.id = u.worker_id
+      WHERE u.id = $1`, [uid])
+  return rows[0]?.position === '대표이사'
+}
+
+// 이 사람의 SMTP 접속 정보. 없으면 null 이고, 그러면 공용 계정으로 나간다.
+// ⚠ 복호화가 실패하면(열쇠가 바뀌었거나 값이 고쳐졌으면) null 을 준다 —
+//   메일 한 통 때문에 저장·승인 같은 «본래 하던 일» 이 멈추면 안 된다.
+async function senderFor(uid) {
+  try {
+    const { rows } = await pool.query(
+      `SELECT m.smtp_user, m.secret, u.login_id
+         FROM mail_senders m JOIN kpi_users u ON u.id = m.user_id
+        WHERE m.user_id = $1`, [uid])
+    if (!rows.length) return null
+    return {
+      smtpUser: rows[0].smtp_user,
+      pass: mailcred.open(rows[0].secret),
+      address: rows[0].login_id,          // 로그인 아이디가 곧 회사 메일 주소다
+    }
+  } catch (e) {
+    console.error(`[mail] senderFor(${uid}) :: ${e.message}`)
+    return null
+  }
+}
+
+// 등록해야 하는데 아직 안 한 사람인가. 화면이 로그인 직후 이 값으로 등록을 강제한다.
+// ⚠ 대표이사는 예외다 (사용자 지시). 그분이 보내는 승인·반려는 공용 주소로 나간다.
+async function needsMailPassword(uid) {
+  if (!mailcred.isReady()) return false     // 열쇠가 없으면 등록을 받을 수 없다
+  if (await isBossUser(uid)) return false
+  const { rows } = await pool.query('SELECT 1 FROM mail_senders WHERE user_id = $1', [uid])
+  return rows.length === 0
+}
+
+// 내 발송 계정 — 등록 여부만 알려 준다. 비밀번호는 «되돌려 주지 않는다».
+app.get('/api/mail-sender/me', async (req, res) => {
+  const session = sessionOf(req)
+  if (!session) return res.status(401).json({ error: '로그인이 필요합니다.' })
+  try {
+    const { rows } = await pool.query(
+      'SELECT smtp_user, updated_at FROM mail_senders WHERE user_id = $1', [session.uid])
+    res.json({
+      ready: mailcred.isReady(),
+      exempt: await isBossUser(session.uid),
+      registered: rows.length > 0,
+      smtp_user: rows[0]?.smtp_user || null,
+      updated_at: rows[0]?.updated_at || null,
+      address: session.login,
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 등록·변경. 🔑 저장하기 «전에» 실제로 접속해 본다 — 틀린 값이 조용히 들어가면
+//    그 사람의 보고만 계속 실패하는데 아무도 모른다.
+app.put('/api/mail-sender/me', async (req, res) => {
+  const session = sessionOf(req)
+  if (!session) return res.status(401).json({ error: '로그인이 필요합니다.' })
+  const smtpUser = String(req.body?.smtp_user || '').trim()
+  const password = String(req.body?.password || '')
+  if (!smtpUser || !password) {
+    return res.status(400).json({ error: '접속 아이디와 앱 비밀번호를 모두 입력해 주세요.' })
+  }
+  if (!mailcred.isReady()) {
+    return res.status(500).json({ error: 'MAIL_CRED_KEY 가 서버에 없어 등록할 수 없습니다. 관리자에게 알려 주세요.' })
+  }
+  try {
+    const check = await mailer.verifyLogin(smtpUser, password)
+    if (!check.ok) {
+      return res.status(400).json({
+        error: `메일 서버 접속에 실패했습니다 — ${check.error}\n`
+             + '아이디가 «메일 주소»가 아니라 «접속 아이디»인지, 비밀번호가 «앱 비밀번호»인지 확인해 주세요.'
+      })
+    }
+    await pool.query(
+      `INSERT INTO mail_senders (user_id, smtp_user, secret, updated_at)
+       VALUES ($1, $2, $3, now())
+       ON CONFLICT (user_id) DO UPDATE
+         SET smtp_user = EXCLUDED.smtp_user, secret = EXCLUDED.secret, updated_at = now()`,
+      [session.uid, smtpUser, mailcred.seal(password)])
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 지우면 그 사람의 메일은 다시 공용 주소로 나간다 (보고가 멈추지는 않는다).
+app.delete('/api/mail-sender/me', async (req, res) => {
+  const session = sessionOf(req)
+  if (!session) return res.status(401).json({ error: '로그인이 필요합니다.' })
+  try {
+    await pool.query('DELETE FROM mail_senders WHERE user_id = $1', [session.uid])
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 app.post('/api/auth/login', async (req, res) => {
   const loginId = String(req.body?.login_id || '').trim().toLowerCase()
   const password = String(req.body?.password || '')
@@ -1750,6 +1867,8 @@ app.post('/api/auth/login', async (req, res) => {
       login_id: user.login_id, name: user.display_name, role: user.role,
       worker_id: user.worker_id, must_change_password: user.must_change_password,
       can_approve: await canApprove(user.id),
+      // 등록해야 하는데 아직 안 했으면 화면이 등록부터 받는다 (2026-08-29 사용자 지시).
+      need_mail_password: await needsMailPassword(user.id),
     })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -1772,6 +1891,9 @@ app.get('/api/auth/me', async (req, res) => {
       role: session.role, worker_id: session.workerId,
       must_change_password: session.mustChange,
       can_approve: await canApprove(session.uid),
+      // ⚠ 세션 쿠키에 담지 않고 «매번 DB 를 본다». 등록을 마치면 새로고침만으로
+      //   게이트가 풀려야 하는데, 쿠키에 넣으면 다시 로그인할 때까지 남는다.
+      need_mail_password: await needsMailPassword(session.uid),
     })
   } catch (e) {
     res.status(500).json({ error: e.message })

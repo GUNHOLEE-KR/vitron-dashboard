@@ -4,6 +4,7 @@ import { BarChart, Bar, PieChart, Pie, Cell, LineChart, Line, AreaChart, Area, L
          ComposedChart, XAxis, YAxis, Tooltip, Legend, ReferenceLine, ResponsiveContainer } from 'recharts'
 import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates, updateWorkerEmail,
          updateWorkerColor, updateWorkerPosition } from './repositories/workerRepo'
+import { getMyMailSender, saveMyMailSender, removeMyMailSender } from './repositories/mailSenderRepo'
 import { getAbsences, addAbsence, removeAbsence } from './repositories/absenceRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
 import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
@@ -990,6 +991,13 @@ export default function App(){
   // 임시 비밀번호 계정은 들여보내지 않는다. 비밀번호를 다루는 코드가 두 벌이 되면
   // 반드시 어긋나므로 «바꾸는 곳» 은 KPI 하나로 둔다 (서버도 같은 규칙으로 막는다).
   if(me.must_change_password) return <NeedPasswordScreen me={me} onBack={()=>setMe({logged_in:false})}/>
+  // 메일 발송 계정을 등록해야 들어간다 (2026-08-29 사용자 지시).
+  // 🔑 보내는 사람이 «본인 주소» 여야 한다는 요구를 지키려면 각자의 앱 비밀번호가
+  //    필요한데, 등록을 «권함» 으로 두면 아무도 하지 않는다. 그래서 문 앞에서 받는다.
+  // ⚠ 대표이사는 예외라 서버가 need_mail_password 를 false 로 준다.
+  if(me.need_mail_password) return <NeedMailPasswordScreen me={me}
+    onDone={()=>setMe({...me,need_mail_password:false})}
+    onBack={()=>setMe({logged_in:false})}/>
   // key 를 걸어 계정이 바뀌면 화면 상태가 남지 않고 처음부터 다시 그려진다
   return <Dashboard key={me.login_id} me={me} onLoggedOut={()=>setMe({logged_in:false})}/>
 }
@@ -1072,6 +1080,95 @@ function NeedPasswordScreen({me,onBack}){
             color:'#fff',textDecoration:'none',fontSize:14,fontWeight:700}}>
           KPI 추적 시스템 열기 (:8083)
         </a>
+        <button onClick={onBack}
+          style={{width:'100%',marginTop:10,padding:'10px',borderRadius:8,border:'1px solid #e5e7eb',
+            background:'#fff',cursor:'pointer',fontSize:13,color:'#6b7280'}}>
+          다른 계정으로 로그인
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// 앱 비밀번호를 받는 칸. 로그인 게이트와 설정 카드가 «같은 것» 을 쓴다 —
+// 두 벌로 두면 안내 문구가 갈라지고, 한쪽만 고치게 된다.
+// ⚠ 아이디와 주소가 다르다. 다음은 gunholee76 으로 접속하고 메일에는
+//   gunholee@vi-tron.com 이 찍힌다. 이걸 모르면 주소를 넣고 계속 실패한다.
+function MailSenderForm({address,initialUser,busy,onSubmit,submitLabel}){
+  const [smtpUser,setSmtpUser]=useState(initialUser||'')
+  const [password,setPassword]=useState('')
+  const inputS={width:'100%',boxSizing:'border-box',padding:'10px 12px',
+    border:'1px solid #e5e7eb',borderRadius:8,fontSize:14}
+  const canGo=smtpUser.trim()&&password&&!busy
+  return(
+    <>
+      <div style={{marginBottom:10}}>
+        <div style={{fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:4}}>
+          접속 아이디 <span style={{color:'#b91c1c'}}>(메일 주소가 아닙니다)</span>
+        </div>
+        <input value={smtpUser} onChange={e=>setSmtpUser(e.target.value)}
+          placeholder="예: gunholee76" style={inputS} autoComplete="off"/>
+        <div style={{fontSize:11,color:'#9ca3af',marginTop:4}}>
+          메일에 찍히는 주소는 <strong>{address}</strong> 입니다.
+        </div>
+      </div>
+      <div style={{marginBottom:12}}>
+        <div style={{fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:4}}>
+          앱 비밀번호 <span style={{color:'#b91c1c'}}>(로그인 비밀번호가 아닙니다)</span>
+        </div>
+        <input type="password" value={password} onChange={e=>setPassword(e.target.value)}
+          onKeyDown={e=>e.key==='Enter'&&canGo&&onSubmit(smtpUser.trim(),password)}
+          placeholder="다음 메일에서 발급받은 16자리" style={inputS} autoComplete="new-password"/>
+      </div>
+      <button onClick={()=>onSubmit(smtpUser.trim(),password)} disabled={!canGo}
+        style={{width:'100%',padding:'12px',borderRadius:8,border:'none',
+          background:canGo?'#1a56db':'#cbd5e1',color:'#fff',fontSize:14,fontWeight:700,
+          cursor:canGo?'pointer':'default'}}>
+        {busy?'메일 서버에 접속해 보는 중…':(submitLabel||'등록')}
+      </button>
+    </>
+  )
+}
+
+// 앱 비밀번호 발급 안내. 두 화면에서 같은 글을 쓴다.
+function MailSenderHelp(){
+  return(
+    <div style={{fontSize:11,color:'#6b7280',lineHeight:1.9,background:'#f9fafb',
+      border:'1px solid #e5e7eb',borderRadius:8,padding:'10px 12px',marginTop:12}}>
+      <strong>앱 비밀번호 받는 곳</strong> — 다음 메일 → 환경설정 → <strong>IMAP/SMTP</strong> →
+      「앱 비밀번호」 발급. 평소 로그인 비밀번호로는 접속이 막힙니다.
+      <br/>비밀번호는 <strong>암호화해서 보관</strong>하고 화면에 다시 보여 주지 않습니다.
+      바꾸시려면 새로 넣으시면 됩니다.
+    </div>
+  )
+}
+
+// 로그인 게이트 — 등록하지 않으면 들어갈 수 없다 (2026-08-29 사용자 지시).
+// ⚠ 대표이사는 서버가 need_mail_password 를 false 로 주므로 여기까지 오지 않는다.
+function NeedMailPasswordScreen({me,onDone,onBack}){
+  const [busy,setBusy]=useState(false)
+  const [err,setErr]=useState('')
+  async function submit(smtpUser,password){
+    setErr(''); setBusy(true)
+    try{ await saveMyMailSender(smtpUser,password); onDone() }
+    catch(e){ setErr(e.message) }
+    finally{ setBusy(false) }
+  }
+  return(
+    <div style={{minHeight:'100vh',background:'#f5f5f0',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:12,width:'100%',maxWidth:440,padding:28}}>
+        <div style={{fontSize:17,fontWeight:700,marginBottom:10}}>메일 발송 설정을 먼저 해 주십시오</div>
+        <p style={{fontSize:13,color:'#374151',lineHeight:1.9,margin:'0 0 16px'}}>
+          <strong>{me.name}</strong> 님이 하신 일(작업 완료·휴가·구매·차량 예약)은
+          이제 <strong>{me.login_id}</strong> 에서 나갑니다. 그러려면 본인 계정으로
+          메일 서버에 접속해야 해서 <strong>앱 비밀번호</strong>가 필요합니다.
+        </p>
+        {err&&(
+          <div style={{fontSize:12,color:'#b91c1c',background:'#fef2f2',border:'1px solid #fecaca',
+            borderRadius:8,padding:'10px 12px',marginBottom:12,whiteSpace:'pre-line'}}>{err}</div>
+        )}
+        <MailSenderForm address={me.login_id} busy={busy} onSubmit={submit} submitLabel="등록하고 들어가기"/>
+        <MailSenderHelp/>
         <button onClick={onBack}
           style={{width:'100%',marginTop:10,padding:'10px',borderRadius:8,border:'1px solid #e5e7eb',
             background:'#fff',cursor:'pointer',fontSize:13,color:'#6b7280'}}>
@@ -4913,6 +5010,100 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
 // 차량 알림 메일이 살아 있는가 (2026-08-25 신설)
 // 🔑 이 기능의 가장 큰 위험은 «조용히 멈추는 것» 이다 — 앱 비밀번호를 바꾸면
 //    아무 증상 없이 메일만 안 간다. 그래서 마지막 결과를 늘 보이게 둔다.
+// 내 메일 발송 설정 (2026-08-29 신설). 게이트를 지난 뒤에 바꾸거나 지우는 자리다.
+// 🔑 비밀번호는 «되돌려 주지 않는다» — 등록됐다는 사실과 아이디만 보여 준다.
+//    다시 볼 수 있게 두면 그 화면을 여는 것만으로 남의 비밀번호가 새어 나간다.
+function MyMailSenderCard(){
+  const [st,setSt]=useState(null)
+  const [editing,setEditing]=useState(false)
+  const [busy,setBusy]=useState(false)
+  const [err,setErr]=useState('')
+  const [msg,setMsg]=useState('')
+
+  const reload=()=>getMyMailSender().then(setSt).catch(()=>setSt({error:true}))
+  useEffect(()=>{ reload() },[])
+  if(!st) return null
+
+  async function submit(smtpUser,password){
+    setErr(''); setMsg(''); setBusy(true)
+    try{
+      await saveMyMailSender(smtpUser,password)
+      setMsg('등록했습니다. 이제 보내는 사람이 본인 주소로 나갑니다.')
+      setEditing(false); await reload()
+    }catch(e){ setErr(e.message) }
+    finally{ setBusy(false) }
+  }
+  async function drop(){
+    if(!confirm('등록을 지울까요?\n\n지우면 메일이 다시 «공용 주소» 로 나갑니다.\n(보고가 멈추지는 않습니다)'))return
+    setErr(''); setMsg(''); setBusy(true)
+    try{ await removeMyMailSender(); setMsg('지웠습니다.'); await reload() }
+    catch(e){ setErr(e.message) }
+    finally{ setBusy(false) }
+  }
+
+  return(
+    <Card title="내 메일 발송 설정" style={{flex:1,minWidth:340}}>
+      {st.error?(
+        <div style={{fontSize:12,color:'#b91c1c'}}>상태를 읽지 못했습니다.</div>
+      ):st.exempt?(
+        <div style={{fontSize:12,color:'#6b7280',lineHeight:1.9}}>
+          <strong>대표이사</strong>는 등록하지 않으셔도 됩니다. 승인·반려 메일은
+          회사 공용 주소로 나갑니다.
+        </div>
+      ):(
+        <>
+          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10,flexWrap:'wrap'}}>
+            <span style={{padding:'2px 9px',borderRadius:9,fontSize:11,fontWeight:700,color:'#fff',
+              background:st.registered?'#0d7a4e':'#b45309'}}>
+              {st.registered?'등록됨':'등록 안 됨'}
+            </span>
+            <span style={{fontSize:12,color:'#6b7280'}}>
+              {st.registered
+                ?<>보내는 사람 <strong>{st.address}</strong> · 접속 아이디 <strong>{st.smtp_user}</strong></>
+                :<>지금은 회사 공용 주소로 나갑니다.</>}
+            </span>
+          </div>
+          {err&&(
+            <div style={{fontSize:12,color:'#b91c1c',background:'#fef2f2',border:'1px solid #fecaca',
+              borderRadius:8,padding:'10px 12px',marginBottom:10,whiteSpace:'pre-line'}}>{err}</div>
+          )}
+          {msg&&(
+            <div style={{fontSize:12,color:'#0d7a4e',background:'#f0fdf4',border:'1px solid #bbf7d0',
+              borderRadius:8,padding:'10px 12px',marginBottom:10}}>{msg}</div>
+          )}
+          {editing?(
+            <>
+              <MailSenderForm address={st.address} initialUser={st.smtp_user} busy={busy}
+                onSubmit={submit} submitLabel="저장"/>
+              <button onClick={()=>{setEditing(false);setErr('')}} disabled={busy}
+                style={{width:'100%',marginTop:8,padding:'9px',borderRadius:8,
+                  border:'1px solid #e5e7eb',background:'#fff',cursor:'pointer',fontSize:13,color:'#6b7280'}}>
+                취소
+              </button>
+              <MailSenderHelp/>
+            </>
+          ):(
+            <div style={{display:'flex',gap:8}}>
+              <button onClick={()=>{setEditing(true);setMsg('')}} disabled={busy}
+                style={{flex:1,padding:'9px',borderRadius:8,border:'none',background:'#1a56db',
+                  color:'#fff',cursor:'pointer',fontSize:13,fontWeight:700}}>
+                {st.registered?'다시 등록 (비밀번호 변경)':'등록하기'}
+              </button>
+              {st.registered&&(
+                <button onClick={drop} disabled={busy}
+                  style={{padding:'9px 14px',borderRadius:8,border:'1px solid #fca5a5',
+                    background:'#fff',cursor:'pointer',fontSize:13,color:'#dc2626',fontWeight:700}}>
+                  지우기
+                </button>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </Card>
+  )
+}
+
 function MailStatusCard(){
   const [st,setSt]=useState(null)
   useEffect(()=>{ getMailStatus().then(setSt).catch(()=>setSt({error:true})) },[])
@@ -5313,6 +5504,7 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
       </div>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <MailStatusCard/>
+        <MyMailSenderCard/>
       </div>
       <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
         <Card title="직원 관리" style={{flex:1,minWidth:300}}>
