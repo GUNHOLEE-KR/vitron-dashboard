@@ -5173,6 +5173,10 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
   const [editEmail,setEditEmail]=useState('')
   const [editColor,setEditColor]=useState('')
   const [editPosition,setEditPosition]=useState('')
+  // 퇴사자는 기본으로 감춘다 (2026-08-29 사용자 지시). 목록의 대부분이 «지금 일하는
+  // 사람» 을 찾는 일인데, 퇴사자가 섞여 있으면 매번 눈으로 걸러야 한다.
+  // ⚠ 지우는 것이 아니라 «감추는» 것이다. 체크하면 그대로 다시 보인다.
+  const [showResigned,setShowResigned]=useState(false)
   const [newJira,setNewJira]=useState('')
   const [newJiraParent,setNewJiraParent]=useState('')
   const [newFixed,setNewFixed]=useState('')
@@ -5249,6 +5253,14 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
     }catch(e){showToast('변경 실패: '+e.message)}
   }
 
+  // 퇴사자를 감춘 목록. 「퇴사자 포함」을 켜면 전부 보인다.
+  // ⚠ 퇴사 처리 중인 사람은 «감추지 않는다» — 퇴사일을 고르는 패널이 그 줄 안에 있어,
+  //   확인을 누르기도 전에 줄이 사라지면 처리를 마칠 수 없다.
+  const resignedCount=workers.filter(w=>!w.active).length
+  const shownWorkers=showResigned
+    ? workers
+    : workers.filter(w=>w.active||w.id===resigningWorkerId)
+
   async function handleDelWorker(w){
     const label=workerLabel(w,dupNames)
     if(!confirm(label+' 완전 삭제합니까?\n(업무 기록은 그대로 남습니다)'))return
@@ -5313,11 +5325,29 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
               style={{flex:'1 1 180px',minWidth:160,padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
             <button onClick={handleAddWorker} style={{padding:'7px 14px',borderRadius:7,border:'none',background:'#1a56db',color:'#fff',cursor:'pointer',fontWeight:600}}>추가</button>
           </div>
-          <div style={{fontSize:11,color:'#6b7280',marginBottom:12}}>
+          <div style={{fontSize:11,color:'#6b7280',marginBottom:10}}>
             직원명 + 입사일 + 메일 주소 입력 후 추가 — 메일 주소는 KPI 추적 시스템의 로그인 아이디로 쓰입니다
           </div>
 
-          {workers.map(w=>(
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',
+            gap:8,marginBottom:10,flexWrap:'wrap'}}>
+            <span style={{fontSize:12,fontWeight:700,color:'#374151'}}>
+              재직 {workers.filter(w=>w.active).length}명
+              {resignedCount>0&&(
+                <span style={{fontWeight:600,color:'#9ca3af'}}> · 퇴사 {resignedCount}명</span>
+              )}
+            </span>
+            {resignedCount>0&&(
+              <label style={{display:'flex',alignItems:'center',gap:5,cursor:'pointer',
+                fontSize:12,color:'#6b7280'}}>
+                <input type="checkbox" checked={showResigned}
+                  onChange={e=>setShowResigned(e.target.checked)}/>
+                퇴사자 포함
+              </label>
+            )}
+          </div>
+
+          {shownWorkers.map(w=>(
             <div key={w.id} style={{border:'1px solid #e5e7eb',borderRadius:8,marginBottom:6,overflow:'hidden'}}>
 
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:w.active?'#fff':'#f9fafb'}}>
