@@ -5333,9 +5333,6 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
             gap:8,marginBottom:10,flexWrap:'wrap'}}>
             <span style={{fontSize:12,fontWeight:700,color:'#374151'}}>
               재직 {workers.filter(w=>w.active).length}명
-              {resignedCount>0&&(
-                <span style={{fontWeight:600,color:'#9ca3af'}}> · 퇴사 {resignedCount}명</span>
-              )}
             </span>
             {resignedCount>0&&(
               <label style={{display:'flex',alignItems:'center',gap:5,cursor:'pointer',
