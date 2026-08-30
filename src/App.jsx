@@ -1029,6 +1029,34 @@ function TokenExpiryBanner({status}){
 // 메일 발송 설정을 «이번 세션에» 건너뛰었나. 창을 닫으면 지워진다.
 const SKIP_KEY='vitron_mail_setup_skipped'
 
+// ── 의견 보내기 위젯 붙이기 (2026-08-29 신설) ────────────────
+// 우측 아래 💬 아이콘 — 에러·불편한 점·기능 추가를 적어 보낸다.
+//
+// 🔑 index.html 에 script 를 박지 않고 «로그인한 뒤» 붙인다.
+//    위젯은 data-user 를 «읽는 그 순간» 한 번만 본다. 정적으로 박아 두면 이름이
+//    비어 있어, 보내는 사람마다 손으로 다시 적어야 한다.
+// 🔑 위젯 자체는 vitron-feedback(:8086)이 내려 준다. 한 곳에서 고치면 대시보드·KPI·
+//    RTDB 가 함께 바뀐다 — 제품마다 복사해 두면 문구 하나에 전부 다시 배포해야 한다.
+// ⚠ 위젯이 스스로 두 번 붙는 것을 막지만(window.__vitronFeedbackLoaded),
+//   여기서도 한 번 더 본다. React 가 개발 모드에서 effect 를 두 번 부르기 때문이다.
+const FEEDBACK_SRC='http://vitron-nas:8086/widget.js'
+function useFeedbackWidget(product,userName){
+  useEffect(()=>{
+    if(!userName) return
+    if(document.getElementById('vitron-feedback-widget')) return
+    const s=document.createElement('script')
+    s.id='vitron-feedback-widget'
+    s.src=FEEDBACK_SRC
+    s.async=true
+    s.dataset.product=product
+    s.dataset.user=userName
+    // ⚠ 실패해도 아무 일도 하지 않는다. 의견 위젯이 안 떴다고 업무 화면이
+    //   흔들리면 안 된다 (:8086 이 잠깐 내려가 있을 수 있다).
+    s.onerror=()=>console.warn('[feedback] 위젯을 불러오지 못했습니다:',FEEDBACK_SRC)
+    document.body.appendChild(s)
+  },[product,userName])
+}
+
 export default function App(){
   const [me,setMe]=useState(null)        // null = 아직 확인 전
   const [checking,setChecking]=useState(true)
@@ -1256,6 +1284,8 @@ function NeedMailPasswordScreen({me,onDone,onSkip,onBack}){
 }
 
 function Dashboard({me,onLoggedOut}){
+  // 우측 아래 💬 의견 보내기. 로그인한 뒤라 이름이 자동으로 채워진다.
+  useFeedbackWidget('업무 현황 대시보드', me?.name)
   // 주소에 적힌 탭으로 연다. 없으면 늘 보던 「오늘 업무」.
   const [tab,setTab]=useState(()=>parseHash()?.tab||'today')
   // 스케줄 탭 «안의 보기» — 포털의 「휴가」 타일이 #schedule/vac 으로 들어온다
@@ -5124,7 +5154,11 @@ function MyMailSenderCard(){
   }
 
   return(
-    <Card title="내 메일 발송 설정" style={{flex:1,minWidth:340}}>
+    <Card title="내 메일 발송 계정" style={{flex:1,minWidth:340}}>
+      <div style={{fontSize:12,color:'#6b7280',lineHeight:1.8,marginBottom:10}}>
+        <strong>내가 한 일</strong>(작업 완료·휴가·구매·차량 예약)을 <strong>내 주소에서</strong>
+        보내기 위한 설정입니다. 여기 등록한 것은 <strong>나에게만</strong> 적용됩니다.
+      </div>
       {st.error?(
         <div style={{fontSize:12,color:'#b91c1c'}}>상태를 읽지 못했습니다.</div>
       ):st.exempt?(
@@ -5212,7 +5246,6 @@ function MailStatusCard(){
             <div><b>마지막 발송</b> — {st.at||'없음'}</div>
             <div>{st.detail}</div>
           </div>
-          <MailAccountBox onChanged={()=>getMailStatus().then(setSt).catch(()=>{})}/>
           <div style={{fontSize:11,color:'#9ca3af',marginTop:6,lineHeight:1.7}}>
             보낸사람은 <b>등록한 직원 이름</b>으로 보이고, <b>답장하면 그 직원에게</b> 갑니다.
             받는 쪽에서는 제목의 <code>[차량]</code> 으로 거르시면 됩니다.
@@ -5226,13 +5259,20 @@ function MailStatusCard(){
   )
 }
 
-// 공용 메일 계정 — 「메일 계정 설정」 단추와 그 창 (2026-08-29 신설).
+// 회사 공용 메일 계정 (2026-08-29 신설).
 // 🔴 왜 화면에 두었는가 — 앱 비밀번호가 막히면 .env 를 «네 곳»(개발 PC · NAS 운영 ·
 //    NAS 테스트 · 의견 접수) 손으로 고쳐야 했다. 한 곳만 빠뜨리면 그쪽 메일만
 //    조용히 안 가고 아무도 모른다. 여기서 한 번 고치면 곧바로 반영된다.
-// ⚠ 관리자만 고친다. 그 밖의 분께는 단추를 내보이지 않는다 —
-//   눌렀다가 403 을 보는 것보다 «없는 편» 이 낫다.
-function MailAccountBox({onChanged}){
+//
+// 🔑 왜 «따로 선» 카드인가 (2026-08-29 저녁)
+//    처음에는 「차량 예약 알림 메일」 카드 안에 단추로 넣었는데, 바로 아래
+//    「내 메일 발송 설정」 카드와 이름도 하는 일도 비슷해 실제로 헷갈렸다 —
+//    공용 계정을 고쳐야 할 때 «개인» 쪽에 먼저 넣으셨다.
+//    둘을 나란히 세우고 이름을 «회사 공용» / «내» 로 갈라 둔다.
+//
+// ⚠ 관리자에게만 보인다. 그 밖의 분은 고칠 수 없으므로 «없는 편» 이 낫다 —
+//   메일이 살아 있는지는 옆의 「차량 예약 알림 메일」 카드로 누구나 본다.
+function MailAccountCard({onChanged}){
   const [st,setSt]=useState(null)
   const [open,setOpen]=useState(false)
   const [busy,setBusy]=useState(false)
@@ -5244,7 +5284,8 @@ function MailAccountBox({onChanged}){
 
   const reload=()=>getMailAccount().then(setSt).catch(()=>setSt({error:true}))
   useEffect(()=>{ reload() },[])
-  if(!st||st.error) return null
+  // 관리자가 아니면 아예 내보이지 않는다 — 고칠 수 없는 칸을 보여 주면 헷갈리기만 한다.
+  if(!st||st.error||!st.can_edit) return null
 
   function start(){
     // 지금 쓰고 있는 값을 미리 채워 둔다 — 비밀번호만 새로 넣으면 되게.
@@ -5274,31 +5315,39 @@ function MailAccountBox({onChanged}){
   const labS={fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:4,display:'block'}
 
   return(
-    <div style={{marginTop:8}}>
+    <Card title="회사 공용 메일 계정 [관리자]" style={{flex:1,minWidth:340}}>
+      <div style={{fontSize:12,color:'#6b7280',lineHeight:1.8,marginBottom:10}}>
+        <strong>회사가 함께 쓰는</strong> 발송 계정입니다. 대표이사가 보내는 승인·반려,
+        아직 등록하지 않은 분의 알림, 의견 접수가 <strong>모두 이 계정으로</strong> 나갑니다.
+        <br/><span style={{color:'#9ca3af'}}>
+          내 일을 «내 주소»로 보내는 설정은 아래 「내 메일 발송 계정」 카드입니다.
+        </span>
+      </div>
       <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
-        <span style={{fontSize:11,color:'#6b7280'}}>
-          발송 계정 —{' '}
-          <strong>{st.registered?`${st.smtp_user} <${st.from_addr}>`:`${st.env_user||'(없음)'} (서버 설정)`}</strong>
+        <span style={{padding:'2px 9px',borderRadius:9,fontSize:11,fontWeight:700,color:'#fff',
+          background:st.registered?'#0d7a4e':'#b45309'}}>
+          {st.registered?'화면에서 등록됨':'서버 설정 사용 중'}
+        </span>
+        <span style={{fontSize:12,color:'#6b7280'}}>
+          <strong>{st.registered?`${st.smtp_user} <${st.from_addr}>`:`${st.env_user||'(없음)'}`}</strong>
           {st.registered&&st.updated_by_name&&(
             <span style={{color:'#9ca3af'}}> · {st.updated_by_name} 님이 고침</span>
           )}
         </span>
-        {st.can_edit&&(
-          <div style={{marginLeft:'auto',display:'flex',gap:6}}>
-            <button onClick={open?()=>setOpen(false):start} disabled={busy}
-              style={{padding:'4px 10px',borderRadius:6,border:'1px solid #1a56db',
-                background:'#eff6ff',color:'#1a56db',cursor:'pointer',fontSize:11,fontWeight:700}}>
-              {open?'취소':(st.registered?'메일 계정 수정':'메일 계정 설정')}
+        <div style={{marginLeft:'auto',display:'flex',gap:6}}>
+          <button onClick={open?()=>setOpen(false):start} disabled={busy}
+            style={{padding:'4px 10px',borderRadius:6,border:'1px solid #1a56db',
+              background:'#eff6ff',color:'#1a56db',cursor:'pointer',fontSize:11,fontWeight:700}}>
+            {open?'취소':(st.registered?'수정':'등록')}
+          </button>
+          {st.registered&&!open&&(
+            <button onClick={drop} disabled={busy}
+              style={{padding:'4px 10px',borderRadius:6,border:'1px solid #fca5a5',
+                background:'#fff',color:'#dc2626',cursor:'pointer',fontSize:11,fontWeight:700}}>
+              지우기
             </button>
-            {st.registered&&!open&&(
-              <button onClick={drop} disabled={busy}
-                style={{padding:'4px 10px',borderRadius:6,border:'1px solid #fca5a5',
-                  background:'#fff',color:'#dc2626',cursor:'pointer',fontSize:11,fontWeight:700}}>
-                지우기
-              </button>
-            )}
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {msg&&!open&&(
@@ -5346,9 +5395,10 @@ function MailAccountBox({onChanged}){
           </div>
         </div>
       )}
-    </div>
+    </Card>
   )
 }
+
 function HolidayManager({holidays,setHolidays,showToast}){
   const [date,setDate]=useState(today())
   const [name,setName]=useState('')
@@ -5711,6 +5761,10 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
       </div>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <MailStatusCard/>
+        {/* 🔑 「회사 공용」과 「내」를 나란히 세워 이름으로 갈라 둔다 (2026-08-29).
+            예전에는 공용 설정이 알림 카드 «안» 에 단추로 숨어 있어, 공용을 고쳐야
+            할 때 개인 쪽에 먼저 넣는 일이 실제로 있었다. */}
+        <MailAccountCard/>
         <MyMailSenderCard/>
       </div>
       <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
