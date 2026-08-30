@@ -1004,6 +1004,7 @@ async function notifyVehicle(kind, planId, req, batchId, conflicts) {
       actor: { name: req.session?.name, email: req.session?.login },
       // 등록해 두었으면 «본인 주소» 로 나간다. 없으면 공용 계정이다 (2026-08-29).
       sender: await senderFor(req.session?.uid),
+      onSenderFail: why => markSenderBroken(req.session?.uid, why),
     })
   } catch (e) {
     console.error(`[mail] notifyVehicle(${kind}) :: ${e.message}`)
@@ -1021,6 +1022,7 @@ async function notifyVacationPlan(kind, planId, req, batchId) {
       kind, plans: rows[0], batchId,
       actor: { name: req.session?.name, email: req.session?.login },
       sender: await senderFor(req.session?.uid),
+      onSenderFail: why => markSenderBroken(req.session?.uid, why),
     })
   } catch (e) {
     console.error(`[mail] notifyVacationPlan(${kind}) :: ${e.message}`)
@@ -1098,15 +1100,16 @@ app.delete('/api/schedule/plans/:id', async (req, res) => {
     if (doomed) {
       const actor = { name: req.session?.name, email: req.session?.login }
       const sender = await senderFor(req.session?.uid)
+      const onSenderFail = why => markSenderBroken(req.session?.uid, why)
       if (doomed.use_type === 'vacation') {
         // 🔑 휴가 취소는 «신청을 물린다» 는 뜻이라 대표이사에게 알려야 한다.
         //    ⚠ 이미 반려된 건은 알리지 않는다 — 대표이사가 이미 아는 일이고,
         //    반려당한 사람이 그 줄을 지웠다고 다시 메일이 가면 성가시기만 하다.
         if (doomed.approval !== 'rejected') {
-          mailer.notifyVacation({ kind: 'cancel', plans: doomed, actor, sender })
+          mailer.notifyVacation({ kind: 'cancel', plans: doomed, actor, sender, onSenderFail })
         }
       } else {
-        mailer.notify({ kind: 'delete', plans: doomed, actor, sender })
+        mailer.notify({ kind: 'delete', plans: doomed, actor, sender, onSenderFail })
       }
     }
     res.json({ ok: true })
@@ -1170,6 +1173,7 @@ async function notifyVacationResult(kind, planId, req, reason) {
       // 승인·반려는 «대표이사» 가 보내는 것이다. 그분은 등록 예외라 보통 null 이고,
       // 그러면 예전처럼 공용 주소로 나간다.
       sender: await senderFor(req.session?.uid),
+      onSenderFail: why => markSenderBroken(req.session?.uid, why),
     })
   } catch (e) {
     console.error(`[mail] notifyVacationResult(${kind}) :: ${e.message}`)
@@ -1314,6 +1318,7 @@ async function notifyPurchaseById(kind, id, req, reason) {
       kind, purchase: p, to, reason,
       actor: { name: req.session?.name, email: req.session?.login },
       sender: await senderFor(req.session?.uid),
+      onSenderFail: why => markSenderBroken(req.session?.uid, why),
     })
   } catch (e) {
     console.error(`[mail] notifyPurchaseById(${kind}) :: ${e.message}`)
@@ -1513,6 +1518,7 @@ async function notifyDone(actualId, req) {
       actual: a,
       actor: { name: req.session?.name, email: req.session?.login },
       sender: await senderFor(req.session?.uid),
+      onSenderFail: why => markSenderBroken(req.session?.uid, why),
       onResult: ok => markReport(actualId, ok ? new Date() : null, ok ? null : 'failed')
         .catch(e => console.error(`[mail] markReport(${actualId}) :: ${e.message}`)),
     })
@@ -1765,6 +1771,28 @@ async function senderFor(uid) {
   }
 }
 
+// 본인 계정으로 보내다 실패한 사실을 남긴다 (2026-08-29 사용자 지시).
+// 🔑 화면이 그 사람에게 「앱 비밀번호를 다시 등록해 주십시오」 띠를 띄우는 근거다.
+//    로그에만 남기면 그 사람의 보고만 계속 실패하는데 아무도 모른다.
+// ⚠ 적기에 실패해도 삼킨다 — 기록 때문에 메일이나 본래 일이 막히면 안 된다.
+function markSenderBroken(uid, detail) {
+  if (!uid) return
+  pool.query(
+    'UPDATE mail_senders SET last_error = $1, failed_at = now() WHERE user_id = $2',
+    [String(detail || '').slice(0, 500), uid]
+  ).catch(e => console.error(`[mail] markSenderBroken(${uid}) :: ${e.message}`))
+}
+
+// 이 사람의 발송이 지금 «망가진 상태» 인가. 화면이 띠를 띄울지 정하는 값이다.
+async function senderError(uid) {
+  try {
+    const { rows } = await pool.query(
+      'SELECT last_error, failed_at FROM mail_senders WHERE user_id = $1', [uid])
+    if (!rows.length || !rows[0].last_error) return null
+    return { detail: rows[0].last_error, at: rows[0].failed_at }
+  } catch { return null }
+}
+
 // 등록해야 하는데 아직 안 한 사람인가. 화면이 로그인 직후 이 값으로 등록을 강제한다.
 // ⚠ 대표이사는 예외다 (사용자 지시). 그분이 보내는 승인·반려는 공용 주소로 나간다.
 async function needsMailPassword(uid) {
@@ -1773,6 +1801,119 @@ async function needsMailPassword(uid) {
   const { rows } = await pool.query('SELECT 1 FROM mail_senders WHERE user_id = $1', [uid])
   return rows.length === 0
 }
+
+// ── 공용 메일 계정 (2026-08-29 신설) ─────────────────────────
+// 🔴 왜 만들었는가 — 앱 비밀번호가 막히면 .env 를 «네 곳» 손으로 고쳐야 했다
+//    (개발 PC · NAS 운영 · NAS 테스트 · 의견 접수). 한 곳만 빠뜨리면 그쪽 메일만
+//    조용히 안 가고 아무도 모른다. 이제 화면에서 한 번 고치면 끝난다.
+// ⚠ 관리자만 고친다 (2026-08-29 사용자 결정). 회사 공용 계정이라 아무나 바꾸면 안 되고,
+//   그렇다고 한 사람만 두면 그가 자리에 없을 때 메일이 멈춘 채로 기다려야 한다.
+
+// DB 에 등록된 공용 계정을 읽어 mailer 에 넣는다. 서버가 켜질 때와 바뀔 때 부른다.
+// ⚠ 실패해도 서버를 세우지 않는다 — 그러면 메일 하나 때문에 앱 전체가 안 뜬다.
+//   그때는 .env 값으로 돌아간다(예전과 같은 상태).
+async function loadMailAccount() {
+  try {
+    const { rows } = await pool.query(
+      'SELECT smtp_user, secret, from_addr FROM mail_account WHERE id = 1')
+    if (!rows.length) { mailer.setAccount(null); return false }
+    mailer.setAccount({
+      user: rows[0].smtp_user,
+      pass: mailcred.open(rows[0].secret),
+      from: rows[0].from_addr,
+    })
+    return true
+  } catch (e) {
+    console.error(`[mail] 공용 계정을 읽지 못했습니다 — .env 값을 씁니다 :: ${e.message}`)
+    mailer.setAccount(null)
+    return false
+  }
+}
+
+app.get('/api/mail-account', async (req, res) => {
+  const session = sessionOf(req)
+  if (!session) return res.status(401).json({ error: '로그인이 필요합니다.' })
+  try {
+    const { rows } = await pool.query(
+      `SELECT m.smtp_user, m.from_addr, m.updated_at, u.display_name AS updated_by_name
+         FROM mail_account m LEFT JOIN kpi_users u ON u.id = m.updated_by
+        WHERE m.id = 1`)
+    res.json({
+      ready: mailcred.isReady(),
+      can_edit: isAdmin(session),
+      registered: rows.length > 0,
+      smtp_user: rows[0]?.smtp_user || null,
+      from_addr: rows[0]?.from_addr || null,
+      updated_at: rows[0]?.updated_at || null,
+      updated_by_name: rows[0]?.updated_by_name || null,
+      // 지금 «어느 쪽» 값으로 보내고 있는지 — 화면이 그대로 보여 준다.
+      env_user: process.env.MAIL_SMTP_USER || null,
+      env_from: process.env.MAIL_FROM || null,
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.put('/api/mail-account', async (req, res) => {
+  const session = sessionOf(req)
+  if (!session) return res.status(401).json({ error: '로그인이 필요합니다.' })
+  if (!isAdmin(session)) {
+    return res.status(403).json({ error: '공용 메일 계정은 관리자만 고칠 수 있습니다.' })
+  }
+  const smtpUser = String(req.body?.smtp_user || '').trim()
+  const password = String(req.body?.password || '')
+  const fromAddr = String(req.body?.from_addr || '').trim()
+  if (!smtpUser || !password || !fromAddr) {
+    return res.status(400).json({ error: '접속 아이디 · 앱 비밀번호 · 보내는 주소를 모두 입력해 주세요.' })
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fromAddr)) {
+    return res.status(400).json({ error: '보내는 주소의 형식이 올바르지 않습니다.' })
+  }
+  if (!mailcred.isReady()) {
+    return res.status(500).json({ error: 'MAIL_CRED_KEY 가 서버에 없어 저장할 수 없습니다.' })
+  }
+  try {
+    // 🔑 저장 «전에» 실제로 붙어 본다. 틀린 값이 들어가면 회사 메일이 통째로 멈추는데,
+    //    그 사실은 누가 메일을 기다리다 물어볼 때에야 드러난다.
+    const check = await mailer.verifyLogin(smtpUser, password)
+    if (!check.ok) {
+      return res.status(400).json({
+        error: `메일 서버 접속에 실패했습니다 — ${check.error}\n`
+             + '아이디가 «메일 주소»가 아니라 «접속 아이디»인지, 비밀번호가 «앱 비밀번호»인지 확인해 주세요.'
+      })
+    }
+    await pool.query(
+      `INSERT INTO mail_account (id, smtp_user, secret, from_addr, updated_by, updated_at)
+       VALUES (1, $1, $2, $3, $4, now())
+       ON CONFLICT (id) DO UPDATE
+         SET smtp_user = EXCLUDED.smtp_user, secret = EXCLUDED.secret,
+             from_addr = EXCLUDED.from_addr, updated_by = EXCLUDED.updated_by,
+             updated_at = now()`,
+      [smtpUser, mailcred.seal(password), fromAddr, session.uid])
+    await loadMailAccount()          // 곧바로 반영한다 — 다시 띄우지 않아도 되게
+    console.log(`[mail] 공용 계정 갱신 :: ${smtpUser} <${fromAddr}> (by ${session.name})`)
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 지우면 .env 값으로 되돌아간다 (메일이 멈추지는 않는다).
+app.delete('/api/mail-account', async (req, res) => {
+  const session = sessionOf(req)
+  if (!session) return res.status(401).json({ error: '로그인이 필요합니다.' })
+  if (!isAdmin(session)) {
+    return res.status(403).json({ error: '공용 메일 계정은 관리자만 고칠 수 있습니다.' })
+  }
+  try {
+    await pool.query('DELETE FROM mail_account WHERE id = 1')
+    await loadMailAccount()
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
 
 // 내 발송 계정 — 등록 여부만 알려 준다. 비밀번호는 «되돌려 주지 않는다».
 app.get('/api/mail-sender/me', async (req, res) => {
@@ -1819,7 +1960,10 @@ app.put('/api/mail-sender/me', async (req, res) => {
       `INSERT INTO mail_senders (user_id, smtp_user, secret, updated_at)
        VALUES ($1, $2, $3, now())
        ON CONFLICT (user_id) DO UPDATE
-         SET smtp_user = EXCLUDED.smtp_user, secret = EXCLUDED.secret, updated_at = now()`,
+         SET smtp_user = EXCLUDED.smtp_user, secret = EXCLUDED.secret, updated_at = now(),
+             -- 고쳤으면 실패 자국을 지운다. 안 지우면 붉은 띠가 계속 떠서,
+             -- 사람이 띠를 무시하는 법을 배우게 된다.
+             last_error = NULL, failed_at = NULL`,
       [session.uid, smtpUser, mailcred.seal(password)])
     res.json({ ok: true })
   } catch (e) {
@@ -1894,6 +2038,10 @@ app.get('/api/auth/me', async (req, res) => {
       // ⚠ 세션 쿠키에 담지 않고 «매번 DB 를 본다». 등록을 마치면 새로고침만으로
       //   게이트가 풀려야 하는데, 쿠키에 넣으면 다시 로그인할 때까지 남는다.
       need_mail_password: await needsMailPassword(session.uid),
+      // 본인 계정으로 보내다 막힌 적이 있으면 화면이 붉은 띠를 띄운다 (2026-08-29).
+      ...(await senderError(session.uid).then(e => e
+        ? { mail_sender_error: e.detail, mail_sender_failed_at: e.at }
+        : {})),
     })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -2268,6 +2416,11 @@ app.get('/api/health', async (req, res) => {
 const PORT = process.env.PORT || 3001
 app.listen(PORT, () => {
   console.log(`API server running on port ${PORT}`)
+  // 공용 메일 계정을 DB 에서 읽어 둔다. 없으면 .env 값으로 돈다(예전과 같음).
+  loadMailAccount()
+    .then(ok => console.log(ok ? '[mail] 공용 계정 = DB 에 등록된 값'
+                               : '[mail] 공용 계정 = .env 값'))
+    .catch(e => console.warn('[mail] 공용 계정 읽기 실패:', e.message))
   // 공휴일 동기화 — 기동할 때 한 번, 그 뒤 하루 1회.
   // ⚠ 실패해도 서버를 멈추지 않는다. 사내망이 밖으로 못 나가는 상황이 있을 수 있고,
   //   그때 대시보드 전체가 죽으면 훨씬 큰 문제다. 기존 목록으로 그냥 돈다.

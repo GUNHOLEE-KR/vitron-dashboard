@@ -29,13 +29,26 @@ export default defineConfig([
   //    lint 가 늘 빨개서, 정작 «진짜 오류» 가 그 속에 묻힌다.
   //    server/ 는 CommonJS(`require`) 라 sourceType 도 따로 알려 준다.
   {
-    files: ['server/**/*.js'],
+    files: ['server/**/*.js', 'feedback/*.js'],
     languageOptions: {
       globals: globals.node,
       sourceType: 'commonjs',
     },
     rules: {
       // 서버 파일에는 리액트 규칙이 해당 없다
+      'react-refresh/only-export-components': 'off',
+    },
+  },
+  // 🔑 의견 위젯은 «브라우저가 그대로 읽는» 순수 JS 다. 번들러를 태우지 않으므로
+  //    import/export 가 없고, 붙는 제품의 빌드 설정과 무관해야 한다.
+  //    feedback/*.js(서버)와 달리 여기는 브라우저 전역을 쓴다.
+  {
+    files: ['feedback/public/**/*.js'],
+    languageOptions: {
+      globals: globals.browser,
+      sourceType: 'script',
+    },
+    rules: {
       'react-refresh/only-export-components': 'off',
     },
   },

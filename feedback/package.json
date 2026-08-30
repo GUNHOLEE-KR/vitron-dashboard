@@ -1,0 +1,14 @@
+{
+  "name": "vitron-feedback",
+  "version": "1.0.0",
+  "private": true,
+  "description": "바이트론 의견 접수 — 위젯 서빙 + 메일 발송",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "nodemailer": "^9.0.5"
+  }
+}

@@ -34,3 +34,29 @@ export async function removeMyMailSender() {
   })
   if (!res.ok) await fail(res)
 }
+
+// ── 공용 메일 계정 (2026-08-29 신설) ─────────────────────────
+// 회사가 함께 쓰는 발송 계정. 여기 등록하면 .env 보다 «먼저» 쓰인다.
+// ⚠ 고치는 것은 관리자만 — 서버가 403 으로 막는다.
+export async function getMailAccount() {
+  const res = await fetch(`${BASE}/mail-account`, { credentials: 'same-origin' })
+  if (!res.ok) await fail(res)
+  return res.json()
+}
+
+export async function saveMailAccount(smtpUser, password, fromAddr) {
+  const res = await fetch(`${BASE}/mail-account`, {
+    method: 'PUT',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ smtp_user: smtpUser, password, from_addr: fromAddr })
+  })
+  if (!res.ok) await fail(res)
+}
+
+export async function removeMailAccount() {
+  const res = await fetch(`${BASE}/mail-account`, {
+    method: 'DELETE', credentials: 'same-origin'
+  })
+  if (!res.ok) await fail(res)
+}

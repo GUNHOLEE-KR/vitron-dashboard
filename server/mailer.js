@@ -19,12 +19,29 @@
 //   멈춘 줄도 모른다. lastResult() 가 그 창구다.
 const nodemailer = require('nodemailer')
 
+// 공용 메일 계정 — DB 에 등록돼 있으면 .env 보다 «먼저» 쓴다 (2026-08-29 신설).
+// 🔑 mailer 는 DB 를 모른다. 부르는 쪽(index.js)이 읽어서 여기에 넣어 준다 —
+//    notifyDone 의 onResult 와 같은 원칙이다.
+// 🔴 왜 필요해졌는가 — 앱 비밀번호가 막히면 .env 를 «네 곳»(개발 PC · NAS 운영 ·
+//    NAS 테스트 · 의견 접수) 손으로 고쳐야 했다. 한 곳만 빠뜨리면 그쪽 메일만
+//    조용히 안 가고 아무도 모른다. 이제 화면에서 한 번 고치면 끝난다.
+// ⚠ .env 는 지우지 않는다 — DB 가 비어 있으면 그쪽으로 떨어진다(비상용).
+let account = null            // { user, pass, from }
+function setAccount(a) {
+  account = (a && a.user && a.pass) ? a : null
+  // ⚠ 캐시해 둔 접속을 «반드시» 버린다. 안 버리면 옛 비밀번호로 맺어 둔 연결을
+  //   계속 써서, 새로 등록해도 여전히 535 가 난다.
+  try { tx?.close() } catch { /* 이미 닫혔을 수 있다 */ }
+  tx = null
+}
+const accountSource = () => (account ? 'db' : 'env')
+
 const cfg = () => ({
   host: process.env.MAIL_HOST || 'smtp.daum.net',
   port: Number(process.env.MAIL_PORT || 465),
-  user: process.env.MAIL_SMTP_USER || '',
-  pass: process.env.MAIL_PASS || '',
-  from: process.env.MAIL_FROM || '',
+  user: account?.user || process.env.MAIL_SMTP_USER || '',
+  pass: account?.pass || process.env.MAIL_PASS || '',
+  from: account?.from || process.env.MAIL_FROM || '',
   to:   process.env.MAIL_TO || '',
   // ⏳ 시험용 수신처. 있으면 «나가는 메일이 전부» 이리로 온다 —
   //    대표이사에게 갈 것(차량 예약·완료 보고·휴가/구매 신청)뿐 아니라
@@ -51,7 +68,7 @@ const isEnabled = () => {
 
 // 마지막 발송 결과. 설정 화면이 읽어 「살아 있는가」 를 보여 준다.
 let last = { at: null, ok: null, detail: '아직 보낸 적이 없습니다.' }
-const lastResult = () => ({ enabled: isEnabled(), ...last })
+const lastResult = () => ({ enabled: isEnabled(), source: accountSource(), ...last })
 
 // 접속 하나를 만든다. 아이디·비밀번호만 다르고 나머지는 같다.
 function makeTransport(user, pass) {
@@ -404,7 +421,7 @@ async function flush(key) {
   b.plans.sort((x, y) => String(x.plan_date).localeCompare(String(y.plan_date)))
   // ⚠ sender 도 payload 에 실려 왔다. 묶인 것들은 «한 사람» 이 한 일이라 하나면 된다
   //   (묶는 키에 batchId 가 들어가고, batchId 는 한 번의 등록에서만 같다).
-  await send(b.builder(b), b.sender)
+  await send(b.builder(b), b.sender, b.onSenderFail)
 }
 
 // 🔑 한 번 실패했다고 포기하지 않는다.
@@ -414,16 +431,48 @@ async function flush(key) {
 const TRIES = 3
 const wait = ms => new Promise(r => setTimeout(r, ms))
 
-// sender 를 주면 «그 사람 계정» 으로 접속해 보낸다 (2026-08-29). 안 주면 공용 계정이다.
-// ⚠ 실패해도 공용 계정으로 «몰래 다시 보내지 않는다». 본인 주소로 나가야 할 메일이
-//   조용히 남의 주소로 나가면, 받는 쪽은 누구 일인지 알 수 없고 아무도 잘못을 모른다.
-//   앱 비밀번호가 틀어졌으면 그 사실이 설정 화면의 마지막 결과로 드러나야 한다.
-async function send(msg, sender) {
+// sender 를 주면 «그 사람 계정» 으로 먼저 보낸다 (2026-08-29). 안 주면 공용 계정이다.
+//
+// 🔑 본인 계정이 막히면 «공용 계정으로 다시» 보낸다 (2026-08-29 사용자 지시).
+//    앱 비밀번호는 메일 쪽에서 바꾸거나 회수되면 그때부터 조용히 막힌다. 그때 보고를
+//    버리면 나중에 KPI 에서 「누락」으로 잡히고서야 드러난다 — 손해가 너무 크다.
+//    ⚠ 예전에는 「실패해도 공용으로 몰래 보내지 않는다」고 두었다. 그 걱정(받는 쪽이
+//      누구 일인지 모른다)은 공용 발송이 «표시 이름과 답장 주소를 본인으로» 두므로
+//      실제로는 생기지 않는다. «몰래» 가 문제였으니 — 아래처럼 «알리고» 보낸다.
+//
+// onSenderFail(err) — 본인 계정이 막혔다는 사실을 부르는 쪽에 알린다. 부르는 쪽이
+//   DB 에 적고, 화면이 그 사람에게 「앱 비밀번호를 다시 등록해 주십시오」 띠를 띄운다.
+//   🔑 mailer 는 DB 를 모른다는 원칙 그대로다.
+async function send(msg, sender, onSenderFail) {
+  // ── ① 본인 계정으로 먼저 ────────────────────────────────
+  if (sender?.smtpUser) {
+    const ok = await attempt(msg,
+      () => transportFor(sender.smtpUser, sender.pass),
+      // 이 사람의 접속만 버린다 (공용 접속은 건드리지 않는다)
+      () => userTx.delete(JSON.stringify([sender.smtpUser, sender.pass])))
+    if (ok) return true
+    const why = last.detail
+    console.error(`[mail] 본인 계정 실패 (${sender.smtpUser}) — 공용 계정으로 다시 보냅니다`)
+    try { onSenderFail && onSenderFail(why) } catch { /* 기록 실패가 메일을 막지 않는다 */ }
+    // 공용 계정으로 보내므로 보내는 주소도 공용으로 바꾸고, 답장은 본인에게 돌린다.
+    const c = cfg()
+    msg = { ...msg,
+      from: { name: msg.from?.name || '업무 대시보드', address: c.from },
+      replyTo: msg.replyTo || (sender.address ? `${msg.from?.name || ''} <${sender.address}>` : undefined) }
+  }
+  // ── ② 공용 계정으로 ────────────────────────────────────
+  return attempt(msg, () => transport(),
+    () => { try { tx?.close() } catch { /* 이미 닫혔을 수 있다 */ } tx = null })
+}
+
+// 한 계정으로 TRIES 번까지 시도한다. 성패를 last 에 적고 참/거짓을 돌려준다.
+// reset — 실패했을 때 «그 계정의» 접속만 버린다. 예전에는 공용 접속(tx)을 늘 버려서,
+//   남의 계정이 막힐 때마다 멀쩡한 공용 연결까지 끊겼다.
+async function attempt(msg, pick, reset) {
   let lastErr = null
   for (let i = 1; i <= TRIES; i++) {
     try {
-      const t = sender?.smtpUser ? transportFor(sender.smtpUser, sender.pass) : transport()
-      await t.sendMail(msg)
+      await pick().sendMail(msg)
       const stamp = new Date().toISOString().replace('T', ' ').slice(0, 19)
       last = {
         at: stamp, ok: true,
@@ -434,9 +483,8 @@ async function send(msg, sender) {
     } catch (e) {
       lastErr = e
       console.error(`[mail] attempt ${i}/${TRIES} failed :: ${e.message}`)
-      // 붙는 데 실패한 것이면 연결을 버리고 새로 맺는다
-      try { tx?.close() } catch { /* 이미 닫혔을 수 있다 */ }
-      tx = null
+      // 붙는 데 실패한 것이면 그 연결을 버리고 새로 맺는다
+      try { reset && reset() } catch { /* 이미 닫혔을 수 있다 */ }
       if (i < TRIES) await wait(3000 * i)
     }
   }
@@ -454,7 +502,7 @@ async function send(msg, sender) {
 // sender — 이 사람의 SMTP 접속 정보 {smtpUser, pass, address}. 부르는 쪽(index.js)이
 //   DB 에서 찾아 넘긴다. 🔑 mailer 는 DB 를 모른다는 원칙 그대로다.
 //   없으면(대표이사·미등록) 예전처럼 공용 계정으로 나간다.
-function notify({ kind, actor, plans, conflicts, batchId, sender }) {
+function notify({ kind, actor, plans, conflicts, batchId, sender, onSenderFail }) {
   try {
     if (!isEnabled()) return
     const list = (Array.isArray(plans) ? plans : [plans]).filter(isVehiclePlan)
@@ -467,10 +515,11 @@ function notify({ kind, actor, plans, conflicts, batchId, sender }) {
       plans: list,
       conflicts: conflicts || [],
       sender: sender || null,
+      onSenderFail: onSenderFail || null,
     }
     // 등록만 묶는다. 수정·취소는 한 건씩 일어나므로 바로 보낸다.
     if (kind === 'create' && batchId) queue(`${kind}|${batchId}`, payload)
-    else send(build(payload), payload.sender)
+    else send(build(payload), payload.sender, payload.onSenderFail)
   } catch (e) {
     console.error(`[mail] notify error :: ${e.message}`)
   }
@@ -487,7 +536,7 @@ function notify({ kind, actor, plans, conflicts, batchId, sender }) {
 // onResult(ok) — 보냈는지를 부르는 쪽에 알려 준다. 부르는 쪽이 그 결과를 실적에 적는다.
 // 🔑 mailer 는 DB 를 모른다. 알게 하면 「메일 보내는 일」과 「기록하는 일」이 한 덩어리가 되어
 //    한쪽을 고칠 때마다 다른 쪽을 함께 건드리게 된다.
-function notifyDone({ actor, actual, onResult, sender }) {
+function notifyDone({ actor, actual, onResult, sender, onSenderFail }) {
   try {
     if (!isEnabled()) return
     if (!actual) return
@@ -495,7 +544,7 @@ function notifyDone({ actor, actual, onResult, sender }) {
       actorName: actor?.name || null,
       actorEmail: actor?.email || null,
       a: actual, sender: sender || null,
-    }), sender).then(ok => { try { onResult && onResult(!!ok) } catch { /* 기록 실패가 메일을 되돌리진 않는다 */ } })
+    }), sender, onSenderFail).then(ok => { try { onResult && onResult(!!ok) } catch { /* 기록 실패가 메일을 되돌리진 않는다 */ } })
   } catch (e) {
     console.error(`[mail] notifyDone error :: ${e.message}`)
   }
@@ -504,7 +553,7 @@ function notifyDone({ actor, actual, onResult, sender }) {
 // 휴가 알림. 부르는 쪽은 await 하지 않아도 된다.
 // ⚠ 「보낼까요?」를 묻는 것은 «화면» 이 한다 (2026-08-26 사용자 지시 — 차량과 다른 점).
 //   여기까지 왔다는 것은 사람이 「보낸다」 고 답했다는 뜻이다.
-function notifyVacation({ kind, actor, plans, batchId, to, reason, sender }) {
+function notifyVacation({ kind, actor, plans, batchId, to, reason, sender, onSenderFail }) {
   try {
     if (!isEnabled()) return
     const list = (Array.isArray(plans) ? plans : [plans]).filter(Boolean)
@@ -515,18 +564,19 @@ function notifyVacation({ kind, actor, plans, batchId, to, reason, sender }) {
       actorEmail: actor?.email || null,
       plans: list, to, reason,
       sender: sender || null,
+      onSenderFail: onSenderFail || null,
     }
     // 신청만 묶는다. 「사흘 휴가」는 날짜마다 따로 저장되므로 그대로 두면 세 통이 간다.
     // 취소·승인·반려는 한 건씩 일어나므로 바로 보낸다.
     if (kind === 'request' && batchId) queue(`vac|${kind}|${batchId}`, payload, buildVacation)
-    else send(buildVacation(payload), payload.sender)
+    else send(buildVacation(payload), payload.sender, payload.onSenderFail)
   } catch (e) {
     console.error(`[mail] notifyVacation error :: ${e.message}`)
   }
 }
 
 // 구매 알림. 묶지 않는다 — 요청은 한 건씩 일어난다.
-function notifyPurchase({ kind, actor, purchase, to, reason, sender }) {
+function notifyPurchase({ kind, actor, purchase, to, reason, sender, onSenderFail }) {
   try {
     if (!isEnabled()) return
     if (!purchase) return
@@ -535,11 +585,11 @@ function notifyPurchase({ kind, actor, purchase, to, reason, sender }) {
       actorName: actor?.name || null,
       actorEmail: actor?.email || null,
       sender: sender || null,
-    }), sender)
+    }), sender, onSenderFail)
   } catch (e) {
     console.error(`[mail] notifyPurchase error :: ${e.message}`)
   }
 }
 
 module.exports = { notify, notifyDone, notifyVacation, notifyPurchase,
-  isEnabled, lastResult, isVehiclePlan, vacDays, verifyLogin }
+  isEnabled, lastResult, isVehiclePlan, vacDays, verifyLogin, setAccount }
