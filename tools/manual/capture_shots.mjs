@@ -158,7 +158,33 @@ const SHOTS = [
       setTimeout(()=>{const bs=[...document.querySelectorAll('button')].filter(x=>x.textContent.trim()==='월');
         if(bs.length)bs[bs.length-1].click()},700)})()`,
     clipCard: '업무 달력' },
+
+  // ── 2026-08-29 신설 ────────────────────────────────────────
+  // ⚠ 「70」 은 «메일 발송 계정이 등록되지 않은» 상태라야 찍힌다. 등록돼 있으면
+  //   게이트가 뜨지 않아 엉뚱한 화면이 찍힌다. --only 70 으로 따로 찍을 것.
+  { file: '70_메일발송설정_게이트.png', wait: 2200 },
+  // 법인차량 등록 양식을 펼친 채로 차량 관리 카드를 찍는다
+  { file: '71_법인차량_등록.png', wait: 2800,
+    js: `(()=>{__click('설정');
+      setTimeout(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.includes('법인차량 등록')); if(b)b.click()},1400)})()`,
+    clipCard: '차량 관리' },
+  // ⚠ __click('구매') 는 「구매 요청」 같은 다른 글자에 먼저 걸린다. 탭 단추만 집는다.
+  // ⚠ clipCard 로 「구매 요청」 카드만 자르려 했으나 상자를 못 찾아, 탭 화면을 통째로 찍는다.
+  { file: '75_구매_요청.png', wait: 3600,
+    js: `(()=>{const b=[...document.querySelectorAll('button')]
+      .find(x=>x.textContent.trim()==='구매'); if(b)b.click()})()` },
+  // 직원 관리 카드 — 「퇴사자 포함」 체크박스와 직책 배지가 한 카드에 함께 보인다
+  { file: '77_직원목록_퇴사자포함.png', js: `__click('설정')`, wait: 2600,
+    clipCard: '직원 관리' },
+  { file: '78_직원목록_직책.png', js: `__click('설정')`, wait: 2600,
+    clipCard: '직원 관리' },
 ]
+
+// --only 로 일부만 찍는다. 파일명에 그 글자가 들어간 것만 고른다.
+// 🔑 게이트 화면(70)처럼 «DB 상태가 달라야» 찍히는 것이 있어 따로 돌릴 길이 필요하다.
+const ONLY = opt('only', '')
+const TARGETS = ONLY ? SHOTS.filter(s => s.file.includes(ONLY)) : SHOTS
 
 class CDP {
   constructor(ws) { this.ws = ws; this.id = 0; this.waiting = new Map()
@@ -221,15 +247,19 @@ try {
 
   await goto(URL_BASE)
 
+  // ⚠ «비밀번호 칸이 있으면 실패» 로 보면 안 된다 (2026-08-29).
+  //   메일 발송 설정 게이트에도 비밀번호 칸이 있어, 세션이 멀쩡한데도 실패로 읽혔다.
+  //   로그인 화면에만 있는 «회사 메일 주소» 칸으로 판정한다.
   const probe = await cdp.send('Runtime.evaluate', {
-    expression: `!!document.querySelector('input[type=password]')`, returnByValue: true })
+    expression: `!!document.querySelector('input[placeholder*="회사 메일"]')`,
+    returnByValue: true })
   if (probe.result.value) {
     console.error('세션이 통하지 않았습니다. 확인할 것:')
     console.error(`  · ${ENV_FILE} 의 SESSION_SECRET 이 그 서버의 값과 같은가`)
     console.error(`  · ${URL_BASE} 가 열려 있는가 (백엔드까지)`)
     process.exitCode = 2
   } else {
-    for (const s of SHOTS) {
+    for (const s of TARGETS) {
       await goto(URL_BASE)
       if (s.js) await cdp.send('Runtime.evaluate', { expression: s.js })
       await sleep(s.wait ?? 1200)
