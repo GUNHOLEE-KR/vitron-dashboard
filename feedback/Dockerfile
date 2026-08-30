@@ -13,6 +13,9 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install --omit=dev
 COPY server.js ./
+# ⚠ mailcred.js 의 정본은 server/mailcred.js 다. push-feedback.ps1 이 배포할 때
+#   그 파일을 여기로 복사해 보낸다 — 암복호화 코드를 두 벌로 두면 반드시 어긋난다.
+COPY mailcred.js ./
 COPY public/ ./public/
 EXPOSE 3003
 CMD ["node", "server.js"]

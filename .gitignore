@@ -43,3 +43,4 @@ vitron-src.tar.gz
 __pycache__/
 *.pyc
 portal/dist/
+feedback/mailcred.js

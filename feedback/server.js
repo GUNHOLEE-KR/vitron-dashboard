@@ -4,10 +4,16 @@
 //   ① GET  /widget.js    위젯을 내려 준다 (어느 제품이든 script 한 줄로 붙인다)
 //   ② POST /api/report   접수한 내용을 «메일로» 보낸다
 //
-// 🔑 DB 가 없다. 접수처가 메일이라 저장할 곳이 필요 없다 (2026-08-29 사용자 결정).
-//    대신 «보냈는가» 를 사람에게 분명히 알린다 — 실패했는데 「보냈습니다」 라고
-//    하면 그 의견은 아무도 모르게 사라진다. 그래서 이 API 만큼은
-//    «메일을 보낸 뒤에» 응답한다 (다른 알림들과 다른 점).
+// 🔑 접수 «내용» 은 저장하지 않는다. 접수처가 메일이라 저장할 곳이 필요 없다
+//    (2026-08-29 사용자 결정). 대신 «보냈는가» 를 사람에게 분명히 알린다 —
+//    실패했는데 「보냈습니다」 라고 하면 그 의견은 아무도 모르게 사라진다. 그래서
+//    이 API 만큼은 «메일을 보낸 뒤에» 응답한다 (다른 알림들과 다른 점).
+//
+// 🔑 DB 는 «보내는 계정을 읽으려고만» 쓴다 (2026-08-29 사용자 지시).
+//    그전에는 이 서비스가 자기 .env 의 MAIL_PASS 를 따로 들고 있었는데, 그러면
+//    앱 비밀번호를 바꿀 때 «여기도» 고쳐야 하고 한 곳만 빠뜨리면 이쪽 메일만
+//    조용히 안 간다. 대시보드가 화면에서 고치는 그 값(mail_account)을 함께 읽는다.
+//    ⚠ DB 가 없거나 등록이 비어 있으면 .env 의 MAIL_* 로 떨어진다(비상용).
 //
 // ⚠ 실패해도 내용을 잃지 않도록 서버 로그에 통째로 남긴다. 메일이 며칠 막혀 있어도
 //   로그에서 건져 낼 수 있어야 한다.
@@ -17,6 +23,10 @@
 const express = require('express')
 const path = require('path')
 const nodemailer = require('nodemailer')
+const { Pool } = require('pg')
+// ⚠ 정본은 server/mailcred.js 다. 배포 스크립트(push-feedback.ps1)가 그 파일을
+//   여기로 복사해 보낸다 — 암복호화 코드를 두 벌로 두면 반드시 어긋난다.
+const mailcred = require('./mailcred')
 
 const app = express()
 const PORT = Number(process.env.PORT || 3003)
@@ -39,15 +49,56 @@ app.use((req, res, next) => {
 // 「한 곳만 고치면 전부 반영」이라는 이 구조의 뜻이 없어진다.
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '5m' }))
 
-app.get('/api/health', (req, res) => res.json({ ok: true, mail: mailReady() }))
+app.get('/api/health', async (req, res) => {
+  await loadAccount()
+  res.json({ ok: true, mail: mailReady(), source: account ? 'db' : 'env' })
+})
+
+// ── 공용 계정을 DB 에서 읽는다 ───────────────────────────────
+// 대시보드가 화면에서 고치는 그 값이다. 여기서는 «읽기만» 한다.
+// ⚠ DB 설정이 없으면 아예 붙지 않는다 — 이 서비스는 DB 없이도 .env 만으로 돌아야 한다.
+const pool = process.env.DB_HOST ? new Pool({
+  host: process.env.DB_HOST,
+  port: Number(process.env.DB_PORT || 5432),
+  database: process.env.DB_NAME,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+}) : null
+
+let account = null            // { user, pass, from }
+let accountAt = 0
+const ACCOUNT_TTL = 60 * 1000 // 1분. 대시보드에서 바꾸면 늦어도 1분 안에 따라온다.
+
+// ⚠ 실패해도 던지지 않는다. DB 가 잠깐 안 되더라도 .env 값으로 보낼 수 있어야 한다.
+async function loadAccount() {
+  if (!pool || !mailcred.isReady()) return
+  if (Date.now() - accountAt < ACCOUNT_TTL) return
+  accountAt = Date.now()
+  try {
+    const { rows } = await pool.query(
+      'SELECT smtp_user, secret, from_addr FROM mail_account WHERE id = 1')
+    const next = rows.length
+      ? { user: rows[0].smtp_user, pass: mailcred.open(rows[0].secret), from: rows[0].from_addr }
+      : null
+    // 값이 바뀌었으면 캐시해 둔 접속을 버린다 — 안 버리면 옛 비밀번호로 계속 붙는다.
+    if (JSON.stringify(next) !== JSON.stringify(account)) {
+      account = next
+      try { tx?.close() } catch { /* 이미 닫혔을 수 있다 */ }
+      tx = null
+      console.log(`[feedback] 발송 계정 = ${account ? account.user + ' (DB)' : '.env 값'}`)
+    }
+  } catch (e) {
+    console.error(`[feedback] 공용 계정을 읽지 못했습니다 — .env 값을 씁니다 :: ${e.message}`)
+  }
+}
 
 // ── 메일 ────────────────────────────────────────────────────
 const cfg = () => ({
   host: process.env.MAIL_HOST || 'smtp.daum.net',
   port: Number(process.env.MAIL_PORT || 465),
-  user: process.env.MAIL_SMTP_USER || '',
-  pass: process.env.MAIL_PASS || '',
-  from: process.env.MAIL_FROM || '',
+  user: account?.user || process.env.MAIL_SMTP_USER || '',
+  pass: account?.pass || process.env.MAIL_PASS || '',
+  from: account?.from || process.env.MAIL_FROM || '',
   // 접수처. 사용자 지시로 이건호에게 모인다 (2026-08-29).
   to: process.env.FEEDBACK_MAIL_TO || 'gunholee@vi-tron.com',
 })
@@ -93,6 +144,7 @@ function toAttachment(shot, i) {
 }
 
 app.post('/api/report', async (req, res) => {
+  await loadAccount()          // 대시보드에서 바꿨으면 여기서 따라잡는다
   const b = req.body || {}
   const text = String(b.text || '').trim()
   if (!text) return res.status(400).json({ error: '내용이 비어 있습니다.' })
@@ -150,5 +202,6 @@ app.post('/api/report', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`의견 접수 서비스 실행 중 — 포트 ${PORT}`)
+  loadAccount().catch(() => {})
   if (!mailReady()) console.warn('⚠ 메일 설정(MAIL_*)이 없습니다 — 접수는 실패로 응답합니다.')
 })

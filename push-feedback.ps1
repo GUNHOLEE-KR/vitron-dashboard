@@ -42,13 +42,22 @@ if ($envCheck -match 'MISSING') {
     Write-Host "  MAIL_PASS=<앱 비밀번호>"
     Write-Host "  MAIL_FROM=<보내는 주소>"
     Write-Host "  FEEDBACK_MAIL_TO=gunholee@vi-tron.com"
+    Write-Host ""
+    Write-Host "  # 아래를 넣으면 «화면에서 고친» 공용 계정을 함께 씁니다 (권장)" -ForegroundColor DarkGray
+    Write-Host "  DB_HOST / DB_PORT / DB_NAME / DB_USER / DB_PASSWORD / MAIL_CRED_KEY" -ForegroundColor DarkGray
+    Write-Host "  → 대시보드의 .env 를 그대로 복사한 뒤 FEEDBACK_MAIL_TO 만 더하면 됩니다" -ForegroundColor DarkGray
     exit 1
 }
 
 Write-Host "[2/3] feedback 폴더 전송" -ForegroundColor Cyan
+# 🔑 암복호화 코드는 «한 벌» 만 둔다. 정본은 server/mailcred.js 이고, 배포할 때
+#    복사해 보낸다. 두 벌로 두면 한쪽만 고치게 되고, 그러면 저장된 비밀번호를
+#    못 푸는 사고가 난다. (복사본은 .gitignore 로 막아 두었다)
+Copy-Item .\server\mailcred.js .\feedback\mailcred.js -Force
+
 Invoke-Native { ssh $nas "rm -rf $remoteDir/public && mkdir -p $remoteDir" } '폴더 비우기'
 Invoke-Native { scp .\feedback\Dockerfile .\feedback\deploy.sh .\feedback\docker-compose.yml `
-    .\feedback\package.json .\feedback\server.js "${nas}:$remoteDir/" } '전송'
+    .\feedback\package.json .\feedback\server.js .\feedback\mailcred.js "${nas}:$remoteDir/" } '전송'
 Invoke-Native { scp -r .\feedback\public "${nas}:$remoteDir/" } '위젯 전송'
 
 Write-Host "[3/3] 원격 이미지 교체" -ForegroundColor Cyan
