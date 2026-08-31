@@ -2,7 +2,12 @@
 """매뉴얼 DOCX 를 Confluence 로 옮긴다.
 
   python tools/manual/docx_to_confluence.py                    # 마크다운 파일만 생성
-  python tools/manual/docx_to_confluence.py --upload <pageId>  # Confluence 쪽에 반영
+  python tools/manual/docx_to_confluence.py --upload <pageId>  # 있는 쪽 본문 교체
+  python tools/manual/docx_to_confluence.py --create <부모pageId> --title "«쪽 제목»"
+
+  어느 문서를 옮길지는 `--doc` 으로 고른다 (기본 manual — 종전 사용법 그대로).
+    --doc manual     업무현황_대시보드_사용자매뉴얼.docx   → [대시보드] 9. 사용 방법(매뉴얼) 170164226
+    --doc training   VITRON_ERP_직원교육자료.docx        → [대시보드] 13. 직원 교육 자료
 
 ■ 왜 REST 로 올리는가
   변환 결과가 3만 자를 넘어 사람이(또는 대화 도구가) 본문을 옮겨 붙이면 실수가 난다.
@@ -39,8 +44,32 @@ from docx import Document  # noqa: E402
 from docx.shared import RGBColor  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-DOCX = os.path.join(ROOT, "docs", "manual", "업무현황_대시보드_사용자매뉴얼.docx")
 CAPTION_GRAY = "777777"
+
+# 옮길 수 있는 문서들. `--doc <이름>` 으로 고른다(기본은 매뉴얼 — 종전 사용법 그대로).
+# 🔑 문서마다 정본·생성기·인쇄용이 다르므로 머리말도 달라야 한다. 예전에는 매뉴얼 것이
+#    박혀 있어, 다른 문서를 올리면 「이것은 사용자 매뉴얼입니다」 라고 적힌 쪽이 됐다.
+DOCS = {
+    "manual": {
+        "docx": "업무현황_대시보드_사용자매뉴얼.docx",
+        "pdf": "업무현황_대시보드_사용자매뉴얼.pdf",
+        "builder": "tools/manual/build_dashboard_manual.py",
+        "what": "사용자 매뉴얼",
+    },
+    "training": {
+        "docx": "VITRON_ERP_직원교육자료.docx",
+        "pdf": None,          # 인쇄용을 만들지 않기로 했다 (2026-08-31 지시)
+        "builder": "tools/manual/build_erp_training.py",
+        "what": "직원 교육 자료",
+    },
+}
+
+
+def docx_path(prof):
+    return os.path.join(ROOT, "docs", "manual", prof["docx"])
+
+
+DOCX = docx_path(DOCS["manual"])   # 종전 이름 — 이 파일 안의 옛 호출부가 쓴다
 
 _warn = []
 
@@ -205,14 +234,16 @@ def convert(path):
     return md
 
 
-def _page_count():
-    """인쇄용 PDF 의 쪽수를 센다. 못 세면 None.
+def _page_count(prof):
+    """인쇄용 PDF 의 쪽수를 센다. PDF 를 만들지 않는 문서이거나 못 세면 None.
 
     ⚠ 예전에는 이 값이 «28쪽» 으로 하드코딩돼 있어, 매뉴얼이 36쪽으로 늘어난 뒤에도
     다시 돌리면 옛 숫자가 그대로 올라갔다(내용이 같아 Confluence 버전조차 오르지 않아
     갱신된 줄 알고 넘어갔다). 그래서 파일에서 직접 센다.
     """
-    pdf = os.path.join(ROOT, "docs", "manual", "업무현황_대시보드_사용자매뉴얼.pdf")
+    if not prof.get("pdf"):
+        return None
+    pdf = os.path.join(ROOT, "docs", "manual", prof["pdf"])
     try:
         with open(pdf, "rb") as f:
             raw = f.read().decode("latin-1")
@@ -222,34 +253,40 @@ def _page_count():
         return None
 
 
-def _capture_count():
-    """캡처 장수를 센다. `_masked` 사본은 같은 화면의 가린 판이라 빼고 센다."""
-    d = os.path.join(ROOT, "docs", "manual", "captures")
+def _figure_count(prof):
+    """그 문서에 «실제로 들어간» 그림 수를 센다.
+
+    ⚠ captures 폴더를 세면 안 된다. 그 폴더는 매뉴얼·교육 자료가 함께 쓰므로,
+      27장만 실은 문서에도 83장이라고 적히게 된다.
+    """
     try:
-        return len([n for n in os.listdir(d)
-                    if n.lower().endswith(".png") and not os.path.splitext(n)[0].endswith("_masked")])
+        return len(Document(docx_path(prof)).inline_shapes) or None
     except Exception:
         return None
 
 
-def header():
-    """머리말을 만든다. 쪽수·캡처 수는 «세어서» 넣는다 — 적어 두면 반드시 옛말이 된다."""
-    pages = _page_count()
-    caps = _capture_count()
+def header(prof):
+    """머리말을 만든다. 쪽수·그림 수는 «세어서» 넣는다 — 적어 두면 반드시 옛말이 된다."""
+    pages = _page_count(prof)
+    figs = _figure_count(prof)
     page_txt = f" ({pages}쪽)" if pages else ""
-    cap_txt = f" — {caps}장" if caps else ""
-    return f"""이 문서는 사용자 매뉴얼 **정본(DOCX)에서 자동 변환**한 것입니다. 매뉴얼을 고치면
+    fig_txt = f" — {figs}장" if figs else ""
+    what = prof["what"]
+    rows = [f"| 정본 | `docs/manual/{prof['docx']}`{page_txt} |"]
+    if prof.get("pdf"):
+        rows.append("| 인쇄용 | 같은 폴더의 `.pdf` |")
+    rows.append(f"| 생성기 | `{prof['builder']}` |")
+    rows.append(f"| 화면 그림 | `docs/manual/captures/` 에서 가져옵니다{fig_txt} |")
+    table = "\n".join(rows)
+    return f"""이 문서는 {what} **정본(DOCX)에서 자동 변환**한 것입니다. 정본을 고치면
 `tools/manual/docx_to_confluence.py` 를 다시 돌려 이 쪽을 갱신합니다. 손으로 고치면 정본과 어긋납니다.
 
 | 항목 | 값 |
 | --- | --- |
-| 정본 | `docs/manual/업무현황_대시보드_사용자매뉴얼.docx`{page_txt} |
-| 인쇄용 | 같은 폴더의 `.pdf` |
-| 생성기 | `tools/manual/build_dashboard_manual.py` |
-| 화면 캡처 | `docs/manual/captures/`{cap_txt} |
+{table}
 
 > **화면 그림은 이 쪽에 없습니다**
-> 그림 자리에 「▸ 그림 번호 · 설명」만 남겨 두었습니다. 그림까지 보시려면 위 DOCX 나 PDF 를
+> 그림 자리에 「▸ 그림 번호 · 설명」만 남겨 두었습니다. 그림까지 보시려면 위 DOCX 를
 > 열어 주십시오. 대신 그림 없이도 읽을 수 있도록 설명을 함께 실었습니다.
 
 ---
@@ -272,12 +309,11 @@ def _env(keys):
     return vals
 
 
-def upload(md, page_id, title=None):
-    """Confluence 쪽 본문을 교체한다. 마크다운 → storage(XHTML) 로 바꿔 보낸다."""
+def _client():
+    """Confluence REST 호출기와 호스트를 돌려준다. (토큰은 화면에 찍지 않는다)"""
     import base64
     import json
     import urllib.request
-    import markdown as md_lib
 
     env = _env({"JIRA_EMAIL", "JIRA_TOKEN", "JIRA_HOST"})
     email, token = env.get("JIRA_EMAIL"), env.get("JIRA_TOKEN")
@@ -295,13 +331,49 @@ def upload(md, page_id, title=None):
         with urllib.request.urlopen(req, timeout=60) as r:
             return json.loads(r.read().decode("utf-8"))
 
+    return call, host
+
+
+def to_html(md):
+    import markdown as md_lib
+    return md_lib.markdown(md, extensions=["tables", "fenced_code", "sane_lists"])
+
+
+def create(md, parent_id, title):
+    """부모 아래에 새 쪽을 만든다. 공간은 부모에게서 물려받는다.
+
+    ⚠ 새로 «만드는» 것만 한다. 이미 있는 쪽을 갈아 끼우려면 --upload 를 쓴다.
+      같은 제목이 이미 있으면 Confluence 가 거부하므로 덮어쓸 위험이 없다.
+    """
+    call, host = _client()
+    parent = call("GET", f"https://{host}/wiki/rest/api/content/{parent_id}?expand=space")
+    space_key = parent["space"]["key"]
+    print(f"부모: {parent['title']} (공간 {space_key})")
+
+    html = to_html(md)
+    body = {
+        "type": "page",
+        "title": title,
+        "space": {"key": space_key},
+        "ancestors": [{"id": str(parent_id)}],
+        "body": {"storage": {"value": html, "representation": "storage"}},
+    }
+    res = call("POST", f"https://{host}/wiki/rest/api/content", body)
+    print(f"만듦: {res['title']} (id {res['id']}) · 본문 {len(html):,}자(HTML)")
+    print(f"  https://{host}/wiki{res['_links']['webui']}")
+    return res
+
+
+def upload(md, page_id, title=None):
+    """Confluence 쪽 본문을 교체한다. 마크다운 → storage(XHTML) 로 바꿔 보낸다."""
+    call, host = _client()
     base = f"https://{host}/wiki/rest/api/content/{page_id}"
     cur = call("GET", base + "?expand=version,space")
     ver = cur["version"]["number"]
     title = title or cur["title"]
     print(f"대상: {title} (현재 버전 {ver})")
 
-    html = md_lib.markdown(md, extensions=["tables", "fenced_code", "sane_lists"])
+    html = to_html(md)
     body = {
         "id": str(page_id),
         "type": "page",
@@ -309,30 +381,40 @@ def upload(md, page_id, title=None):
         "space": {"key": cur["space"]["key"]},
         "body": {"storage": {"value": html, "representation": "storage"}},
         "version": {"number": ver + 1,
-                    "message": "매뉴얼 정본(DOCX)에서 자동 변환 반영"},
+                    "message": "정본(DOCX)에서 자동 변환 반영"},
     }
     res = call("PUT", base, body)
     print(f"완료: 버전 {res['version']['number']} · 본문 {len(html):,}자(HTML)")
     return res
 
 
+def _arg(name, default=None):
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
+
+
+def _body(prof):
+    """올릴 본문. 표지(제목·버전·작성일)는 Confluence 에서 필요 없으므로 목차부터 싣는다."""
+    md = convert(docx_path(prof))
+    cut = md.find("## 목차")
+    return header(prof) + "\n" + md[cut:] if cut > 0 else md
+
+
 if __name__ == "__main__":
+    prof = DOCS[_arg("--doc", "manual")]
+
     if "--upload" in sys.argv:
-        i = sys.argv.index("--upload")
-        page_id = sys.argv[i + 1]
-        md_all = convert(DOCX)
-        cut = md_all.find("## 목차")
-        if cut > 0:
-            md_all = header() + "\n" +md_all[cut:]
-        upload(md_all, page_id)
+        upload(_body(prof), _arg("--upload"))
         sys.exit(0)
 
-    md = convert(DOCX)
-    # 표지(제목·버전·작성일)는 Confluence 에서 필요 없다 — 목차부터 싣고 안내를 앞에 붙인다
-    cut = md.find("## 목차")
-    if cut > 0:
-        md = header() + "\n" +md[cut:]
-    dst = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    if "--create" in sys.argv:
+        title = _arg("--title")
+        if not title:
+            raise SystemExit("FAIL: --create 에는 --title «쪽 제목» 이 함께 필요합니다")
+        create(_body(prof), _arg("--create"), title)
+        sys.exit(0)
+
+    md = _body(prof)
+    dst = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else os.path.join(
         ROOT, "docs", "manual", "confluence_body.md")
     with open(dst, "w", encoding="utf-8", newline="\n") as f:
         f.write(md)
