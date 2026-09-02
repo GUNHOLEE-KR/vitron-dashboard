@@ -9,7 +9,7 @@
 import {
   thS, tdS, SLOT_MAP, TRANSPORT_MAP, GROUP_BYS,
   workerColor, calWeekDays, monthGridDays, isSameMonth, mdLabel, dayName,
-  shortPlace, planIcon, planDetail, planState, PLAN_STATE_MARK,
+  shortPlace, placeLabel, planIcon, planDetail, planState, PLAN_STATE_MARK,
 } from './schedule-core'
 
 // 달력 배지 하나.
@@ -22,7 +22,7 @@ export function PlanBadge({ plan, workers, onClick, todayStr, compact = false })
   const vacation = plan.use_type === 'vacation'
   return (
     <div data-badge onClick={e => { e.stopPropagation(); onClick && onClick() }}
-      title={`${plan.worker_name} · ${SLOT_MAP[plan.slot]} · ${vacation ? ('휴가 · ' + (plan.vacation_type || '')) : personal ? '개인 사용' : (plan.place_name || plan.place_text || '장소 미정')}${plan.purpose ? ' · ' + plan.purpose : ''}${plan.vehicle_name ? ' · ' + plan.vehicle_name : ''}`}
+      title={`${plan.worker_name} · ${SLOT_MAP[plan.slot]} · ${vacation ? ('휴가 · ' + (plan.vacation_type || '')) : placeLabel(plan)}${plan.purpose ? ' · ' + plan.purpose : ''}${plan.vehicle_name ? ' · ' + plan.vehicle_name : ''}`}
       style={{
         cursor: 'pointer',
         background: st === 'planned' || st === 'needCheck' ? color + '22' : color + 'dd',

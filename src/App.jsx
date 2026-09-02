@@ -24,7 +24,7 @@ import { OUT_TRANSPORTS, TRANSPORT_MAP, OFFICE_PLACE, SLOTS, SLOT_MAP, thS, tdS,
          ymd, today, dayName, mdLabel, addDays, calWeekDays,
          monthGridDays, isSameMonth, shiftMonth,
          workerColor, vehicleColor, VEHICLE_COLORS, GROUP_BYS, buildGroupRows,
-         planIcon, planState } from './shared/schedule-core'
+         planIcon, planState, placeLabel } from './shared/schedule-core'
 import { ScheduleMonth, ScheduleWeek, ScheduleDay } from './shared/ScheduleCalendar'
 import { Card } from './shared/ui'
 
@@ -3906,7 +3906,8 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
   // ⚠ 수정(PATCH)은 보고를 보내지 않으므로 묻지 않는다.
   function confirmReport(){
     const personal=plan.use_type==='personal'
-    const where=personal?'개인 사용':(plan.place_name||plan.place_text||'장소 미정')
+    // 사무실 내근은 장소 이름이 없다 — 규칙은 placeLabel 한 곳에 모여 있다
+    const where=placeLabel(plan)
     const car=[plan.vehicle_name,plan.vehicle_plate].filter(Boolean).join(' ')
     const bits=[mdLabel(plan.plan_date),where,personal?null:plan.purpose,car].filter(Boolean)
     return confirm(
@@ -4328,7 +4329,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
     const p = editing
     // 개인 사용은 행선지·사유를 적지 않는다 (사생활) — 메일과 같은 규칙이다
     const personal = p.use_type==='personal'
-    const where = personal ? '개인 사용' : (p.place_name||p.place_text||'장소 미정')
+    // 사무실 내근은 장소 이름이 없다 — 규칙은 placeLabel 한 곳에 모여 있다
+    const where = placeLabel(p)
     const car = [p.vehicle_name,p.vehicle_plate].filter(Boolean).join(' ')
     const bits = [mdLabel(p.plan_date), where, personal?null:p.purpose, car].filter(Boolean)
     return confirm(

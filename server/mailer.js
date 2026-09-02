@@ -148,13 +148,26 @@ function dayLabel(d) {
 }
 const SLOT = { allday: '종일', am: '오전', pm: '오후', time: '시간 지정' }
 
+// 「어디에서」 한 줄 — 화면 쪽 `src/shared/schedule-core.js` 의 placeLabel 과 «같은 규칙» 이다.
+// ⚠ 두 벌인 까닭: 이쪽은 CommonJS 라 그 ESM 모듈을 가져올 수 없다. 한쪽을 고치면
+//   반드시 다른 쪽도 고칠 것 — 어긋나면 «화면에 보이는 문구» 와 «대표이사께 간 메일» 이
+//   달라지고, 그것은 아무도 눈치채지 못한다 (2026-09-02 에 실제로 겪었다).
+function placeLabel(p) {
+  if (p.use_type === 'personal') return '개인 사용'   // 행선지를 적지 않는다 (사생활)
+  if (p.transport === 'office') return '사무실'       // 장소 목록에 없는 고정 항목이라 이름이 없다
+  const nm = p.place_name || p.place_text
+  if (nm) return nm
+  if (p.vehicle_id || p.vehicle_name) return '차량 예약'   // 행선지를 아예 받지 않는 예약
+  return '장소 미정'
+}
+
 function planLine(p) {
   const bits = [dayLabel(p.plan_date)]
   if (p.slot && p.slot !== 'allday') bits.push(SLOT[p.slot] || p.slot)
   if (p.use_type === 'personal') {
     bits.push('개인 사용')                 // 🔑 개인 사용의 행선지는 적지 않는다 (사생활)
   } else {
-    bits.push(p.place_name || p.place_text || '장소 미정')
+    bits.push(placeLabel(p))
     if (p.purpose) bits.push(p.purpose)
   }
   const car = [p.vehicle_name, p.vehicle_plate].filter(Boolean).join(' ')
@@ -238,7 +251,7 @@ function buildDone({ actorName, actorEmail, a, sender }) {
   //    ⚠ 지금은 서버가 개인 사용 실적의 place·purpose 를 비워 두지만(keepPlace),
   //    그 조건이 바뀌면 여기로 새어 나온다. 저쪽을 믿지 말고 여기서도 막는다.
   const personal = a.use_type === 'personal'
-  const where = personal ? '개인 사용' : (a.place_name || a.place_text || '장소 미정')
+  const where = placeLabel(a)
   const why = personal ? null : a.purpose
 
   const subject = `[완료] ${who} · ${dayLabel(a.work_date)} · ${where}`

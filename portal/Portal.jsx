@@ -7,7 +7,7 @@
 import { useState, useEffect, useMemo } from 'react'
 import {
   today, dayName, mdLabel, addDays, calWeekDays,
-  monthGridDays, shiftMonth, buildGroupRows, TRANSPORT_MAP,
+  monthGridDays, shiftMonth, buildGroupRows, TRANSPORT_MAP, placeLabel,
 } from '../src/shared/schedule-core'
 import { ScheduleWeek, ScheduleMonth } from '../src/shared/ScheduleCalendar'
 import * as api from './api'
@@ -50,8 +50,9 @@ const box = { background: '#fff', border: `1px solid ${C.line}`, borderRadius: 1
 function planLine(p) {
   if (!p) return null
   if (p.use_type === 'vacation') return `🌴 휴가 (${p.vacation_type || ''})`
-  const where = p.use_type === 'personal' ? '개인 사용'
-    : (p.place_name || p.place_text || (p.transport === 'office' ? '사무실' : '장소 미정'))
+  // 여기 있던 사본을 정본(placeLabel)으로 옮겼다 — 이 규칙만 맞고 나머지 세 곳이
+  // 틀려 있었다 (2026-09-02).
+  const where = placeLabel(p)
   const tp = TRANSPORT_MAP[p.transport] || TRANSPORT_MAP.office
   const bits = [where]
   if (p.purpose) bits.push(p.purpose)

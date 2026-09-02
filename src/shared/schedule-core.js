@@ -194,6 +194,26 @@ export function buildGroupRows(groupBy, workers, places, vehicles, plans, opts =
   return rows
 }
 
+// ── 「어디에서」 한 줄 ──────────────────────────────────────
+// 확인 창 · 풍선 · 메일이 함께 쓰는 «행선지 문구» 의 정본.
+//
+// 🔑 규칙이 곳곳에 따로 적혀 있어 사고가 났다 (2026-09-02).
+//    사무실 내근은 장소 목록에 없는 고정 항목이라 place_id 가 비고 transport 로만
+//    구분되는데, 장소 이름만 보던 곳들이 「장소 미정」으로 떨어뜨렸다. 완료 처리
+//    확인 창은 물론 «대표이사께 가는 보고 메일 제목» 까지 그렇게 나갔다.
+//    ⚠ 새로 쓰는 곳에서 이름만 보고 판단하지 말고 반드시 이것을 쓸 것.
+export function placeLabel(plan) {
+  if (plan.use_type === 'vacation') return '휴가'   // 종류까지 붙일 곳은 부르는 쪽에서 처리한다
+  if (plan.use_type === 'personal') return '개인 사용'   // 행선지를 적지 않는다 (사생활)
+  if (plan.transport === 'office') return '사무실'
+  const nm = plan.place_name || plan.place_text
+  if (nm) return nm
+  // 차량만 잡아 둔 예약은 «행선지를 아예 받지 않는다». 「장소 미정」이라고 하면
+  // 빠뜨린 것처럼 읽히므로 무엇을 한 것인지 그대로 적는다 (2026-09-02 사용자 결정).
+  if (plan.vehicle_id || plan.vehicle_name) return '차량 예약'
+  return '장소 미정'
+}
+
 // ── 배지 문구 ───────────────────────────────────────────────
 // 배지에 넣을 짧은 장소 이름. 달력 칸이 좁아 긴 이름은 잘라야 한다.
 // 편도면 방향을 화살표로 덧붙인다 — 「→현장」 은 나가는 길, 「현장→」 은 돌아오는 길.
