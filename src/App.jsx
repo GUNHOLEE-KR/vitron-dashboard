@@ -4275,6 +4275,26 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   // 차량 예약은 이동 수단이 «법인차량 또는 자차» 뿐이다(대중교통은 차량이 아니다)
   const vehicleTransports=OUT_TRANSPORTS.filter(t=>t.needsVehicle)
 
+  // 🔑 자차는 «그 일정의 주인» 것만 고를 수 있다 (2026-09-03 지시).
+  //    종전에는 kind==='own' 만 보아 등록된 모든 사람의 자차가 나왔다. 남의 차로
+  //    등록하면 환급이 «남의 차 연비» 로 계산되고 차량 기준 보기(배차표)에도 그 차를
+  //    남이 쓴 것으로 잡힌다 — 조용히 어긋나는 종류라 눈치채기 어렵다.
+  //    ⚠ 기준은 «로그인한 나» 가 아니라 «대상자(workerId)» 다. 관리자가 대신 등록할 때
+  //      내 차가 나오면 안 된다.
+  const ownerName=workers.find(w=>Number(w.id)===Number(workerId))?.name
+  const ownCarsOfWorker=vehicles.filter(
+    v=>v.kind==='own'&&Number(v.owner_worker_id)===Number(workerId))
+  // ⚠ 이미 골라져 있는 차량은 목록에 남긴다. 예전에 남의 자차로 저장된 계획을 열었을 때
+  //   목록에서 빠지면 «있던 값이 빈칸» 이 되어 무엇이 들어 있었는지 알 수 없게 된다.
+  //   (완료된 업무를 고른 채로 두는 것과 같은 원칙)
+  const pickable=(()=>{
+    const base=transport==='company_car'
+      ? vehicles.filter(v=>v.kind==='company')
+      : ownCarsOfWorker
+    const cur=vehicles.find(v=>String(v.id)===String(vehicleId))
+    return cur&&!base.some(v=>v.id===cur.id) ? [...base,cur] : base
+  })()
+
   const inputS={padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,width:'100%'}
   const labelS={fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:4,display:'block'}
   const rowS={marginBottom:12}
@@ -4516,7 +4536,10 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
           <label style={labelS}>이름</label>
           {/* 일반 사용자는 본인 것만 만들 수 있어 고를 것이 없다. 콤보를 그대로 두면
               고를 수 있는 것처럼 보여 헷갈린다. */}
-          <select value={workerId} onChange={e=>setWorkerId(e.target.value)}
+          {/* ⚠ 사람을 바꾸면 차량 선택을 비운다. 자차는 «그 사람 것만» 고를 수 있는데,
+              A 의 자차를 고른 뒤 대상자를 B 로 바꾸면 B 의 일정에 A 의 차가 남는다.
+              이동 수단을 바꿀 때 비우는 것과 같은 이유다. */}
+          <select value={workerId} onChange={e=>{setWorkerId(e.target.value);setVehicleId('')}}
             disabled={!canEdit||!canEditOthers} style={inputS}>
             <option value="">선택</option>
             {(canEditOthers?workers:workers.filter(w=>Number(w.id)===Number(owner)))
@@ -4747,17 +4770,18 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
             <label style={labelS}>차량</label>
             <select value={vehicleId} onChange={e=>setVehicleId(e.target.value)} disabled={!canEdit} style={inputS}>
               <option value="">선택</option>
-              {vehicles
-                .filter(v=>transport==='company_car'?v.kind==='company':v.kind==='own')
-                .map(v=>(
-                  <option key={v.id} value={v.id}>
-                    {v.name}{v.plate?' '+v.plate:''}{v.owner_name?' ('+v.owner_name+')':''}
-                  </option>
-                ))}
+              {pickable.map(v=>(
+                <option key={v.id} value={v.id}>
+                  {v.name}{v.plate?' '+v.plate:''}
+                  {/* 자차는 목록이 «그 사람 것뿐» 이라 소유자 이름이 군더더기다 */}
+                  {v.kind!=='own'&&v.owner_name?' ('+v.owner_name+')':''}
+                </option>
+              ))}
             </select>
-            {transport==='own_car'&&vehicles.filter(v=>v.kind==='own').length===0&&(
+            {transport==='own_car'&&ownCarsOfWorker.length===0&&(
               <div style={{fontSize:11,color:'#92400e',marginTop:5}}>
-                등록된 자차가 없습니다. 설정에서 자차를 먼저 등록해 주세요.
+                {ownerName?`${ownerName} 님의 자차가 등록돼 있지 않습니다.`:'등록된 자차가 없습니다.'}
+                {' '}자차는 [설정] 탭에서 본인이 등록합니다.
               </div>
             )}
           </div>

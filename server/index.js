@@ -921,6 +921,28 @@ app.get('/api/schedule/vehicle-usage', async (req, res) => {
 // 일정 유형 세 가지 — business(업무) · personal(개인 사용) · vacation(휴가)
 const USE_TYPES = ['business', 'personal', 'vacation']
 
+// 🔑 자차는 «그 사람 것» 만 쓸 수 있다 (2026-09-03 지시).
+//    화면에서 목록을 좁히기는 하지만 그것만으로는 뚫린다 — 본문을 직접 만들어 보내면
+//    남의 자차로 등록된다. 「본인 것만 수정」을 서버에서도 막는 것과 같은 이유다.
+//    남의 자차로 등록되면 환급이 «남의 차 연비» 로 계산되고 차량 기준 보기에도
+//    그 차를 남이 쓴 것으로 잡힌다 — 조용히 어긋나 아무도 눈치채지 못한다.
+//    ⚠ 법인차량은 누구나 쓰는 것이므로 검사 대상이 아니다.
+//    ⚠ 판정 기준은 «본문의 worker_id» 가 아니라 부르는 쪽이 넘겨 주는 «그 기록의 주인» 이다.
+async function ownCarError(vehicleId, workerId) {
+  if (!vehicleId) return null
+  const { rows } = await pool.query(
+    `SELECT v.kind, v.owner_worker_id, w.name AS owner_name
+       FROM schedule_vehicles v LEFT JOIN workers w ON w.id = v.owner_worker_id
+      WHERE v.id = $1`, [vehicleId])
+  if (rows.length === 0) return '차량을 찾을 수 없습니다.'
+  const v = rows[0]
+  if (v.kind !== 'own') return null
+  if (v.owner_worker_id != null && Number(v.owner_worker_id) === Number(workerId)) return null
+  return v.owner_name
+    ? `자차는 본인 차량만 쓸 수 있습니다 — 이 차는 ${v.owner_name} 님의 자차입니다.`
+    : '자차는 본인 차량만 쓸 수 있습니다.'
+}
+
 app.post('/api/schedule/plans', async (req, res) => {
   const b = req.body
   if (!b.worker_id) return res.status(400).json({ error: '이름을 먼저 선택해 주세요.' })
@@ -936,6 +958,10 @@ app.post('/api/schedule/plans', async (req, res) => {
   const purpose   = keepPlace ? (b.purpose || null) : null
   const vacationType = useType === 'vacation' ? (b.vacation_type || null) : null
   try {
+    // 자차 소유 검사 — 겹침 검사보다 «먼저» 본다. 애초에 쓸 수 없는 차라면
+    // 「이미 예약된 차량입니다」로 되묻는 것이 안내로도 맞지 않는다.
+    const carErr = await ownCarError(b.vehicle_id, b.worker_id)
+    if (carErr) return res.status(400).json({ error: carErr })
     // 차량 겹침 검사 — 먼저 등록한 사람이 우선이고, 겹치면 경고만 한다.
     // force=true 로 다시 부르면 그대로 등록된다 (승인 절차를 두지 않는다)
     if (b.vehicle_id && !b.force) {
@@ -1035,6 +1061,9 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
     const { rows: cur } = await pool.query('SELECT * FROM schedule_plans WHERE id = $1', [req.params.id])
     if (cur.length === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
     if (!canEditWorker(req.session, cur[0].worker_id)) return denyOther(res)
+    // 자차 소유 검사 — 대상은 «바뀐 뒤» 의 차량이고, 기준은 그 계획의 주인이다
+    const carErr = await ownCarError(b.vehicle_id ?? cur[0].vehicle_id, cur[0].worker_id)
+    if (carErr) return res.status(400).json({ error: carErr })
     const useType = b.use_type ?? cur[0].use_type
     const keepPlace = useType === 'business'
     const { rowCount } = await pool.query(
@@ -1552,6 +1581,10 @@ app.post('/api/schedule/actuals', async (req, res) => {
     // 계획에 붙는 실적이면 «계획의 주인» 을 본다. 본문의 worker_id 를 믿으면
     // 남의 계획에 자기 번호를 붙여 보내는 것으로 통과된다.
     if (!canEditWorker(req.session, base.worker_id ?? workerId)) return denyOther(res)
+    // 자차 소유 검사 — 「본인만 수정」과 같이 «계획의 주인» 을 기준으로 본다
+    const carErr = await ownCarError(b.vehicle_id ?? base.vehicle_id,
+                                     base.worker_id ?? workerId)
+    if (carErr) return res.status(400).json({ error: carErr })
     const useType  = b.use_type ?? base.use_type ?? 'business'
     const keepPlace = useType === 'business'
     // 왕복이면 거리를 2배로 잡아 기본값을 만든다 (사용자가 고칠 수 있다)
@@ -1604,6 +1637,9 @@ app.patch('/api/schedule/actuals/:id', async (req, res) => {
     if (cur[0].locked) {
       return res.status(409).json({ error: '정산이 완료된 달의 기록입니다. 수정하려면 대표이사가 잠금을 해제해야 합니다.' })
     }
+    // 자차 소유 검사 — 대상은 «바뀐 뒤» 의 차량이고, 기준은 그 실적의 주인이다
+    const carErr = await ownCarError(b.vehicle_id ?? cur[0].vehicle_id, cur[0].worker_id)
+    if (carErr) return res.status(400).json({ error: carErr })
     const useType  = b.use_type ?? cur[0].use_type
     const keepPlace = useType === 'business'
     await pool.query(
