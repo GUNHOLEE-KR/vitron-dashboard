@@ -2193,19 +2193,41 @@ app.get('/api/schedule/settlement', requireLogin, async (req, res) => {
   }
 })
 
+// 본문의 worker_id 를 «사람 하나»로 읽는다. 없으면 null = 그달 전원.
+// ⚠ 숫자가 아닌 값이 들어오면 조용히 전원으로 떨어뜨리지 않고 거절한다 —
+//   한 사람만 확정하려다 전원을 확정해 버리는 사고가 가장 되돌리기 어렵다.
+function oneWorker(req) {
+  const raw = req.body?.worker_id
+  if (raw === undefined || raw === null || raw === '') return null
+  const id = Number(raw)
+  if (!Number.isInteger(id) || id <= 0) return NaN
+  return id
+}
+
 // 정산 확정 — 대표이사만. 그 달 금액을 «승인 시점 값으로 박아» 두고 실적을 잠근다.
 // 나중에 단가나 연비가 바뀌어도 지난 정산액이 흔들리지 않게 하려는 것이다.
+//
+// 🔑 «사람별»로 확정한다 (2026-09-03). 종전에는 그달 전원을 한 번에 확정하고
+//    잠금도 `WHERE work_date BETWEEN …` 로 그달 전체를 잠갔다. 그래서 한 사람의
+//    실적이 늦어지면 나머지 정산까지 함께 묶여 기다려야 했다.
+//    worker_id 를 주면 그 사람만, 주지 않으면 종전대로 전원을 확정한다.
 app.post('/api/schedule/settlement/:ym/approve', requireLogin, async (req, res) => {
   const ym = req.params.ym
   if (!/^\d{4}-\d{2}$/.test(ym)) return res.status(400).json({ error: 'ym 형식이 올바르지 않습니다.' })
   if (!await canApprove(req.session.uid)) {
     return res.status(403).json({ error: '정산 승인 권한이 없습니다. 대표이사만 승인할 수 있습니다.' })
   }
+  const only = oneWorker(req)
+  if (Number.isNaN(only)) return res.status(400).json({ error: 'worker_id 가 올바르지 않습니다.' })
   const client = await pool.connect()
   try {
     const calc = await buildSettlement(ym)
+    const targets = only === null ? calc.workers : calc.workers.filter(w => w.worker_id === only)
+    if (targets.length === 0) {
+      return res.status(404).json({ error: '이 달에 정산할 실적이 없습니다.' })
+    }
     await client.query('BEGIN')
-    for (const w of calc.workers) {
+    for (const w of targets) {
       await client.query(
         `INSERT INTO schedule_settlements
            (ym, worker_id, personal_km, personal_amount, toll_amount,
@@ -2220,13 +2242,21 @@ app.post('/api/schedule/settlement/:ym/approve', requireLogin, async (req, res) 
         [ym, w.worker_id, w.personal_km, w.personal_amount, w.toll_amount,
          w.own_car_km, w.own_car_liter, w.transit_amount, req.session.uid])
     }
-    // 그 달 실적을 잠근다 — 승인 금액과 근거가 어긋나지 않게 한다
+    // 확정한 사람의 실적만 잠근다 — 승인 금액과 근거가 어긋나지 않게 한다.
+    // ⚠ 여기에 worker_id 를 걸지 않으면 한 사람을 확정해도 그달 전원의 실적이
+    //   잠겨, 아직 확정하지 않은 사람이 자기 실적을 고칠 수 없게 된다.
     const [from, to] = ymRange(ym)
-    const { rowCount } = await client.query(
-      'UPDATE schedule_actuals SET locked = TRUE WHERE work_date >= $1 AND work_date <= $2',
-      [from, to])
+    const params = [from, to]
+    let sql = 'UPDATE schedule_actuals SET locked = TRUE WHERE work_date >= $1 AND work_date <= $2'
+    if (only !== null) { sql += ' AND worker_id = $3'; params.push(only) }
+    const { rowCount } = await client.query(sql, params)
     await client.query('COMMIT')
-    res.json({ ok: true, workers: calc.workers.length, locked: rowCount })
+    res.json({
+      ok: true,
+      workers: targets.length,
+      names: targets.map(w => w.worker_name),
+      locked: rowCount,
+    })
   } catch (e) {
     await client.query('ROLLBACK')
     res.status(500).json({ error: e.message })
@@ -2236,22 +2266,28 @@ app.post('/api/schedule/settlement/:ym/approve', requireLogin, async (req, res) 
 })
 
 // 잠금 해제 — 정정이 필요할 때. 대표이사만. 다시 승인해야 확정된다.
+// 확정과 같이 worker_id 를 주면 «그 사람만» 푼다.
 app.post('/api/schedule/settlement/:ym/reopen', requireLogin, async (req, res) => {
   const ym = req.params.ym
   if (!/^\d{4}-\d{2}$/.test(ym)) return res.status(400).json({ error: 'ym 형식이 올바르지 않습니다.' })
   if (!await canApprove(req.session.uid)) {
     return res.status(403).json({ error: '잠금 해제 권한이 없습니다. 대표이사만 할 수 있습니다.' })
   }
+  const only = oneWorker(req)
+  if (Number.isNaN(only)) return res.status(400).json({ error: 'worker_id 가 올바르지 않습니다.' })
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    await client.query(
-      `UPDATE schedule_settlements SET status='open', settled_by=NULL, settled_at=NULL,
-              updated_at=now() WHERE ym = $1`, [ym])
+    const sParams = [ym]
+    let sSql = `UPDATE schedule_settlements SET status='open', settled_by=NULL, settled_at=NULL,
+                       updated_at=now() WHERE ym = $1`
+    if (only !== null) { sSql += ' AND worker_id = $2'; sParams.push(only) }
+    await client.query(sSql, sParams)
     const [from, to] = ymRange(ym)
-    const { rowCount } = await client.query(
-      'UPDATE schedule_actuals SET locked = FALSE WHERE work_date >= $1 AND work_date <= $2',
-      [from, to])
+    const params = [from, to]
+    let sql = 'UPDATE schedule_actuals SET locked = FALSE WHERE work_date >= $1 AND work_date <= $2'
+    if (only !== null) { sql += ' AND worker_id = $3'; params.push(only) }
+    const { rowCount } = await client.query(sql, params)
     await client.query('COMMIT')
     res.json({ ok: true, unlocked: rowCount })
   } catch (e) {

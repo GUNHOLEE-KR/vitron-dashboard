@@ -3601,9 +3601,19 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
   const [loading,setLoading]=useState(false)
   const [busy,setBusy]=useState(false)
 
-  const settled=data?.saved?.some(s=>s.status==='settled')
-  const settledBy=data?.saved?.find(s=>s.settled_by_name)?.settled_by_name
-  const settledAt=data?.saved?.find(s=>s.settled_at)?.settled_at
+  // 🔑 정산은 «사람별»이다 (2026-09-03). 종전에는 한 명만 확정돼도 화면 전체가
+  //    「정산 완료」로 보였다 — 그 착시 때문에 남은 사람의 정산이 잊히기 쉬웠다.
+  const savedOf=(id)=>data?.saved?.find(s=>s.worker_id===id&&s.status==='settled')
+  const totalCount=(data?.workers||[]).length
+  const settledCount=(data?.workers||[]).filter(w=>savedOf(w.worker_id)).length
+  const allSettled=totalCount>0&&settledCount===totalCount
+
+  // 확정 뒤에 단가·연비·실적이 바뀌면 «박제된 금액»과 지금 계산이 어긋난다.
+  // 숨기지 않고 «둘 다» 보여 준다 — 어느 쪽으로 정리할지는 대표이사가 판단할 일이다.
+  const SNAP=['personal_km','personal_amount','toll_amount',
+              'own_car_km','own_car_liter','transit_amount']
+  const diffOf=(w,s)=>s?SNAP.filter(k=>Number(s[k]||0)!==Number(w[k]||0)):[]
+  const changed=(data?.workers||[]).filter(w=>diffOf(w,savedOf(w.worker_id)).length>0)
 
   async function load(target=ym){
     setLoading(true)
@@ -3620,17 +3630,20 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
   // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
   useEffect(()=>{ if(me) load(ym) },[me,ym])
 
-  async function approve(){
-    if(!confirm(`${ym} 정산을 확정할까요?\n\n· 이 달 금액이 승인 시점 값으로 저장됩니다\n· 이 달 실적은 수정할 수 없게 잠깁니다\n\n정정이 필요하면 나중에 잠금을 해제하고 다시 승인할 수 있습니다.`))return
-    try{ setBusy(true); const r=await approveSettlement(ym)
-      showToast(`정산 확정 — ${r.workers}명 · 실적 ${r.locked}건 잠금`); await load(ym)
+  // workerId 를 주면 그 사람만, 주지 않으면 아직 남은 전원을 한꺼번에 처리한다.
+  async function approve(workerId,workerName){
+    const who=workerId?`${workerName} 님의 ${ym} 정산`:`${ym} 정산 (남은 ${totalCount-settledCount}명 전원)`
+    if(!confirm(`${who}을 확정할까요?\n\n· 금액이 승인 시점 값으로 저장됩니다\n· 그 실적은 수정할 수 없게 잠깁니다\n\n정정이 필요하면 나중에 잠금을 해제하고 다시 확정할 수 있습니다.`))return
+    try{ setBusy(true); const r=await approveSettlement(ym,workerId)
+      showToast(`정산 확정 — ${r.names?.join(', ')||`${r.workers}명`} · 실적 ${r.locked}건 잠금`); await load(ym)
     }catch(e){ showToast('승인 실패: '+e.message) }
     finally{ setBusy(false) }
   }
 
-  async function reopen(){
-    if(!confirm(`${ym} 정산 잠금을 해제할까요?\n\n실적을 다시 고칠 수 있게 되며, 정정 후 다시 승인해야 확정됩니다.`))return
-    try{ setBusy(true); const r=await reopenSettlement(ym)
+  async function reopen(workerId,workerName){
+    const who=workerId?`${workerName} 님의 ${ym} 정산`:`${ym} 정산 (확정된 ${settledCount}명 전원)`
+    if(!confirm(`${who} 잠금을 해제할까요?\n\n실적을 다시 고칠 수 있게 되며, 정정 후 다시 확정해야 합니다.`))return
+    try{ setBusy(true); const r=await reopenSettlement(ym,workerId)
       showToast(`잠금 해제 — 실적 ${r.unlocked}건`); await load(ym)
     }catch(e){ showToast('해제 실패: '+e.message) }
     finally{ setBusy(false) }
@@ -3658,9 +3671,32 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
     for(let m=12;m>=1;m--) months.push(`${y}-${String(m).padStart(2,'0')}`)
   }
 
-  const chargeTotal=(data?.workers||[]).reduce((s,w)=>s+w.charge_total,0)
-  const literTotal=(data?.workers||[]).reduce((s,w)=>s+w.own_car_liter,0)
-  const transitTotal=(data?.workers||[]).reduce((s,w)=>s+w.transit_amount,0)
+  const kmTxt=(n)=>n?`${n}km`:'-'
+  const literTxt=(n)=>n?`${n}L`:'-'
+  const chargeOf=(s)=>Number(s.personal_amount||0)+Number(s.toll_amount||0)
+
+  // 합계는 «실제로 정산될 값» 으로 낸다 — 확정된 사람은 박제 금액, 나머지는 지금 계산.
+  const effective=(w)=>{
+    const s=savedOf(w.worker_id)
+    return s
+      ?{charge:chargeOf(s),liter:Number(s.own_car_liter||0),transit:Number(s.transit_amount||0)}
+      :{charge:w.charge_total,liter:w.own_car_liter,transit:w.transit_amount}
+  }
+  const chargeTotal=(data?.workers||[]).reduce((t,w)=>t+effective(w).charge,0)
+  const literTotal=(data?.workers||[]).reduce((t,w)=>t+effective(w).liter,0)
+  const transitTotal=(data?.workers||[]).reduce((t,w)=>t+effective(w).transit,0)
+
+  // 확정된 줄은 «확정 금액» 을 크게, 지금 계산이 다르면 그 아래에 주황으로 함께 보인다.
+  const cell=(w,s,key,fmt)=>{
+    if(!s) return fmt(w[key])
+    if(Number(s[key]||0)===Number(w[key]||0)) return fmt(s[key])
+    return(<>
+      {fmt(s[key])}
+      <div style={{fontSize:10,color:'#c2410c',fontWeight:700}}>→ 현재 {fmt(w[key])}</div>
+    </>)
+  }
+  const rowBtn={padding:'3px 9px',borderRadius:6,fontSize:11,cursor:'pointer',
+    fontWeight:700,marginTop:4}
 
   return(
     <div>
@@ -3670,14 +3706,22 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
           style={{padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}>
           {months.map(m=><option key={m} value={m}>{m.slice(0,4)}년 {Number(m.slice(5,7))}월</option>)}
         </select>
-        {settled
+        {/* 사람별로 확정하므로 「몇 명이 끝났는지」를 그대로 보여 준다 */}
+        {allSettled
           ?<span style={{fontSize:12,fontWeight:700,color:'#065f46',background:'#ecfdf5',
             border:'1px solid #6ee7b7',borderRadius:20,padding:'4px 12px'}}>
-            정산 완료{settledBy?` · ${settledBy}`:''}
-            {settledAt?` · ${String(settledAt).slice(0,10)}`:''}
+            정산 완료 · {settledCount}명 전원
           </span>
           :<span style={{fontSize:12,fontWeight:700,color:'#9a3412',background:'#fff7ed',
-            border:'1px solid #fdba74',borderRadius:20,padding:'4px 12px'}}>미정산</span>}
+            border:'1px solid #fdba74',borderRadius:20,padding:'4px 12px'}}>
+            {settledCount>0?`${settledCount}/${totalCount}명 정산 완료`:'미정산'}
+          </span>}
+        {changed.length>0&&(
+          <span style={{fontSize:12,fontWeight:700,color:'#c2410c',background:'#fff7ed',
+            border:'1px solid #fdba74',borderRadius:20,padding:'4px 12px'}}>
+            ⚠ 확정 뒤 금액 변경 {changed.length}명
+          </span>
+        )}
         <div style={{flex:1}}/>
         <span style={{fontSize:12,color:'#6b7280'}}>
           {me.name} ({me.role}{me.can_approve?' · 승인 권한':''})
@@ -3759,35 +3803,72 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
                   <th style={thS}>자차 업무</th>
                   <th style={thS}>환급</th>
                   <th style={thS}>대중교통</th>
+                  <th style={{...thS,width:110}}>정산</th>
                 </tr></thead>
                 <tbody>
-                  {data.workers.map(w=>(
-                    <tr key={w.worker_id}>
+                  {data.workers.map(w=>{
+                    const s=savedOf(w.worker_id)
+                    const diff=diffOf(w,s)
+                    return(
+                    <tr key={w.worker_id} style={s?{background:'#f7fdfa'}:undefined}>
                       <td style={{...tdS,textAlign:'left',fontWeight:700}}>
                         {w.worker_name}
                         {w.team&&<div style={{fontSize:10,color:'#6b7280',fontWeight:500}}>{w.team}</div>}
                       </td>
-                      <td style={tdS}>{w.personal_km?`${w.personal_km}km`:'-'}</td>
-                      <td style={tdS}>{money(w.personal_amount)}</td>
-                      <td style={tdS}>{money(w.toll_amount)}</td>
+                      <td style={tdS}>{cell(w,s,'personal_km',kmTxt)}</td>
+                      <td style={tdS}>{cell(w,s,'personal_amount',money)}</td>
+                      <td style={tdS}>{cell(w,s,'toll_amount',money)}</td>
                       <td style={{...tdS,fontWeight:700,color:w.charge_total?'#b45309':'#9ca3af'}}>
-                        {money(w.charge_total)}
+                        {s
+                          ?(chargeOf(s)===w.charge_total
+                            ?money(chargeOf(s))
+                            :<>{money(chargeOf(s))}
+                              <div style={{fontSize:10,color:'#c2410c',fontWeight:700}}>
+                                → 현재 {money(w.charge_total)}
+                              </div></>)
+                          :money(w.charge_total)}
                       </td>
-                      <td style={tdS}>{w.own_car_km?`${w.own_car_km}km`:'-'}</td>
+                      <td style={tdS}>{cell(w,s,'own_car_km',kmTxt)}</td>
                       <td style={{...tdS,fontWeight:700,color:w.own_car_liter?'#047857':'#9ca3af'}}>
-                        {w.own_car_liter?`${w.own_car_liter}L`:'-'}
+                        {cell(w,s,'own_car_liter',literTxt)}
                         {w.own_car_missing_efficiency&&
                           <div style={{fontSize:10,color:'#c2410c',fontWeight:600}}>연비 미입력</div>}
                       </td>
-                      <td style={tdS}>{money(w.transit_amount)}</td>
+                      <td style={tdS}>{cell(w,s,'transit_amount',money)}</td>
+                      <td style={{...tdS,whiteSpace:'nowrap'}}>
+                        {s
+                          ?<>
+                            <div style={{fontSize:11,fontWeight:700,color:'#065f46'}}>✅ 확정</div>
+                            <div style={{fontSize:10,color:'#6b7280'}}>
+                              {s.settled_by_name||''}
+                              {s.settled_at?` · ${String(s.settled_at).slice(0,10)}`:''}
+                            </div>
+                            {diff.length>0&&
+                              <div style={{fontSize:10,color:'#c2410c',fontWeight:700}}>⚠ 확정 뒤 변경</div>}
+                            {data.can_approve&&
+                              <button onClick={()=>reopen(w.worker_id,w.worker_name)} disabled={busy}
+                                style={{...rowBtn,border:'1px solid #fca5a5',background:'#fff',
+                                  color:'#dc2626'}}>해제</button>}
+                          </>
+                          :<>
+                            <div style={{fontSize:11,fontWeight:700,color:'#9a3412'}}>미정산</div>
+                            {data.can_approve&&
+                              <button onClick={()=>approve(w.worker_id,w.worker_name)} disabled={busy}
+                                style={{...rowBtn,border:'none',background:'#059669',
+                                  color:'#fff'}}>확정</button>}
+                          </>}
+                      </td>
                     </tr>
-                  ))}
+                  )})}
                 </tbody>
               </table>
             </div>
             <div style={{marginTop:10,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
               💡 <strong>입금액</strong> = 개인 사용 거리 × 차량 단가 + 하이패스 — 직원이 회사 계좌로 입금합니다.<br/>
-              💡 <strong>환급</strong> = 자차 업무 거리 ÷ 그 차의 연비 — 금액이 아니라 <strong>주유 한도(리터)</strong>로 지급합니다.
+              💡 <strong>환급</strong> = 자차 업무 거리 ÷ 그 차의 연비 — 금액이 아니라 <strong>주유 한도(리터)</strong>로 지급합니다.<br/>
+              💡 확정한 줄은 <strong>확정 당시 금액</strong>을 보여 줍니다. 그 뒤 단가·연비·실적이 바뀌어
+              값이 달라졌으면 아래에 <span style={{color:'#c2410c',fontWeight:700}}>→ 현재</span> 로 함께 적습니다.
+              위 합계도 <strong>확정된 분은 확정 금액</strong> 기준입니다.
             </div>
           </Card>
 
@@ -3826,32 +3907,57 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
           <VehicleRates canApprove={!!data.can_approve} showToast={showToast}/>
 
           <Card title="정산 확정">
+            {/* ⚠ approve/reopen 은 인자를 받는다. onClick 에 그대로 넘기면 클릭 이벤트가
+                  worker_id 자리에 들어가므로 반드시 감싸서 부른다. */}
             {data.can_approve
               ?<div>
                 <div style={{fontSize:12,color:'#374151',marginBottom:12,lineHeight:1.7}}>
-                  확정하면 이 달 금액이 <strong>승인 시점 값으로 저장</strong>되고 실적이 잠깁니다.
-                  나중에 단가나 연비가 바뀌어도 지난 정산액은 흔들리지 않습니다.
+                  확정하면 그 금액이 <strong>승인 시점 값으로 저장</strong>되고 실적이 잠깁니다.
+                  나중에 단가나 연비가 바뀌어도 지난 정산액은 흔들리지 않습니다.<br/>
+                  <strong>사람별로 확정</strong>합니다 — 위 「사람별」 표의 오른쪽 끝에서
+                  한 분씩 처리하시고, 아래 단추는 남은 분을 한꺼번에 처리할 때 쓰십시오.
                 </div>
-                <div style={{display:'flex',gap:8}}>
-                  {!settled
-                    ?<button onClick={approve} disabled={busy}
+                <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                  {settledCount<totalCount&&
+                    <button onClick={()=>approve()} disabled={busy}
                       style={{padding:'11px 22px',borderRadius:8,border:'none',background:'#059669',
                         color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
-                      {busy?'처리 중…':`${ym} 정산 확정`}
-                    </button>
-                    :<button onClick={reopen} disabled={busy}
+                      {busy?'처리 중…':`남은 ${totalCount-settledCount}명 한꺼번에 확정`}
+                    </button>}
+                  {settledCount>0&&
+                    <button onClick={()=>reopen()} disabled={busy}
                       style={{padding:'11px 22px',borderRadius:8,border:'1px solid #fca5a5',
                         background:'#fff',color:'#dc2626',cursor:'pointer',fontSize:14,fontWeight:700}}>
-                      {busy?'처리 중…':'잠금 해제 (정정)'}
+                      {busy?'처리 중…':`확정된 ${settledCount}명 전원 잠금 해제`}
                     </button>}
                 </div>
               </div>
               :<div style={{fontSize:12,color:'#6b7280',lineHeight:1.7}}>
                 정산 확정은 <strong>대표이사만</strong> 할 수 있습니다.
-                {settled
-                  ?<div style={{color:'#065f46',marginTop:6}}>이 달은 이미 정산이 완료되었습니다.</div>
-                  :<div style={{marginTop:6}}>확정 전이므로 금액이 바뀔 수 있습니다.</div>}
+                {allSettled
+                  ?<div style={{color:'#065f46',marginTop:6}}>이 달은 전원 정산이 완료되었습니다.</div>
+                  :<div style={{marginTop:6}}>
+                    {settledCount>0
+                      ?`${totalCount}명 가운데 ${settledCount}명이 확정되었습니다. 남은 분은 금액이 바뀔 수 있습니다.`
+                      :'확정 전이므로 금액이 바뀔 수 있습니다.'}
+                  </div>}
               </div>}
+
+            {/* 확정 뒤에 근거가 달라진 사람 — 조용히 두면 아무도 알아채지 못한다 */}
+            {changed.length>0&&(
+              <div style={{marginTop:12,padding:'10px 12px',background:'#fff7ed',
+                border:'1px solid #fdba74',borderRadius:8,fontSize:12,color:'#9a3412',lineHeight:1.8}}>
+                <strong>⚠ 확정한 뒤 금액이 달라진 분이 {changed.length}명 있습니다</strong>
+                <div style={{marginTop:4}}>
+                  {changed.map(w=>w.worker_name).join(' · ')}
+                </div>
+                <div style={{marginTop:4,opacity:.9}}>
+                  표에 <strong>확정 금액</strong>과 <strong>→ 현재</strong> 계산을 함께 적어 두었습니다.
+                  실제로 지급·입금되는 금액은 <strong>확정 금액</strong>입니다. 현재 값으로 고치시려면
+                  그 분의 <strong>[해제]</strong> 를 누르고 다시 <strong>[확정]</strong> 하십시오.
+                </div>
+              </div>
+            )}
             <div style={{marginTop:14,paddingTop:12,borderTop:'1px solid #e5e7eb',fontSize:11,color:'#6b7280',lineHeight:1.8}}>
               <strong>입금 계좌</strong> — 기업은행 456-010313-04-011 (주) 바이트론 이앤에스<br/>
               정산 주기는 매월 1회(익월 초)입니다.

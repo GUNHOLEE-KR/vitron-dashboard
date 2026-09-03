@@ -91,9 +91,16 @@ export const logout = () => authRequest('POST', '/auth/logout')
 export const whoAmI = () => authRequest('GET', '/auth/me')
 
 // ── 정산 ──
+// workerId 를 주면 «그 사람만» 확정·해제한다. 주지 않으면 그달 전원 (종전 동작).
+// 🔑 사람마다 정산이 끝나는 시점이 다르다 — 출장에서 늦게 돌아온 한 사람 때문에
+//    나머지 일곱 명의 정산까지 미뤄 두어야 하는 것이 이 화면의 가장 큰 불편이었다.
 export const getSettlement = (ym) => authRequest('GET', `/schedule/settlement?ym=${ym}`)
-export const approveSettlement = (ym) => authRequest('POST', `/schedule/settlement/${ym}/approve`)
-export const reopenSettlement = (ym) => authRequest('POST', `/schedule/settlement/${ym}/reopen`)
+export const approveSettlement = (ym, workerId) =>
+  authRequest('POST', `/schedule/settlement/${ym}/approve`,
+    workerId ? { worker_id: workerId } : {})
+export const reopenSettlement = (ym, workerId) =>
+  authRequest('POST', `/schedule/settlement/${ym}/reopen`,
+    workerId ? { worker_id: workerId } : {})
 
 // ── 실적 ──
 export function getActuals(from, to, workerId) {
