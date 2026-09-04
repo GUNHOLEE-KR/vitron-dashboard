@@ -18,6 +18,8 @@ import { getHolidays, syncHolidays, addHoliday, setHolidayWorking, removeHoliday
          restDaySet } from './repositories/holidayRepo'
 import { getPurchases, addPurchase, setPurchaseStatus,
          removePurchase } from './repositories/purchaseRepo'
+import { getAgenda, addAgenda, updateAgenda, removeAgenda,
+         confirmAgenda, agendaToJira } from './repositories/agendaRepo'
 // ⚠ removeHipass 는 아직 화면에서 부르지 않는다 — 잘못 올린 건을 지우는 자리를
 //   만들 때 쓴다(서버·호출기는 이미 있다). 지금 넣으면 쓰지 않는 import 가 된다.
 import { getHipass, uploadHipass, claimHipass, addManualHipass,
@@ -88,7 +90,7 @@ const FIXED_PARENT='고정업무'
 // 값 80 = 배경의 위아래 여백 40+40 (여백이 다른 팝업은 제 값을 따로 쓴다).
 const MODAL_MAX_H='calc(100vh - 80px)'
 
-const TABS=['today','daily','weekly','monthly','yearly','schedule','purchase','settings']
+const TABS=['today','daily','weekly','monthly','yearly','schedule','agenda','purchase','settings']
 // ── 주소로 탭을 연다 (2026-08-26 신설) ──────────────────────
 // 사내 포털의 타일이 «탭까지» 열어야 한다는 지시. 그전에는 # 를 아무도 읽지 않아
 // 링크에 #schedule 을 붙여 두어도 늘 첫 탭이 열렸다.
@@ -110,7 +112,27 @@ function parseHash(){
 const hashFor=(tab,view)=>
   '#'+tab+(tab==='schedule'&&view&&view!=='week'?'/'+view:'')
 const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'월간',yearly:'연간',
-  schedule:'스케줄',purchase:'구매',settings:'설정'}
+  schedule:'스케줄',agenda:'안건',purchase:'구매',settings:'설정'}
+
+// 안건 상태 — 완료는 «두 단계» 다 (2026-09-04 지시).
+//   done      담당자가 「했다」 고 표시
+//   confirmed 관리자가 확인 → 이때 Jira 이슈도 완료로 넘어간다
+const AGENDA_STATES=[
+  {v:'open',     label:'대기', color:'#6b7280', bg:'#f3f4f6'},
+  {v:'doing',    label:'진행', color:'#1a56db', bg:'#eff6ff'},
+  {v:'done',     label:'완료', color:'#b45309', bg:'#fff7ed'},
+  {v:'confirmed',label:'확인', color:'#065f46', bg:'#ecfdf5'},
+  {v:'hold',     label:'보류', color:'#7c3aed', bg:'#f5f3ff'},
+]
+const agendaState=(v)=>AGENDA_STATES.find(s=>s.v===v)||AGENDA_STATES[0]
+
+// 업무 «전체 문구» 에서 Jira 키를 뽑는다 — `[VITRON-41] …` 또는 `VITRON-41 …`.
+// 🔑 없으면 null 이다. 「고정업무」처럼 Jira 에 없는 항목이 그렇고, 그런 것은
+//    Jira 상위(에픽)로 쓸 수 없다. cleanName 이 떼어 내는 것과 같은 모양을 본다.
+const jiraKeyOf=(text)=>{
+  const m=String(text||'').match(/^\s*\[?([A-Z][A-Z0-9]*-\d+)\]?\s/)
+  return m?m[1]:null
+}
 
 // ── 스케줄 상수 ──────────────────────────────────────────
 // 이동 수단(OUT_TRANSPORTS·TRANSPORT_MAP)·장소 고정값·시간대·색은
@@ -1661,6 +1683,9 @@ function Dashboard({me,onLoggedOut}){
           me={me} mayEdit={mayEdit} onLogout={handleLogout}
           view={schedView} setView={setSchedView}
           clipboard={clipboard} onPaste={handlePaste} onCancelCopy={()=>setClipboard(null)}/>}
+        {tab==='agenda'&&<TabAgenda workers={activeWorkers} dupNames={dupNames}
+          jiraTree={jiraTree} jiraDone={jiraDone}
+          me={me} canEditOthers={canEditOthers} showToast={showToast}/>}
         {tab==='purchase'&&<TabPurchase workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
           me={me} canEditOthers={canEditOthers} showToast={showToast}/>}
         {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers} dupNames={dupNames}
@@ -3134,6 +3159,435 @@ function buyRange(key){
   if(key==='thisYear') return {from:at(y,0,1),   to:at(y,11,31)}
   return {from:'',to:''}
 }
+
+// 안건 — 회의에서 나온 것·확인해야 할 것 (2026-09-04 신설)
+// ════════════════════════════════════════════════════════════
+// 🔑 «대시보드에 적고, 키울 것만 Jira 로 올린다»(사용자 결정). 적는 문턱이 낮아야
+//    실제로 적힌다 — 회의에서 나온 것 상당수는 Jira 이슈로 만들 만큼 크지 않다.
+// 🔑 완료는 두 단계 — 담당자가 «완료», 관리자가 «확인». 확인되면 Jira 도 완료가 된다.
+function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOthers,showToast}){
+  const [rows,setRows]=useState(null)
+  const [err,setErr]=useState('')
+  const [busy,setBusy]=useState(0)
+  const [tick,setTick]=useState(0)
+  const reload=()=>setTick(t=>t+1)
+
+  // 거르개
+  const [fStatus,setFStatus]=useState('')
+  const [fMine,setFMine]=useState(false)
+  // 입력 — 자주 하는 일이 아니라 접어 둔다(구매 요청과 같은 규칙)
+  const [openForm,setOpenForm]=useState(false)
+  const [title,setTitle]=useState('')
+  const [detail,setDetail]=useState('')
+  const [ownerId,setOwnerId]=useState(me?.worker_id??'')
+  const [due,setDue]=useState('')
+  const [source,setSource]=useState('')
+  // 프로젝트 = 업무 입력과 «같은 목록»(Jira 상위업무). 없으면 직접 적거나 비운다.
+  // ⚠ jiraTree 는 배열이 아니라 «{상위업무 이름: [하위업무…]}» 객체다. 키가 곧
+  //   업무 «전체 문구»(`[VITRON-41] …`)이고, Jira 키는 거기서 뽑아 쓴다.
+  const [parentPick,setParentPick]=useState('')   // 고른 «전체 문구»
+  const [parentText,setParentText]=useState('')   // 목록에 없을 때 직접 적은 것
+  const [showDone,setShowDone]=useState(false)
+  const [editing,setEditing]=useState(null)
+
+  useEffect(()=>{
+    let alive=true
+    getAgenda({status:fStatus||undefined,ownerId:fMine?(me?.worker_id||undefined):undefined})
+      .then(d=>{ if(alive){ setRows(d); setErr('') } })
+      .catch(e=>{ if(alive) setErr(e.message) })
+    return ()=>{ alive=false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[tick,fStatus,fMine])
+
+  // 상위업무 목록 — 종료한 것은 기본으로 감추고 「완료 포함」으로 꺼낸다(업무 입력과 같은 규칙).
+  // 🔑 이미 골라 둔 값은 완료여도 목록에 남긴다. 빼면 지난 안건을 열었을 때 빈칸이 된다.
+  const parents=useMemo(()=>{
+    const all=Object.keys(jiraTree||{})
+    return all.filter(t=>showDone||!jiraDone.has(t)||t===parentPick)
+      .sort((a,b)=>(cleanName(a)||a).localeCompare(cleanName(b)||b,'ko'))
+  },[jiraTree,jiraDone,showDone,parentPick])
+  const doneCount=Object.keys(jiraTree||{}).filter(t=>jiraDone.has(t)).length
+
+  const inputS={padding:'8px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,width:'100%'}
+  const labelS={fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:4,display:'block'}
+  const today0=today()
+
+  async function submit(){
+    if(!title.trim()){ showToast('안건 제목을 적어 주세요'); return }
+    try{
+      setBusy(-1)
+      // 🔑 Jira 키는 «전체 문구» 에서 뽑는다. 「고정업무」처럼 키가 없는 것도 있어
+      //    (그런 것은 Jira 상위로 못 쓴다) 문구는 문구대로 함께 남긴다.
+      await addAgenda({title:title.trim(),detail:detail||null,
+        owner_worker_id:ownerId?Number(ownerId):null, due_date:due||null,
+        parent_key:parentPick?jiraKeyOf(parentPick):null,
+        parent_text:parentPick||parentText||null,
+        source:source||null})
+      setTitle(''); setDetail(''); setDue(''); setSource('')
+      setParentText(''); setParentPick('')
+      setOpenForm(false); reload()
+      showToast('안건을 등록했습니다')
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(0) }
+  }
+
+  async function setStatus(a,status){
+    try{ setBusy(a.id); await updateAgenda(a.id,{status}); reload() }
+    catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(0) }
+  }
+
+  async function confirm_(a){
+    if(!confirm(`「${a.title}」을 확인 처리할까요?\n\n`
+      +(a.jira_key?`· Jira ${a.jira_key} 도 «완료» 로 넘어갑니다\n`:'')
+      +'· 확인 뒤에는 목록 아래로 내려갑니다'))return
+    try{
+      setBusy(a.id)
+      const r=await confirmAgenda(a.id)
+      // 🔑 Jira 가 막혀도 확인은 남는다. 그 사실을 «숨기지 않고» 알린다 —
+      //    조용히 넘어가면 저쪽은 열린 채로 남는다.
+      if(r.jira&&!r.jira.ok) showToast(`확인했습니다. 다만 Jira 완료 처리는 실패했습니다 — ${r.jira.why}`)
+      else if(r.jira?.ok) showToast(`확인했습니다 · Jira 도 「${r.jira.to}」로 넘겼습니다`
+        +((r.jira.path?.length>1)?` (${r.jira.path.join(' → ')})`:''))
+      else showToast('확인했습니다')
+      reload()
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(0) }
+  }
+
+  async function toJira(a){
+    const manual=String(a.parent_key||'').startsWith('MANUAL-')
+    if(!confirm(`「${a.title}」을 Jira 에 「작업」으로 올릴까요?\n\n`
+      +(a.due_date?`· 기한 ${a.due_date}\n`:'')
+      +(a.owner_name?`· 담당 ${a.owner_name}\n`:'')
+      +(manual?'\n⚠ 고른 상위업무는 Jira 에 없는 항목이라 «상위 없이» 올라갑니다.':'')))return
+    try{
+      setBusy(a.id)
+      const r=await agendaToJira(a.id)
+      let msg=`Jira ${r.jira_key} 로 올렸습니다`
+      if(!r.assignee_found&&a.owner_worker_id) msg+=' (담당자는 Jira 계정을 못 찾아 비워 두었습니다)'
+      if(r.parent_skipped) msg+=' (상위업무는 Jira 에 없어 뺐습니다)'
+      showToast(msg); reload()
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(0) }
+  }
+
+  async function remove(a){
+    if(!confirm(`「${a.title}」을 지울까요?\n\n`
+      +(a.jira_key?`⚠ Jira ${a.jira_key} 는 «그대로 남습니다» — 저쪽에서 이미 쓰고 있을 수 있습니다.`:'')))return
+    try{ setBusy(a.id); await removeAgenda(a.id); reload(); showToast('지웠습니다') }
+    catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(0) }
+  }
+
+  async function saveEdit(){
+    try{
+      setBusy(editing.id)
+      await updateAgenda(editing.id,{
+        title:editing.title, detail:editing.detail, due_date:editing.due_date||null,
+        owner_worker_id:editing.owner_worker_id?Number(editing.owner_worker_id):null,
+        source:editing.source||null,
+      })
+      setEditing(null); reload(); showToast('고쳤습니다')
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(0) }
+  }
+
+  if(err) return <Card title="안건"><div style={{fontSize:12,color:'#b91c1c'}}>{err}</div></Card>
+  if(!rows) return <Card title="안건"><div style={{fontSize:12,color:'#6b7280'}}>불러오는 중…</div></Card>
+
+  // 기한이 지났거나 오늘까지인 것 — 해야 할 일을 놓치지 않게 세어 둔다
+  const overdue=rows.filter(a=>a.due_date&&a.status!=='confirmed'&&a.status!=='hold'
+    &&String(a.due_date).slice(0,10)<today0)
+  const dueToday=rows.filter(a=>a.due_date&&a.status!=='confirmed'&&a.status!=='hold'
+    &&String(a.due_date).slice(0,10)===today0)
+
+  return(
+    <div>
+      <Card title="안건 등록">
+        {!openForm
+          ?<button onClick={()=>setOpenForm(true)}
+            style={{padding:'9px 18px',borderRadius:8,border:'1px solid #1a56db',background:'#eff6ff',
+              color:'#1a56db',cursor:'pointer',fontSize:13,fontWeight:700}}>+ 안건 추가</button>
+          :<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+            <div style={{gridColumn:'1 / -1'}}>
+              <label style={labelS}>안건 *</label>
+              <input value={title} onChange={e=>setTitle(e.target.value)}
+                placeholder="예: 히타치 천안공장 계측기 사양 확정" style={inputS}/>
+            </div>
+            <div style={{gridColumn:'1 / -1'}}>
+              <label style={labelS}>내용 (선택)</label>
+              <textarea value={detail} onChange={e=>setDetail(e.target.value)} rows={3}
+                placeholder="확인해야 할 것, 결정된 것 등" style={{...inputS,resize:'vertical'}}/>
+            </div>
+            <div>
+              <label style={labelS}>담당자</label>
+              <select value={ownerId} onChange={e=>setOwnerId(e.target.value)} style={inputS}>
+                <option value="">지정 안 함</option>
+                {workers.map(w=><option key={w.id} value={w.id}>{workerLabel(w,dupNames)}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={labelS}>기한</label>
+              <input type="date" value={due} onChange={e=>setDue(e.target.value)} style={inputS}/>
+            </div>
+            {/* 🔑 프로젝트는 업무 입력과 «같은 목록» 에서 고른다. 그래야 나중에 묶어 보고,
+                Jira 로 올릴 때 상위(에픽)로 그대로 쓸 수 있다. */}
+            <div style={{gridColumn:'1 / -1'}}>
+              <label style={labelS}>
+                관련 프로젝트 (선택)
+                {doneCount>0&&(
+                  <label style={{marginLeft:8,fontWeight:500,color:'#6b7280',cursor:'pointer'}}>
+                    <input type="checkbox" checked={showDone} onChange={e=>setShowDone(e.target.checked)}
+                      style={{marginRight:4,cursor:'pointer'}}/>
+                    완료 포함 ({doneCount})
+                  </label>
+                )}
+              </label>
+              <select value={parentPick} onChange={e=>setParentPick(e.target.value)} style={inputS}>
+                <option value="">선택 안 함 (아래에 직접 적거나 비워 두셔도 됩니다)</option>
+                {/* 🔴 저장값(value)은 «원본 문구» 그대로다. 표시 문구를 저장하면
+                    상태가 바뀔 때마다 같은 업무가 갈라진다(업무 입력과 같은 규칙). */}
+                {parents.map(t=>(
+                  <option key={t} value={t}>
+                    {jiraDone.has(t)?'(완료) ':''}{cleanName(t)||t}
+                  </option>
+                ))}
+              </select>
+              {parentPick&&!jiraKeyOf(parentPick)&&(
+                <div style={{fontSize:11,color:'#9a3412',marginTop:4}}>
+                  ⚠ 이 항목은 Jira 에 없어(고정업무 등) Jira 로 올릴 때 <strong>상위 없이</strong> 올라갑니다.
+                </div>
+              )}
+              {!parentPick&&(
+                <input value={parentText} onChange={e=>setParentText(e.target.value)}
+                  placeholder="목록에 없으면 직접 적으십시오 (비워 두셔도 됩니다)"
+                  style={{...inputS,marginTop:6}}/>
+              )}
+            </div>
+            <div style={{gridColumn:'1 / -1'}}>
+              <label style={labelS}>출처 (선택)</label>
+              <input value={source} onChange={e=>setSource(e.target.value)}
+                placeholder="예: 9/4 주간회의" style={inputS}/>
+            </div>
+            <div style={{gridColumn:'1 / -1',display:'flex',gap:8}}>
+              <button onClick={submit} disabled={busy===-1}
+                style={{padding:'9px 20px',borderRadius:8,border:'none',background:'#1a56db',
+                  color:'#fff',cursor:'pointer',fontSize:13,fontWeight:700}}>
+                {busy===-1?'등록 중…':'등록'}
+              </button>
+              <button onClick={()=>setOpenForm(false)}
+                style={{padding:'9px 16px',borderRadius:8,border:'1px solid #e5e7eb',background:'#fff',
+                  color:'#6b7280',cursor:'pointer',fontSize:13}}>취소</button>
+            </div>
+          </div>}
+      </Card>
+
+      <Card title={`안건 ${rows.length}건`}>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',marginBottom:12,
+          paddingBottom:12,borderBottom:'1px solid #f3f4f6'}}>
+          <button onClick={()=>setFStatus('')}
+            style={{padding:'6px 12px',borderRadius:7,fontSize:12,fontWeight:700,cursor:'pointer',
+              border:'1px solid '+(fStatus===''?'#1a56db':'#e5e7eb'),
+              background:fStatus===''?'#1a56db':'#fff',color:fStatus===''?'#fff':'#6b7280'}}>전체</button>
+          {AGENDA_STATES.map(s=>(
+            <button key={s.v} onClick={()=>setFStatus(s.v)}
+              style={{padding:'6px 12px',borderRadius:7,fontSize:12,fontWeight:700,cursor:'pointer',
+                border:'1px solid '+(fStatus===s.v?s.color:'#e5e7eb'),
+                background:fStatus===s.v?s.bg:'#fff',color:fStatus===s.v?s.color:'#6b7280'}}>
+              {s.label}
+            </button>
+          ))}
+          <label style={{display:'flex',alignItems:'center',gap:5,fontSize:12,cursor:'pointer',
+            color:'#374151',marginLeft:4}}>
+            <input type="checkbox" checked={fMine} onChange={e=>setFMine(e.target.checked)}
+              style={{cursor:'pointer'}}/>
+            내 것만
+          </label>
+          <div style={{flex:1}}/>
+          {/* 🔴 기한이 지난 것은 «세어서» 보여 준다. 목록에 섞여 있으면 지나친다 */}
+          {overdue.length>0&&(
+            <span style={{fontSize:12,fontWeight:700,color:'#b91c1c',background:'#fef2f2',
+              border:'1px solid #fecaca',borderRadius:20,padding:'4px 12px'}}>
+              기한 지남 {overdue.length}건
+            </span>
+          )}
+          {dueToday.length>0&&(
+            <span style={{fontSize:12,fontWeight:700,color:'#9a3412',background:'#fff7ed',
+              border:'1px solid #fdba74',borderRadius:20,padding:'4px 12px'}}>
+              오늘까지 {dueToday.length}건
+            </span>
+          )}
+        </div>
+
+        {rows.length===0
+          ?<div style={{fontSize:12,color:'#6b7280'}}>
+            {fStatus||fMine?'고른 조건에 맞는 안건이 없습니다.':'아직 등록된 안건이 없습니다.'}
+          </div>
+          :<div style={{display:'flex',flexDirection:'column',gap:8}}>
+            {rows.map(a=>{
+              const st=agendaState(a.status)
+              const dd=a.due_date?String(a.due_date).slice(0,10):null
+              const late=dd&&dd<today0&&a.status!=='confirmed'&&a.status!=='hold'
+              const soon=dd===today0&&a.status!=='confirmed'&&a.status!=='hold'
+              const mine=Number(a.owner_worker_id)===Number(me?.worker_id)
+              const canEdit=canEditOthers||mine||Number(a.created_by)===Number(me?.uid)
+              return(
+                <div key={a.id} style={{border:'1px solid '+(late?'#fecaca':'#e5e7eb'),
+                  borderLeft:`4px solid ${st.color}`,borderRadius:8,padding:'10px 12px',
+                  background:a.status==='confirmed'||a.status==='hold'?'#fafafa':'#fff',
+                  opacity:a.status==='confirmed'||a.status==='hold'?.75:1}}>
+                  <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+                    <span style={{fontSize:11,fontWeight:700,color:st.color,background:st.bg,
+                      border:`1px solid ${st.color}44`,borderRadius:20,padding:'2px 10px'}}>{st.label}</span>
+                    <strong style={{fontSize:13}}>{a.title}</strong>
+                    {a.jira_key&&(
+                      <a href={`https://vi-tron.atlassian.net/browse/${a.jira_key}`}
+                        target="_blank" rel="noreferrer"
+                        style={{fontSize:11,fontWeight:700,color:'#1a56db',textDecoration:'none',
+                          border:'1px solid #bfdbfe',background:'#eff6ff',borderRadius:5,padding:'1px 7px'}}>
+                        {a.jira_key} ↗
+                      </a>
+                    )}
+                    <div style={{flex:1}}/>
+                    {dd&&(
+                      <span style={{fontSize:11,fontWeight:700,
+                        color:late?'#b91c1c':soon?'#9a3412':'#6b7280'}}>
+                        {late?'⚠ ':''}기한 {dd}{late?' (지남)':soon?' (오늘)':''}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{fontSize:11,color:'#6b7280',marginTop:4,lineHeight:1.7}}>
+                    {a.owner_name?<>담당 <strong style={{color:'#374151'}}>{a.owner_name}</strong></>:'담당 미지정'}
+                    {(a.parent_summary||a.parent_text)&&
+                      <> · 프로젝트 <strong style={{color:'#374151'}}>{a.parent_summary||a.parent_text}</strong></>}
+                    {a.source&&<> · {a.source}</>}
+                    {a.confirmed_by_name&&<> · 확인 {a.confirmed_by_name}</>}
+                  </div>
+                  {a.detail&&(
+                    <div style={{fontSize:12,color:'#374151',marginTop:6,whiteSpace:'pre-wrap',
+                      lineHeight:1.7}}>{a.detail}</div>
+                  )}
+                  <div style={{display:'flex',gap:6,marginTop:8,flexWrap:'wrap'}}>
+                    {/* 담당자가 «완료» — 관리자가 «확인» (두 단계) */}
+                    {canEdit&&a.status!=='confirmed'&&(
+                      <>
+                        {a.status==='open'&&(
+                          <button onClick={()=>setStatus(a,'doing')} disabled={busy===a.id}
+                            style={{...rowBtnS,border:'1px solid #bfdbfe',background:'#eff6ff',color:'#1a56db'}}>
+                            진행
+                          </button>
+                        )}
+                        {a.status!=='done'&&(
+                          <button onClick={()=>setStatus(a,'done')} disabled={busy===a.id}
+                            style={{...rowBtnS,border:'none',background:'#b45309',color:'#fff'}}>완료</button>
+                        )}
+                        {a.status!=='hold'&&(
+                          <button onClick={()=>setStatus(a,'hold')} disabled={busy===a.id}
+                            style={{...rowBtnS,border:'1px solid #ddd6fe',background:'#f5f3ff',color:'#7c3aed'}}>
+                            보류
+                          </button>
+                        )}
+                        {a.status==='hold'&&(
+                          <button onClick={()=>setStatus(a,'open')} disabled={busy===a.id}
+                            style={{...rowBtnS,border:'1px solid #e5e7eb',background:'#fff',color:'#374151'}}>
+                            다시 열기
+                          </button>
+                        )}
+                      </>
+                    )}
+                    {canEditOthers&&a.status==='done'&&(
+                      <button onClick={()=>confirm_(a)} disabled={busy===a.id}
+                        style={{...rowBtnS,border:'none',background:'#059669',color:'#fff'}}>
+                        확인{a.jira_key?' (Jira 도 완료)':''}
+                      </button>
+                    )}
+                    {canEdit&&!a.jira_key&&(
+                      <button onClick={()=>toJira(a)} disabled={busy===a.id}
+                        style={{...rowBtnS,border:'1px solid #bfdbfe',background:'#fff',color:'#1a56db'}}>
+                        Jira 로 올리기
+                      </button>
+                    )}
+                    {canEdit&&(
+                      <button onClick={()=>setEditing({...a,due_date:a.due_date?String(a.due_date).slice(0,10):''})}
+                        disabled={busy===a.id}
+                        style={{...rowBtnS,border:'1px solid #e5e7eb',background:'#fff',color:'#374151'}}>수정</button>
+                    )}
+                    {(canEditOthers||Number(a.created_by)===Number(me?.uid))&&(
+                      <button onClick={()=>remove(a)} disabled={busy===a.id}
+                        style={{...rowBtnS,border:'1px solid #fca5a5',background:'#fff',color:'#dc2626'}}>삭제</button>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>}
+
+        <div style={{marginTop:12,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
+          💡 <strong>완료는 두 단계</strong>입니다 — 담당자가 <strong>[완료]</strong>, 관리자가 <strong>[확인]</strong>.
+          확인하면 Jira 이슈도 함께 완료로 넘어갑니다.<br/>
+          💡 <strong>[Jira 로 올리기]</strong> 를 누르면 VITRON 프로젝트에 <strong>「작업」</strong>으로 만들고
+          기한·담당자·상위업무를 함께 넣습니다.<br/>
+          💡 「고정업무」처럼 <strong>Jira 에 없는 상위업무</strong>를 고른 안건은 <strong>상위 없이</strong> 올라갑니다.
+        </div>
+      </Card>
+
+      {/* 수정 창 */}
+      {editing&&(
+        <div onClick={()=>setEditing(null)}
+          style={{position:'fixed',inset:0,background:'rgba(17,24,39,.5)',zIndex:9400,
+            display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'40px 16px',overflowY:'auto'}}>
+          <div onClick={e=>e.stopPropagation()}
+            style={{background:'#fff',borderRadius:12,width:'100%',maxWidth:520,padding:22,
+              maxHeight:MODAL_MAX_H,overflowY:'auto',boxShadow:'0 20px 50px rgba(0,0,0,.3)'}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
+              <strong style={{fontSize:16}}>안건 수정</strong>
+              <button onClick={()=>setEditing(null)}
+                style={{border:'none',background:'none',fontSize:20,cursor:'pointer',color:'#6b7280'}}>×</button>
+            </div>
+            <div style={{marginBottom:10}}>
+              <label style={labelS}>안건</label>
+              <input value={editing.title} onChange={e=>setEditing({...editing,title:e.target.value})}
+                style={inputS}/>
+            </div>
+            <div style={{marginBottom:10}}>
+              <label style={labelS}>내용</label>
+              <textarea value={editing.detail||''} rows={4}
+                onChange={e=>setEditing({...editing,detail:e.target.value})}
+                style={{...inputS,resize:'vertical'}}/>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:10}}>
+              <div>
+                <label style={labelS}>담당자</label>
+                <select value={editing.owner_worker_id||''}
+                  onChange={e=>setEditing({...editing,owner_worker_id:e.target.value})} style={inputS}>
+                  <option value="">지정 안 함</option>
+                  {workers.map(w=><option key={w.id} value={w.id}>{workerLabel(w,dupNames)}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={labelS}>기한</label>
+                <input type="date" value={editing.due_date||''}
+                  onChange={e=>setEditing({...editing,due_date:e.target.value})} style={inputS}/>
+              </div>
+            </div>
+            <div style={{marginBottom:14}}>
+              <label style={labelS}>출처</label>
+              <input value={editing.source||''} onChange={e=>setEditing({...editing,source:e.target.value})}
+                style={inputS}/>
+            </div>
+            <button onClick={saveEdit} disabled={busy===editing.id}
+              style={{width:'100%',padding:'11px',borderRadius:8,border:'none',background:'#1a56db',
+                color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>저장</button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 안건 카드 안의 작은 단추 — 여러 곳에서 같은 모양을 쓴다
+const rowBtnS={padding:'5px 12px',borderRadius:6,fontSize:12,fontWeight:700,cursor:'pointer'}
 
 function TabPurchase({workers,me,canEditOthers,showToast}){
   const [data,setData]=useState(null)

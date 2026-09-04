@@ -2901,6 +2901,282 @@ app.delete('/api/hipass/:id', requireLogin, async (req, res) => {
   }
 })
 
+// ─── 안건 (2026-09-04 신설) ──────────────────────────────────
+// 회의에서 나온 것·확인할 것을 기한과 함께 관리하고, 키울 것만 Jira 로 올린다.
+//
+// 🔑 완료는 «두 단계» 다 (지시) — 담당자가 done, 관리자가 confirmed.
+//    confirmed 로 넘어갈 때 Jira 이슈도 «완료» 로 넘긴다.
+
+const AGENDA_STATUS = ['open', 'doing', 'done', 'confirmed', 'hold']
+const AGENDA_SELECT = `
+  SELECT a.*, w.name AS owner_name, w.team AS owner_team,
+         j.summary AS parent_summary,
+         c.display_name AS created_by_name,
+         d.display_name AS done_by_name,
+         f.display_name AS confirmed_by_name
+    FROM agenda_items a
+    LEFT JOIN workers w      ON w.id = a.owner_worker_id
+    LEFT JOIN jira_issues j  ON j.jira_key = a.parent_key
+    LEFT JOIN kpi_users c    ON c.id = a.created_by
+    LEFT JOIN kpi_users d    ON d.id = a.done_by
+    LEFT JOIN kpi_users f    ON f.id = a.confirmed_by`
+
+// Jira 자격증명. 없으면 «올리기» 만 막고 나머지 기능은 그대로 돈다.
+function jiraAuth() {
+  const email = process.env.JIRA_EMAIL
+  const token = process.env.JIRA_TOKEN
+  const host = process.env.JIRA_HOST
+  if (!email || !token || !host) return null
+  return { base: `https://${host}`, auth: 'Basic ' + Buffer.from(`${email}:${token}`).toString('base64') }
+}
+
+app.get('/api/agenda', requireLogin, async (req, res) => {
+  try {
+    const { status, owner_id, parent_key } = req.query
+    const { rows } = await pool.query(
+      `${AGENDA_SELECT}
+        WHERE ($1::text IS NULL OR a.status = $1::text)
+          AND ($2::int  IS NULL OR a.owner_worker_id = $2::int)
+          AND ($3::text IS NULL OR a.parent_key = $3::text)
+        -- 🔑 «해야 할 것» 이 위로 온다 — 끝난 것(confirmed·hold)은 맨 아래.
+        --    기한이 빠른 것부터, 기한 없는 것은 그 뒤에.
+        ORDER BY (a.status IN ('confirmed','hold')) ASC,
+                 (a.due_date IS NULL) ASC, a.due_date ASC, a.created_at DESC`,
+      [status || null, owner_id || null, parent_key || null])
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/agenda', requireLogin, async (req, res) => {
+  const b = req.body || {}
+  const title = String(b.title || '').trim()
+  if (!title) return res.status(400).json({ error: '안건 제목을 적어 주세요.' })
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO agenda_items
+         (title, detail, owner_worker_id, due_date, status,
+          parent_key, parent_text, source, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+      [title.slice(0, 200), b.detail || null,
+       b.owner_worker_id ? Number(b.owner_worker_id) : null,
+       b.due_date || null,
+       AGENDA_STATUS.includes(b.status) ? b.status : 'open',
+       String(b.parent_key || '').slice(0, 40) || null,
+       String(b.parent_text || '').slice(0, 200) || null,
+       String(b.source || '').slice(0, 200) || null,
+       req.session.uid])
+    const { rows: full } = await pool.query(`${AGENDA_SELECT} WHERE a.id = $1`, [rows[0].id])
+    res.json(full[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 고치기. 상태를 바꿀 때는 «누가 언제» 를 함께 남긴다.
+// ⚠ confirmed 는 여기서 다루지 않는다 — Jira 까지 손대야 해서 따로 뒀다.
+app.patch('/api/agenda/:id', requireLogin, async (req, res) => {
+  const b = req.body || {}
+  try {
+    const { rows: cur } = await pool.query('SELECT * FROM agenda_items WHERE id = $1', [Number(req.params.id)])
+    if (!cur.length) return res.status(404).json({ error: '해당 안건을 찾을 수 없습니다.' })
+    const isAdmin = req.session?.role === 'admin'
+    const isOwner = Number(cur[0].owner_worker_id) === Number(req.session?.workerId)
+    const isAuthor = Number(cur[0].created_by) === Number(req.session?.uid)
+    // 🔑 담당자·적은 사람·관리자가 고칠 수 있다. 회의 안건은 여럿이 함께 보는 것이라
+    //    남이 적어 준 내 안건을 내가 못 고치면 쓸모가 없다.
+    if (!isAdmin && !isOwner && !isAuthor) {
+      return res.status(403).json({ error: '담당자·등록자·관리자만 고칠 수 있습니다.' })
+    }
+    const status = b.status !== undefined && AGENDA_STATUS.includes(b.status) ? b.status : cur[0].status
+    if (status === 'confirmed' && cur[0].status !== 'confirmed') {
+      return res.status(400).json({ error: '확인 처리는 [확인] 단추로 해 주십시오.' })
+    }
+    // done 으로 «넘어가는 순간» 만 자취를 남긴다. 이미 done 이면 그대로 둔다.
+    const toDone = status === 'done' && cur[0].status !== 'done'
+    await pool.query(
+      `UPDATE agenda_items
+          SET title = COALESCE($1, title), detail = $2,
+              owner_worker_id = $3, due_date = $4, status = $5,
+              parent_key = $6, parent_text = $7, source = $8,
+              done_at = CASE WHEN $9 THEN now() ELSE done_at END,
+              done_by = CASE WHEN $9 THEN $10::int ELSE done_by END,
+              updated_at = now()
+        WHERE id = $11`,
+      [b.title ? String(b.title).trim().slice(0, 200) : null,
+       b.detail === undefined ? cur[0].detail : (b.detail || null),
+       b.owner_worker_id === undefined ? cur[0].owner_worker_id
+         : (b.owner_worker_id ? Number(b.owner_worker_id) : null),
+       b.due_date === undefined ? cur[0].due_date : (b.due_date || null),
+       status,
+       b.parent_key === undefined ? cur[0].parent_key : (String(b.parent_key || '').slice(0, 40) || null),
+       b.parent_text === undefined ? cur[0].parent_text : (String(b.parent_text || '').slice(0, 200) || null),
+       b.source === undefined ? cur[0].source : (String(b.source || '').slice(0, 200) || null),
+       toDone, req.session.uid, Number(req.params.id)])
+    const { rows: full } = await pool.query(`${AGENDA_SELECT} WHERE a.id = $1`, [Number(req.params.id)])
+    res.json(full[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.delete('/api/agenda/:id', requireLogin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM agenda_items WHERE id = $1', [Number(req.params.id)])
+    if (!rows.length) return res.status(404).json({ error: '해당 안건을 찾을 수 없습니다.' })
+    const isAdmin = req.session?.role === 'admin'
+    const isAuthor = Number(rows[0].created_by) === Number(req.session?.uid)
+    if (!isAdmin && !isAuthor) return res.status(403).json({ error: '등록자와 관리자만 지울 수 있습니다.' })
+    await pool.query('DELETE FROM agenda_items WHERE id = $1', [Number(req.params.id)])
+    // ⚠ Jira 이슈는 지우지 않는다. 여기서 만든 것이라도 저쪽에서 이미 남이 쓰고 있을 수 있다.
+    res.json({ ok: true, jira_key: rows[0].jira_key })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ── 관리자 «확인» — 이때 Jira 도 완료로 넘긴다 ────────────────
+// 🔑 상태 이름을 코드에 박지 않는다. 프로젝트마다 「완료」·「Done」·「닫힘」이 제각각이라,
+//    전이 목록을 받아 «statusCategory 가 done» 인 것을 고른다. 표시 이름으로 고르면
+//    프로젝트 설정이 바뀌는 순간 조용히 어긋난다(동기화에서 이미 겪은 규칙).
+// 🔴 «한 번에 완료로 못 가는» 워크플로가 있다 (2026-09-04 실측).
+//    VITRON 은 대기 중 → 진행 중 → 검토 중 → 완료 로 이어져 있어, 「대기 중」에서
+//    전이 목록을 받아 보면 완료가 «아예 없다». 한 번만 시도하고 포기하면
+//    「완료로 보낼 수 있는 전이가 없습니다」 로 늘 실패한다.
+//    그래서 중간 상태를 밟아 가며 «완료가 열릴 때까지» 나아간다.
+// ⚠ 밟은 자리를 기억해 되돌아가지 않는다 — 안 그러면 대기↔진행을 오가며 맴돈다.
+// ⚠ 걸음 수를 묶어 둔다. 워크플로가 이상해도 무한히 돌지 않는다.
+const JIRA_CLOSE_MAX_HOPS = 5
+async function closeJiraIssue(key) {
+  const j = jiraAuth()
+  if (!j || !key) return { ok: false, why: 'Jira 설정이 없습니다.' }
+  const path = []
+  const visited = new Set()
+  try {
+    for (let hop = 0; hop < JIRA_CLOSE_MAX_HOPS; hop++) {
+      const tr = await fetch(`${j.base}/rest/api/3/issue/${key}/transitions`, {
+        headers: { Authorization: j.auth, Accept: 'application/json' },
+        signal: AbortSignal.timeout(JIRA_TIMEOUT_MS),
+      })
+      if (!tr.ok) return { ok: false, why: `전이 목록을 받지 못했습니다 (HTTP ${tr.status})`, path }
+      const list = (await tr.json()).transitions || []
+      // 🔑 상태 «이름» 이 아니라 statusCategory 로 고른다. 「완료」·「Done」·「닫힘」이
+      //    프로젝트마다 다르고, 이름으로 고르면 설정이 바뀌는 순간 조용히 어긋난다.
+      const done = list.find(t => t.to?.statusCategory?.key === 'done')
+      const next = done || list.find(t =>
+        t.to?.statusCategory?.key === 'indeterminate' && !visited.has(t.to?.id))
+      if (!next) {
+        return { ok: false, path,
+          why: path.length ? `${path.join(' → ')} 까지 갔지만 완료로 가는 길이 없습니다.`
+                            : '완료로 보낼 수 있는 전이가 없습니다.' }
+      }
+      const res = await fetch(`${j.base}/rest/api/3/issue/${key}/transitions`, {
+        method: 'POST',
+        headers: { Authorization: j.auth, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transition: { id: next.id } }),
+        signal: AbortSignal.timeout(JIRA_TIMEOUT_MS),
+      })
+      if (!res.ok) return { ok: false, why: `「${next.to?.name}」 로 옮기지 못했습니다 (HTTP ${res.status})`, path }
+      visited.add(next.to?.id)
+      path.push(next.to?.name)
+      if (done) return { ok: true, to: next.to?.name, path }
+    }
+    return { ok: false, path, why: `${JIRA_CLOSE_MAX_HOPS}단계를 밟았는데도 완료에 닿지 못했습니다.` }
+  } catch (e) {
+    return { ok: false, why: e.message, path }
+  }
+}
+
+app.post('/api/agenda/:id/confirm', requireLogin, async (req, res) => {
+  if (req.session?.role !== 'admin') {
+    return res.status(403).json({ error: '확인 처리는 관리자만 할 수 있습니다.' })
+  }
+  try {
+    const { rows: cur } = await pool.query('SELECT * FROM agenda_items WHERE id = $1', [Number(req.params.id)])
+    if (!cur.length) return res.status(404).json({ error: '해당 안건을 찾을 수 없습니다.' })
+    if (cur[0].status === 'confirmed') return res.status(409).json({ error: '이미 확인된 안건입니다.' })
+    await pool.query(
+      `UPDATE agenda_items
+          SET status='confirmed', confirmed_at=now(), confirmed_by=$1,
+              done_at = COALESCE(done_at, now()), updated_at=now()
+        WHERE id=$2`, [req.session.uid, Number(req.params.id)])
+    // 🔑 Jira 처리는 «저장 뒤» 다. 저쪽이 막혀도 확인은 이미 남아 있어야 한다.
+    let jira = null
+    if (cur[0].jira_key) jira = await closeJiraIssue(cur[0].jira_key)
+    const { rows: full } = await pool.query(`${AGENDA_SELECT} WHERE a.id = $1`, [Number(req.params.id)])
+    res.json({ ...full[0], jira })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ── Jira 로 올리기 ───────────────────────────────────────────
+app.post('/api/agenda/:id/to-jira', requireLogin, async (req, res) => {
+  const j = jiraAuth()
+  if (!j) return res.status(500).json({ error: 'Jira 환경변수가 설정되지 않았습니다.' })
+  try {
+    const { rows: cur } = await pool.query(
+      `SELECT a.*, w.email AS owner_email FROM agenda_items a
+         LEFT JOIN workers w ON w.id = a.owner_worker_id WHERE a.id = $1`, [Number(req.params.id)])
+    if (!cur.length) return res.status(404).json({ error: '해당 안건을 찾을 수 없습니다.' })
+    const a = cur[0]
+    if (a.jira_key) return res.status(409).json({ error: `이미 ${a.jira_key} 로 올라가 있습니다.` })
+
+    // 담당자 — Jira 계정을 이메일로 찾는다. 못 찾으면 «담당자 없이» 올린다.
+    // ⚠ 여기서 막으면 Jira 계정이 없는 직원의 안건은 영영 못 올린다.
+    let accountId = null
+    if (a.owner_email) {
+      try {
+        const u = await fetch(`${j.base}/rest/api/3/user/search?query=${encodeURIComponent(a.owner_email)}`,
+          { headers: { Authorization: j.auth, Accept: 'application/json' }, signal: AbortSignal.timeout(JIRA_TIMEOUT_MS) })
+        if (u.ok) accountId = (await u.json())[0]?.accountId || null
+      } catch { /* 못 찾으면 담당자 없이 간다 */ }
+    }
+
+    const fields = {
+      project: { key: 'VITRON' },
+      issuetype: { name: '작업' },
+      summary: a.title,
+    }
+    // 🔴 「고정업무」처럼 Jira 에 없는 항목(MANUAL-…)은 상위로 쓸 수 없다.
+    //    넣으면 400 이 나므로 아예 빼고, 화면이 그 사실을 알린다.
+    if (a.parent_key && !String(a.parent_key).startsWith('MANUAL-')) {
+      fields.parent = { key: a.parent_key }
+    }
+    if (a.due_date) fields.duedate = String(a.due_date).slice(0, 10)
+    if (accountId) fields.assignee = { id: accountId }
+    const body = [a.detail, a.source ? `출처: ${a.source}` : null, '(업무 대시보드 「안건」에서 올림)']
+      .filter(Boolean).join('\n\n')
+    if (body) {
+      // Jira Cloud v3 는 본문이 ADF 다. 문단 하나로 담는다.
+      fields.description = {
+        type: 'doc', version: 1,
+        content: body.split('\n\n').map(t => ({ type: 'paragraph', content: [{ type: 'text', text: t }] })),
+      }
+    }
+
+    const r = await fetch(`${j.base}/rest/api/3/issue`, {
+      method: 'POST',
+      headers: { Authorization: j.auth, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields }),
+      signal: AbortSignal.timeout(JIRA_TIMEOUT_MS),
+    })
+    const out = await r.json().catch(() => ({}))
+    if (!r.ok) {
+      const why = out?.errorMessages?.join(' ') || JSON.stringify(out?.errors || {})
+      return res.status(400).json({ error: `Jira 등록에 실패했습니다 — ${why || `HTTP ${r.status}`}` })
+    }
+    await pool.query(
+      'UPDATE agenda_items SET jira_key=$1, jira_synced_at=now(), updated_at=now() WHERE id=$2',
+      [out.key, Number(req.params.id)])
+    const { rows: full } = await pool.query(`${AGENDA_SELECT} WHERE a.id = $1`, [Number(req.params.id)])
+    res.json({ ...full[0], assignee_found: !!accountId, parent_skipped: !!(a.parent_key && String(a.parent_key).startsWith('MANUAL-')) })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 // ─── 공휴일 ──────────────────────────────────────────────────
 // 「어느 날이 휴일인가」를 알아야 ①휴일 근무 시간을 세고 ②가동일에서 뺄 수 있다.
 //
