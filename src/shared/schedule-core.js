@@ -107,6 +107,67 @@ export function workerColor(workerId, workers) {
   return WORKER_COLORS[(i < 0 ? 0 : i) % WORKER_COLORS.length]
 }
 
+// ── 직책 서열 ────────────────────────────────────────────────
+// 「같은 장소에 있는 사람들을 한 줄로 묶고, 색은 그 가운데 최상급자의 것으로」
+// 라는 지시(2026-09-04)를 위해 필요하다. 값은 `workers.position` 에 들어가는 것과
+// 같아야 한다 — 설정 화면의 직책 고르개도 이 배열을 쓴다.
+// ⚠ KPI 의 서열(kpi_users.rank_order)과는 다른 것이다. 그쪽은 «사람 하나하나의
+//   번호» 이고 이것은 «직책 단위» 다 (db/migrations/020-worker-position.sql 참고).
+export const POSITIONS = ['대표이사', '이사', '부장', '차장', '과장', '대리', '주임', '사원']
+
+// 직책이 비었거나 목록에 없으면 «맨 아래» 로 본다. 서열을 지어낼 수는 없다.
+export function positionRank(w) {
+  const i = POSITIONS.indexOf(w?.position)
+  return i < 0 ? POSITIONS.length : i
+}
+
+// 🔑 묶음 안에 직책 가진 사람이 하나도 없으면 노랑 (2026-09-04 지시).
+//    「누구 색인지 못 정했다」 를 색으로 말해 준다.
+export const NO_POSITION_COLOR = '#eab308'
+
+// 한 묶음의 «최상급자» — ① 직책 서열 ② 같으면 입사일이 빠른 사람 ③ 그래도 같으면 id.
+// ⚠ 정렬 기준을 끝까지 정해 둔다. 하나라도 비겨서 순서가 흔들리면 «같은 화면인데
+//   색이 달라지는» 일이 생긴다.
+export function topWorkerOf(plans, workers) {
+  const ws = plans.map(p => workers.find(w => w.id === p.worker_id)).filter(Boolean)
+  if (ws.length === 0) return null
+  return ws.slice().sort((a, b) =>
+    positionRank(a) - positionRank(b)
+    || String(a.hired_at || '9999-12-31').localeCompare(String(b.hired_at || '9999-12-31'))
+    || (a.id - b.id))[0]
+}
+
+// 묶음의 색 — 최상급자의 색. 아무도 직책이 없으면 노랑.
+export function groupColor(plans, workers) {
+  const top = topWorkerOf(plans, workers)
+  if (!top || positionRank(top) >= POSITIONS.length) return NO_POSITION_COLOR
+  return workerColor(top.id, workers)
+}
+
+// 같은 «장소» 인가를 가르는 열쇠. 휴가는 장소가 아니므로 묶지 않는다(null).
+export function placeKeyOf(p) {
+  if (p.use_type === 'vacation') return null
+  if (p.transport === 'office') return 'office'
+  if (p.place_id != null) return 'p' + p.place_id
+  return 't' + (p.place_text || '')
+}
+
+// 같은 장소끼리 묶어 [[계획,…], [계획], …] 로 돌려준다.
+// 🔑 묶이지 않는 것도 «혼자짜리 묶음» 으로 돌려 부르는 쪽의 다루기를 하나로 만든다.
+//    (한쪽은 계획, 한쪽은 묶음으로 받으면 반드시 한 곳을 빠뜨린다)
+// ⚠ 들어온 «순서» 를 지킨다 — 밖에서 이미 정렬해 넘긴 것을 흐트러뜨리지 않는다.
+export function groupByPlace(list) {
+  const out = []
+  const at = new Map()
+  for (const p of list) {
+    const k = placeKeyOf(p)
+    if (k === null) { out.push([p]); continue }
+    if (!at.has(k)) { at.set(k, out.length); out.push([]) }
+    out[at.get(k)].push(p)
+  }
+  return out
+}
+
 // 차량도 같은 문제였다 — 법인차 4대가 «전부» 주황, 자차는 «전부» 보라로 박혀 있어
 // 배차표에서 색만 보고는 어느 차인지 알 수 없었다 (2026-08-25 지적).
 // ⚠ 차량 색은 «직원 색과도» 떨어져 있어야 한다 — 주 뷰의 차량 기준에서는

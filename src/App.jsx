@@ -24,7 +24,7 @@ import { OUT_TRANSPORTS, TRANSPORT_MAP, OFFICE_PLACE, SLOTS, SLOT_MAP, thS, tdS,
          ymd, today, dayName, mdLabel, addDays, calWeekDays,
          monthGridDays, isSameMonth, shiftMonth,
          workerColor, vehicleColor, VEHICLE_COLORS, GROUP_BYS, buildGroupRows,
-         planIcon, planState, placeLabel } from './shared/schedule-core'
+         planIcon, planState, placeLabel, POSITIONS } from './shared/schedule-core'
 import { ScheduleMonth, ScheduleWeek, ScheduleDay } from './shared/ScheduleCalendar'
 import { Card } from './shared/ui'
 
@@ -311,7 +311,8 @@ function NonZeroTooltip({active,payload,label,unit='h',percent=false}){
 //   여기만 고치면 저장할 때 400 으로 막힌다.
 // 🔑 KPI 서열(kpi_users.rank_order)과 «별개» 다 — 그쪽은 「누가 누구를 평가하는가」를
 //   정하는 값이라 직책을 밀어 넣으면 평가가 어긋난다 (020 마이그레이션 주석 참고).
-const POSITIONS = ['대표이사', '이사', '부장', '차장', '과장', '대리', '주임', '사원']
+// ⚠ 화면 쪽 정본은 `schedule-core` 하나다 (2026-09-04). 달력이 «최상급자» 를 가리려면
+//   같은 목록이 필요한데, 여기와 거기에 따로 적어 두면 언젠가 한쪽만 고쳐 색이 어긋난다.
 // 「대표이사인가」는 «오직 이 칸» 으로 판정한다 (2026-08-29 사용자 지시).
 // can_approve_settlement 로 판정하면 안 된다 — 지금 그 값이 참인 사람이 둘이다
 // (고광용, 그리고 임시 승인 권한을 받은 이건호).
@@ -2711,7 +2712,8 @@ function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan
 
       {view==='month'&&<ScheduleMonth ym={ym} byDate={byDate} workers={workers} todayStr={todayStr}
         onOpenPlan={onOpenPlan} onPickDate={d=>{setAnchor(d);setView('day')}}
-        onOpenCell={openCell} pasting={pasting} isPicked={isPicked} togglePick={togglePick}/>}
+        onOpenCell={openCell} pasting={pasting} isPicked={isPicked} togglePick={togglePick}
+        groupBy={groupBy}/>}
       {view==='week'&&<ScheduleWeek anchor={anchor} shown={shown} workers={workers} todayStr={todayStr}
         onOpenPlan={onOpenPlan} onOpenCell={openCell}
         pasting={pasting} isPicked={isPicked} togglePick={togglePick}

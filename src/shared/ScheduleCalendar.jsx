@@ -10,6 +10,7 @@ import {
   thS, tdS, SLOT_MAP, TRANSPORT_MAP, GROUP_BYS,
   workerColor, calWeekDays, monthGridDays, isSameMonth, mdLabel, dayName,
   shortPlace, placeLabel, planIcon, planDetail, planState, PLAN_STATE_MARK,
+  groupByPlace, groupColor, topWorkerOf,
 } from './schedule-core'
 
 // 달력 배지 하나.
@@ -53,9 +54,64 @@ export function PlanBadge({ plan, workers, onClick, todayStr, compact = false })
   )
 }
 
+// 같은 장소에 «함께 있는» 사람들을 배지 하나로 묶는다 (2026-09-04 지시).
+// 장소 기준으로 보면 한 현장에 서너 명이 가는 일이 흔한데, 사람마다 배지를 하나씩
+// 세우면 같은 장소가 네 줄로 늘어나 「누가 어디 있는가」 가 도리어 안 보였다.
+//
+// 🔑 색은 «그 현장의 최상급자» 것이다. 여럿을 한 줄로 줄이면 색도 하나만 남는데,
+//    아무 것이나 고르면 날마다 달라 보인다. 현장의 «대표» 를 색으로 삼는다.
+//    직책이 아무에게도 없으면 노랑 — 「정할 근거가 없다」 는 표시다.
+// ⚠ 하나짜리 묶음은 예전 배지를 그대로 쓴다. 한 사람인데 「1명」 이라 적으면 군더더기다.
+export function PlanGroupBadge({ plans, workers, onClick, todayStr, compact = false }) {
+  if (plans.length === 1) {
+    return <PlanBadge plan={plans[0]} workers={workers} todayStr={todayStr}
+      onClick={onClick} compact={compact} />
+  }
+  const color = groupColor(plans, workers)
+  const top = topWorkerOf(plans, workers)
+  // 누르면 «최상급자의» 계획이 열린다 (지시). 그 사람 것이 없으면 첫 계획.
+  const openPlan = plans.find(p => p.worker_id === top?.id) || plans[0]
+  const head = plans[0]
+  // 상태 표시는 «하나라도» 걸리면 붙인다 — 묶었다고 놓치면 안 되는 것들이다
+  const needCheck = plans.some(p => planState(p, todayStr) === 'needCheck')
+  const changed = plans.some(p => planState(p, todayStr) === 'changed')
+  const names = plans.map(p => p.worker_name).join(' · ')
+  const slots = [...new Set(plans.filter(p => p.slot !== 'allday').map(p => SLOT_MAP[p.slot]))]
+  return (
+    <div data-badge onClick={e => { e.stopPropagation(); onClick && onClick(openPlan) }}
+      title={`${placeLabel(head)} · ${plans.length}명\n${plans.map(p => `${p.worker_name} · ${SLOT_MAP[p.slot]}${p.purpose ? ' · ' + p.purpose : ''}`).join('\n')}`}
+      style={{
+        cursor: 'pointer', background: color + '22', color: '#111827',
+        border: `1px solid ${color}`, borderLeft: `4px solid ${color}`,
+        borderRadius: 4, padding: '2px 5px', fontSize: compact ? 10 : 11,
+        marginBottom: 2, overflow: 'hidden',
+      }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 3, whiteSpace: 'nowrap', overflow: 'hidden' }}>
+        <span>{planIcon(head)}</span>
+        <strong style={{ fontSize: compact ? 10 : 11 }}>{plans.length}명</strong>
+        {!compact && <span style={{ opacity: .9, overflow: 'hidden', textOverflow: 'ellipsis' }}>{shortPlace(head)}</span>}
+        {slots.length > 0 && <span style={{ opacity: .85, fontSize: compact ? 9 : 10 }}>{slots.join('/')}</span>}
+        {needCheck && <span style={{ color: '#c2410c', fontWeight: 700 }}>{PLAN_STATE_MARK.needCheck}</span>}
+        {changed && <span>{PLAN_STATE_MARK.changed}</span>}
+      </div>
+      {/* 이름은 «늘» 적는다 — 묶음의 쓸모가 「누구누구가 함께 있는가」 이기 때문이다 */}
+      <div style={{
+        fontSize: compact ? 9 : 10, opacity: .9, whiteSpace: 'nowrap',
+        overflow: 'hidden', textOverflow: 'ellipsis', lineHeight: 1.35,
+      }}>{names}</div>
+    </div>
+  )
+}
+
+// 장소 기준이면 같은 장소끼리 묶고, 그 밖의 기준이면 하나씩 세운다.
+// 어느 쪽이든 «묶음의 배열» 로 돌려 그리는 쪽 코드를 하나로 유지한다.
+function badgeGroups(list, groupBy) {
+  return groupBy === 'place' ? groupByPlace(list) : list.map(p => [p])
+}
+
 // ── 월 ──────────────────────────────────────────────────────
 export function ScheduleMonth({ ym, byDate, workers, todayStr, onOpenPlan, onPickDate, onOpenCell,
-                                pasting, isPicked, togglePick, readOnly = false }) {
+                                pasting, isPicked, togglePick, readOnly = false, groupBy = 'worker' }) {
   const days = monthGridDays(ym)
   return (
     <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 10, overflow: 'hidden' }}>
@@ -70,6 +126,12 @@ export function ScheduleMonth({ ym, byDate, workers, todayStr, onOpenPlan, onPic
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)' }}>
         {days.map(d => {
           const list = byDate(d)
+          // 장소 기준이면 «같은 현장에 함께 있는 사람» 을 한 배지로 묶는다.
+          // 칸이 좁아 4개까지만 세우는데, 묶고 나면 그 안에 훨씬 많이 담긴다.
+          const groups = badgeGroups(list, groupBy)
+          const shownGroups = groups.slice(0, 4)
+          // 「더 있다」 는 «묶음» 이 아니라 «건수» 로 센다 — 사람이 세는 단위가 그것이다
+          const restCount = groups.slice(4).reduce((n, g) => n + g.length, 0)
           const out = !isSameMonth(d, ym)
           const isToday = d === todayStr
           const chosen = pasting && isPicked && isPicked(d, null)
@@ -96,14 +158,14 @@ export function ScheduleMonth({ ym, byDate, workers, todayStr, onOpenPlan, onPic
               }}>
                 {Number(d.slice(8, 10))}
               </div>
-              {list.slice(0, 4).map(p => (
-                <PlanBadge key={p.id} plan={p} workers={workers} todayStr={todayStr}
-                  onClick={() => onOpenPlan && onOpenPlan(p)} compact />
+              {shownGroups.map(g => (
+                <PlanGroupBadge key={g[0].id} plans={g} workers={workers} todayStr={todayStr}
+                  onClick={p => onOpenPlan && onOpenPlan(p)} compact />
               ))}
-              {list.length > 4 && (
+              {restCount > 0 && (
                 <div data-badge onClick={() => onPickDate && onPickDate(d)}
                   style={{ fontSize: 10, color: '#1a56db', cursor: 'pointer', fontWeight: 600 }}>
-                  +{list.length - 4}건 더
+                  +{restCount}건 더
                 </div>
               )}
             </div>
@@ -180,11 +242,12 @@ export function ScheduleWeek({ anchor, shown, workers, todayStr, onOpenPlan, onO
                       background: chosen ? '#dbeafe' : d === todayStr ? '#eff6ff' : 'transparent',
                       boxShadow: chosen ? 'inset 0 0 0 2px #1a56db' : 'none',
                     }}>
+                    {/* 장소 기준이면 이 칸은 이미 «한 장소 · 하루» 라, 묶으면 배지가 하나가 된다 */}
                     {list.length === 0
                       ? <span style={{ color: '#e2e8f0', fontSize: 11 }}>{pasting ? '+' : '-'}</span>
-                      : list.map(p => (
-                        <PlanBadge key={p.id} plan={p} workers={workers} todayStr={todayStr}
-                          onClick={() => onOpenPlan && onOpenPlan(p)} />
+                      : badgeGroups(list, groupBy).map(g => (
+                        <PlanGroupBadge key={g[0].id} plans={g} workers={workers} todayStr={todayStr}
+                          onClick={p => onOpenPlan && onOpenPlan(p)} />
                       ))}
                     {/* 차량 기준에서 한 칸에 둘 이상이면 배차가 겹친 것이다 */}
                     {groupBy === 'vehicle' && row.key.startsWith('v') && list.length > 1 && (
