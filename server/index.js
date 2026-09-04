@@ -928,6 +928,27 @@ const USE_TYPES = ['business', 'personal', 'vacation']
 //    그 차를 남이 쓴 것으로 잡힌다 — 조용히 어긋나 아무도 눈치채지 못한다.
 //    ⚠ 법인차량은 누구나 쓰는 것이므로 검사 대상이 아니다.
 //    ⚠ 판정 기준은 «본문의 worker_id» 가 아니라 부르는 쪽이 넘겨 주는 «그 기록의 주인» 이다.
+// 잠긴 실적을 «지금 부른 사람이» 고칠 수 있는가. 못 고치면 그 까닭을 돌려준다.
+//
+// 🔑 1차 안내(notified) 뒤에는 «정산 승인 권한자만» 고칠 수 있다 (2026-09-04 지시).
+//    금액을 알린 뒤에 하이패스 추가 건이 뒤늦게 올라오는 일이 있어, 그때마다
+//    잠금을 풀었다 다시 잠그게 하면 손이 너무 많이 간다.
+// ⚠ 2차 완료(settled) 뒤에는 «아무도» 못 고친다. 종전대로 잠금을 풀어야 한다 —
+//   입금까지 끝난 금액의 근거가 조용히 달라지면 맞춰 볼 방법이 없다.
+async function lockedError(row, session) {
+  if (!row.locked) return null
+  const ym = String(row.work_date).slice(0, 7)
+  const { rows } = await pool.query(
+    'SELECT status FROM schedule_settlements WHERE ym = $1 AND worker_id = $2',
+    [ym, row.worker_id])
+  const st = rows[0]?.status
+  if (st === 'notified') {
+    if (await canApprove(session?.uid)) return null
+    return '1차 정산 안내가 나간 달입니다. 금액이 걸린 수정은 대표이사만 할 수 있습니다.'
+  }
+  return '정산이 완료된 달의 기록입니다. 수정하려면 대표이사가 잠금을 해제해야 합니다.'
+}
+
 async function ownCarError(vehicleId, workerId) {
   if (!vehicleId) return null
   const { rows } = await pool.query(
@@ -1109,10 +1130,13 @@ app.delete('/api/schedule/plans/:id', async (req, res) => {
     if (own.length === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
     if (!canEditWorker(req.session, own[0].worker_id)) return denyOther(res)
     const { rows } = await pool.query(
-      'SELECT locked FROM schedule_actuals WHERE plan_id = $1', [req.params.id]
+      'SELECT locked, worker_id, work_date FROM schedule_actuals WHERE plan_id = $1', [req.params.id]
     )
-    if (rows.some(r => r.locked)) {
-      return res.status(409).json({ error: '정산이 완료된 달의 기록은 지울 수 없습니다.' })
+    // 🔑 잠긴 실적이 하나라도 붙어 있으면 계획도 못 지운다. 다만 «1차만 나간» 달은
+    //    대표이사에 한해 통과한다 — 판정은 lockedError 한 곳에서만 한다.
+    for (const r of rows) {
+      const lockErr = await lockedError(r, req.session)
+      if (lockErr) return res.status(409).json({ error: lockErr })
     }
     // 🔑 지우기 «전에» 읽어 둔다. 지운 뒤에는 무엇을 취소했는지 알 길이 없다.
     let doomed = null
@@ -1644,10 +1668,10 @@ app.patch('/api/schedule/actuals/:id', async (req, res) => {
     if (cur.length === 0) return res.status(404).json({ error: '해당 실적을 찾을 수 없습니다.' })
     if (!canEditWorker(req.session, cur[0].worker_id)) return denyOther(res)
     // 정산이 끝난 달은 고칠 수 없다. 승인 금액과 근거가 어긋나기 때문이다.
-    // 정정이 필요하면 대표이사가 잠금을 풀고 재승인한다 (설계서 3.3절)
-    if (cur[0].locked) {
-      return res.status(409).json({ error: '정산이 완료된 달의 기록입니다. 수정하려면 대표이사가 잠금을 해제해야 합니다.' })
-    }
+    // 정정이 필요하면 대표이사가 잠금을 풀고 재승인한다 (설계서 3.3절).
+    // 🔑 1차 안내만 나간 달은 «대표이사에 한해» 통과한다 — lockedError 가 판정한다.
+    const lockErr = await lockedError(cur[0], req.session)
+    if (lockErr) return res.status(409).json({ error: lockErr })
     // 자차 소유 검사 — 대상은 «바뀐 뒤» 의 차량이고, 기준은 그 실적의 주인이다
     const carErr = await ownCarError(b.vehicle_id ?? cur[0].vehicle_id, cur[0].worker_id)
     if (carErr) return res.status(400).json({ error: carErr })
@@ -1679,12 +1703,13 @@ app.patch('/api/schedule/actuals/:id', async (req, res) => {
 
 app.delete('/api/schedule/actuals/:id', async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT locked, plan_id, worker_id FROM schedule_actuals WHERE id = $1', [req.params.id])
+    const { rows } = await pool.query(
+      'SELECT locked, plan_id, worker_id, work_date FROM schedule_actuals WHERE id = $1',
+      [req.params.id])
     if (rows.length === 0) return res.status(404).json({ error: '해당 실적을 찾을 수 없습니다.' })
     if (!canEditWorker(req.session, rows[0].worker_id)) return denyOther(res)
-    if (rows[0].locked) {
-      return res.status(409).json({ error: '정산이 완료된 달의 기록은 지울 수 없습니다.' })
-    }
+    const lockErr = await lockedError(rows[0], req.session)
+    if (lockErr) return res.status(409).json({ error: lockErr })
     await pool.query('DELETE FROM schedule_actuals WHERE id = $1', [req.params.id])
     // 실적을 지우면 계획은 다시 «확인 필요» 상태로 돌아간다
     if (rows[0].plan_id) {
@@ -2110,7 +2135,7 @@ function ymRange(ym) {
 async function buildSettlement(ym) {
   const [from, to] = ymRange(ym)
   const { rows } = await pool.query(
-    `SELECT a.*, w.name AS worker_name, w.team AS worker_team,
+    `SELECT a.*, w.name AS worker_name, w.team AS worker_team, w.email AS worker_email,
             v.kind AS vehicle_kind, v.name AS vehicle_name, v.plate AS vehicle_plate,
             v.rate_per_km, v.km_per_liter
        FROM schedule_actuals a
@@ -2128,6 +2153,8 @@ async function buildSettlement(ym) {
     if (!byWorker.has(r.worker_id)) {
       byWorker.set(r.worker_id, {
         worker_id: r.worker_id, worker_name: r.worker_name, team: r.worker_team,
+        // 정산 안내 메일이 «각 직원에게» 가므로 주소가 여기까지 따라와야 한다
+        worker_email: r.worker_email,
         personal_km: 0, personal_amount: 0, toll_amount: 0,
         own_car_km: 0, own_car_liter: 0, own_car_missing_efficiency: false,
         transit_amount: 0, business_km: 0, fuel_amount: 0, rows: [],
@@ -2223,11 +2250,12 @@ app.get('/api/schedule/settlement', requireLogin, async (req, res) => {
   if (!/^\d{4}-\d{2}$/.test(ym)) return res.status(400).json({ error: 'ym 은 YYYY-MM 형식이어야 합니다.' })
   try {
     const calc = await buildSettlement(ym)
-    // 저장된 정산 상태(승인 여부·승인 시점 금액)를 함께 준다
+    // 저장된 정산 상태(단계·승인자·승인 시점 금액)를 함께 준다
     const { rows: saved } = await pool.query(
-      `SELECT s.*, u.display_name AS settled_by_name
+      `SELECT s.*, u.display_name AS settled_by_name, n.display_name AS notified_by_name
          FROM schedule_settlements s
          LEFT JOIN kpi_users u ON u.id = s.settled_by
+         LEFT JOIN kpi_users n ON n.id = s.notified_by
         WHERE s.ym = $1`, [ym])
     res.json({
       ...calc,
@@ -2258,7 +2286,16 @@ function oneWorker(req) {
 //    잠금도 `WHERE work_date BETWEEN …` 로 그달 전체를 잠갔다. 그래서 한 사람의
 //    실적이 늦어지면 나머지 정산까지 함께 묶여 기다려야 했다.
 //    worker_id 를 주면 그 사람만, 주지 않으면 종전대로 전원을 확정한다.
-app.post('/api/schedule/settlement/:ym/approve', requireLogin, async (req, res) => {
+//
+// 🔑 «두 단계» 다 (2026-09-04 지시).
+//    1차 /notify    금액을 박제하고 실적을 잠근 뒤 «각 직원에게» 안내 메일을 보낸다
+//    2차 /complete  입금을 확인하고 완료로 넘긴다
+//    입금할 금액이 없는 사람은 2차를 기다릴 것이 없어 1차에서 바로 완료가 된다.
+//    ⚠ 옛 이름 /approve 는 «1차» 로 남겨 둔다 — 배포 순서가 어긋나 옛 화면이
+//      새 서버를 부르면 여기로 떨어지는데, 그때 아무 일도 안 일어나는 것보다
+//      1차라도 되는 편이 낫다.
+app.post(['/api/schedule/settlement/:ym/notify',
+          '/api/schedule/settlement/:ym/approve'], requireLogin, async (req, res) => {
   const ym = req.params.ym
   if (!/^\d{4}-\d{2}$/.test(ym)) return res.status(400).json({ error: 'ym 형식이 올바르지 않습니다.' })
   if (!await canApprove(req.session.uid)) {
@@ -2269,39 +2306,75 @@ app.post('/api/schedule/settlement/:ym/approve', requireLogin, async (req, res) 
   const client = await pool.connect()
   try {
     const calc = await buildSettlement(ym)
-    const targets = only === null ? calc.workers : calc.workers.filter(w => w.worker_id === only)
+    // 전원 일괄이면 «아직 손대지 않은 사람» 만 고른다.
+    // ⚠ 이미 1차를 보낸 사람을 다시 넣으면 안내 메일이 «두 번» 간다 — 받는 쪽에서는
+    //   금액이 바뀐 줄 알고 다시 확인하게 된다. 한 사람만 콕 집어 부를 때는
+    //   「다시 보내겠다」 는 뜻이므로 그대로 진행한다.
+    const { rows: cur } = await client.query(
+      'SELECT worker_id, status FROM schedule_settlements WHERE ym = $1', [ym])
+    const doneSet = new Set(cur.filter(r => r.status !== 'open').map(r => r.worker_id))
+    const targets = only === null
+      ? calc.workers.filter(w => !doneSet.has(w.worker_id))
+      : calc.workers.filter(w => w.worker_id === only)
     if (targets.length === 0) {
-      return res.status(404).json({ error: '이 달에 정산할 실적이 없습니다.' })
+      return res.status(404).json({ error: '1차 안내를 보낼 사람이 없습니다.' })
     }
     await client.query('BEGIN')
     for (const w of targets) {
+      // 🔑 입금할 금액이 없으면 «기다릴 것이 없다» — 1차에서 바로 완료로 둔다(지시).
+      //    환급·실비만 있는 사람을 「입금 대기」로 세워 두면 영영 안 끝난다.
+      const charge = Number(w.personal_amount || 0) + Number(w.toll_amount || 0)
+      const status = charge > 0 ? 'notified' : 'settled'
+      // ⚠ 「완료까지 갔는가」를 SQL 의 CASE 로 정하지 않는다. 같은 매개변수를 값으로도
+      //   쓰고 비교에도 쓰면 Postgres 가 타입을 못 정해 «inconsistent types» 로 막는다
+      //   (2026-09-04 실제로 겪음). 값은 여기서 정해 그대로 넣는다.
+      const settledBy = status === 'settled' ? req.session.uid : null
+      const settledAt = status === 'settled' ? new Date() : null
       await client.query(
         `INSERT INTO schedule_settlements
            (ym, worker_id, personal_km, personal_amount, toll_amount,
-            own_car_km, own_car_liter, transit_amount, status, settled_by, settled_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'settled',$9,now())
+            own_car_km, own_car_liter, transit_amount,
+            status, notified_by, notified_at, settled_by, settled_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),$11,$12)
          ON CONFLICT (ym, worker_id) DO UPDATE
          SET personal_km=EXCLUDED.personal_km, personal_amount=EXCLUDED.personal_amount,
              toll_amount=EXCLUDED.toll_amount, own_car_km=EXCLUDED.own_car_km,
              own_car_liter=EXCLUDED.own_car_liter, transit_amount=EXCLUDED.transit_amount,
-             status='settled', settled_by=EXCLUDED.settled_by, settled_at=now(),
+             status=EXCLUDED.status,
+             notified_by=EXCLUDED.notified_by, notified_at=now(),
+             settled_by=EXCLUDED.settled_by, settled_at=EXCLUDED.settled_at,
              updated_at=now()`,
         [ym, w.worker_id, w.personal_km, w.personal_amount, w.toll_amount,
-         w.own_car_km, w.own_car_liter, w.transit_amount, req.session.uid])
+         w.own_car_km, w.own_car_liter, w.transit_amount,
+         status, req.session.uid, settledBy, settledAt])
     }
-    // 확정한 사람의 실적만 잠근다 — 승인 금액과 근거가 어긋나지 않게 한다.
+    // 안내한 사람의 실적만 잠근다 — 알린 금액과 근거가 어긋나지 않게 한다.
     // ⚠ 여기에 worker_id 를 걸지 않으면 한 사람을 확정해도 그달 전원의 실적이
     //   잠겨, 아직 확정하지 않은 사람이 자기 실적을 고칠 수 없게 된다.
     const [from, to] = ymRange(ym)
-    const params = [from, to]
-    let sql = 'UPDATE schedule_actuals SET locked = TRUE WHERE work_date >= $1 AND work_date <= $2'
-    if (only !== null) { sql += ' AND worker_id = $3'; params.push(only) }
-    const { rowCount } = await client.query(sql, params)
+    const ids = targets.map(w => w.worker_id)
+    const { rowCount } = await client.query(
+      `UPDATE schedule_actuals SET locked = TRUE
+        WHERE work_date >= $1 AND work_date <= $2 AND worker_id = ANY($3::int[])`,
+      [from, to, ids])
     await client.query('COMMIT')
+
+    // 🔑 메일은 «저장이 끝난 뒤» 다. 실패해도 확정은 이미 남아 있다.
+    //    보내는 사람은 대표이사(지금 부른 사람)의 계정이다 — 지시.
+    mailer.notifySettlement({
+      ym, rows: targets,
+      actor: { name: req.session?.name, email: req.session?.login },
+      sender: await senderFor(req.session?.uid),
+      onSenderFail: why => markSenderBroken(req.session?.uid, why),
+    })
     res.json({
       ok: true,
+      stage: 'notified',
       workers: targets.length,
       names: targets.map(w => w.worker_name),
+      // 입금할 것이 없어 «그 자리에서 끝난» 사람 — 화면이 안내 문구를 띄운다
+      closed: targets.filter(w => (Number(w.personal_amount || 0) + Number(w.toll_amount || 0)) === 0)
+        .map(w => w.worker_name),
       locked: rowCount,
     })
   } catch (e) {
@@ -2309,6 +2382,32 @@ app.post('/api/schedule/settlement/:ym/approve', requireLogin, async (req, res) 
     res.status(500).json({ error: e.message })
   } finally {
     client.release()
+  }
+})
+
+// 2차 — 입금을 확인하고 «완료» 로 넘긴다. 대표이사만.
+// ⚠ 1차를 거치지 않은 사람은 넘길 수 없다. 「알리지도 않고 입금됐다」 는 있을 수 없다.
+app.post('/api/schedule/settlement/:ym/complete', requireLogin, async (req, res) => {
+  const ym = req.params.ym
+  if (!/^\d{4}-\d{2}$/.test(ym)) return res.status(400).json({ error: 'ym 형식이 올바르지 않습니다.' })
+  if (!await canApprove(req.session.uid)) {
+    return res.status(403).json({ error: '정산 완료 권한이 없습니다. 대표이사만 할 수 있습니다.' })
+  }
+  const only = oneWorker(req)
+  if (Number.isNaN(only)) return res.status(400).json({ error: 'worker_id 가 올바르지 않습니다.' })
+  try {
+    const params = [ym, req.session.uid]
+    let sql = `UPDATE schedule_settlements
+                  SET status='settled', settled_by=$2, settled_at=now(), updated_at=now()
+                WHERE ym=$1 AND status='notified'`
+    if (only !== null) { sql += ' AND worker_id=$3'; params.push(only) }
+    const { rowCount } = await pool.query(sql + ' RETURNING worker_id', params)
+    if (rowCount === 0) {
+      return res.status(404).json({ error: '입금 확인을 기다리는 정산이 없습니다. 1차 안내를 먼저 보내 주십시오.' })
+    }
+    res.json({ ok: true, stage: 'settled', workers: rowCount })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
   }
 })
 

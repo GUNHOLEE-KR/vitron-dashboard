@@ -94,9 +94,16 @@ export const whoAmI = () => authRequest('GET', '/auth/me')
 // workerId 를 주면 «그 사람만» 확정·해제한다. 주지 않으면 그달 전원 (종전 동작).
 // 🔑 사람마다 정산이 끝나는 시점이 다르다 — 출장에서 늦게 돌아온 한 사람 때문에
 //    나머지 일곱 명의 정산까지 미뤄 두어야 하는 것이 이 화면의 가장 큰 불편이었다.
+// 🔑 정산은 «두 단계» 다 (2026-09-04).
+//    notify   1차 — 금액을 박제하고 실적을 잠근 뒤 각 직원에게 안내 메일
+//    complete 2차 — 입금을 확인하고 완료
+//    입금할 금액이 없는 사람은 1차에서 바로 완료가 된다(서버가 판정한다).
 export const getSettlement = (ym) => authRequest('GET', `/schedule/settlement?ym=${ym}`)
-export const approveSettlement = (ym, workerId) =>
-  authRequest('POST', `/schedule/settlement/${ym}/approve`,
+export const notifySettlement = (ym, workerId) =>
+  authRequest('POST', `/schedule/settlement/${ym}/notify`,
+    workerId ? { worker_id: workerId } : {})
+export const completeSettlement = (ym, workerId) =>
+  authRequest('POST', `/schedule/settlement/${ym}/complete`,
     workerId ? { worker_id: workerId } : {})
 export const reopenSettlement = (ym, workerId) =>
   authRequest('POST', `/schedule/settlement/${ym}/reopen`,

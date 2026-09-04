@@ -11,8 +11,9 @@ import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/
 import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
 import { getPlaces, addPlace, updatePlace, hidePlace, getVehicles, addVehicle, updateVehicle,
          getPlans, getMailStatus, addPlan, updatePlan, removePlan, getActuals, addActual, updateActual,
-         removeActual, login, logout, whoAmI, getSettlement, approveSettlement,
-         reopenSettlement, setApproval, getVacationSummary } from './repositories/scheduleRepo'
+         removeActual, login, logout, whoAmI, getSettlement, notifySettlement,
+         completeSettlement, reopenSettlement, setApproval,
+         getVacationSummary } from './repositories/scheduleRepo'
 import { getHolidays, syncHolidays, addHoliday, setHolidayWorking, removeHoliday,
          restDaySet } from './repositories/holidayRepo'
 import { getPurchases, addPurchase, setPurchaseStatus,
@@ -3718,9 +3719,14 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
 
   // 🔑 정산은 «사람별»이다 (2026-09-03). 종전에는 한 명만 확정돼도 화면 전체가
   //    「정산 완료」로 보였다 — 그 착시 때문에 남은 사람의 정산이 잊히기 쉬웠다.
-  const savedOf=(id)=>data?.saved?.find(s=>s.worker_id===id&&s.status==='settled')
+  // 🔑 단계가 셋이다 (2026-09-04) — open(아직) · notified(1차 보냄·입금 대기) · settled(완료).
+  //    savedOf 는 «손을 댄» 줄을 준다. 단계 판정은 그 줄의 status 로 한다.
+  const savedOf=(id)=>data?.saved?.find(s=>s.worker_id===id&&s.status!=='open')
+  const stageOf=(id)=>savedOf(id)?.status||'open'
   const totalCount=(data?.workers||[]).length
-  const settledCount=(data?.workers||[]).filter(w=>savedOf(w.worker_id)).length
+  const notifiedCount=(data?.workers||[]).filter(w=>stageOf(w.worker_id)==='notified').length
+  const settledCount=(data?.workers||[]).filter(w=>stageOf(w.worker_id)==='settled').length
+  const openCount=totalCount-notifiedCount-settledCount
   const allSettled=totalCount>0&&settledCount===totalCount
 
   // 확정 뒤에 단가·연비·실적이 바뀌면 «박제된 금액»과 지금 계산이 어긋난다.
@@ -3745,18 +3751,32 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
   // eslint-disable-next-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
   useEffect(()=>{ if(me) load(ym) },[me,ym])
 
-  // workerId 를 주면 그 사람만, 주지 않으면 아직 남은 전원을 한꺼번에 처리한다.
-  async function approve(workerId,workerName){
-    const who=workerId?`${workerName} 님의 ${ym} 정산`:`${ym} 정산 (남은 ${totalCount-settledCount}명 전원)`
-    if(!confirm(`${who}을 확정할까요?\n\n· 금액이 승인 시점 값으로 저장됩니다\n· 그 실적은 수정할 수 없게 잠깁니다\n\n정정이 필요하면 나중에 잠금을 해제하고 다시 확정할 수 있습니다.`))return
-    try{ setBusy(true); const r=await approveSettlement(ym,workerId)
-      showToast(`정산 확정 — ${r.names?.join(', ')||`${r.workers}명`} · 실적 ${r.locked}건 잠금`); await load(ym)
-    }catch(e){ showToast('승인 실패: '+e.message) }
+  // workerId 를 주면 그 사람만, 주지 않으면 아직 손대지 않은 전원을 한꺼번에 처리한다.
+  // 1차 — 금액을 박제하고 실적을 잠근 뒤 각 직원에게 «안내 메일» 이 나간다.
+  async function notify(workerId,workerName){
+    const who=workerId?`${workerName} 님의 ${ym} 정산`:`${ym} 정산 (아직 안 보낸 ${openCount}명)`
+    if(!confirm(`${who} 1차 안내를 보낼까요?\n\n· 금액이 이 시점 값으로 저장됩니다\n· 그 실적은 잠깁니다 (대표이사는 그대로 고칠 수 있습니다)\n· 각 직원에게 «자기 정산 내역» 메일이 갑니다\n\n입금할 금액이 없는 분은 그 자리에서 완료됩니다.`))return
+    try{ setBusy(true); const r=await notifySettlement(ym,workerId)
+      const closed=r.closed?.length?` · 입금액 없어 바로 완료: ${r.closed.join(', ')}`:''
+      showToast(`1차 안내 — ${r.names?.join(', ')||`${r.workers}명`} · 실적 ${r.locked}건 잠금${closed}`)
+      await load(ym)
+    }catch(e){ showToast('1차 안내 실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
+  // 2차 — 입금을 확인하고 완료로 넘긴다. 메일은 나가지 않는다.
+  async function complete(workerId,workerName){
+    const who=workerId?`${workerName} 님`:`입금 대기 ${notifiedCount}명 전원`
+    if(!confirm(`${who}의 입금을 확인하고 «완료» 로 넘길까요?\n\n· 통장에 실제로 들어온 것을 보신 뒤에 눌러 주십시오\n· 완료 뒤에는 잠금을 해제해야 실적을 고칠 수 있습니다`))return
+    try{ setBusy(true); const r=await completeSettlement(ym,workerId)
+      showToast(`정산 완료 — ${r.workers}명`); await load(ym)
+    }catch(e){ showToast('완료 처리 실패: '+e.message) }
     finally{ setBusy(false) }
   }
 
   async function reopen(workerId,workerName){
-    const who=workerId?`${workerName} 님의 ${ym} 정산`:`${ym} 정산 (확정된 ${settledCount}명 전원)`
+    const who=workerId?`${workerName} 님의 ${ym} 정산`
+      :`${ym} 정산 (손댄 ${notifiedCount+settledCount}명 전원)`
     if(!confirm(`${who} 잠금을 해제할까요?\n\n실적을 다시 고칠 수 있게 되며, 정정 후 다시 확정해야 합니다.`))return
     try{ setBusy(true); const r=await reopenSettlement(ym,workerId)
       showToast(`잠금 해제 — 실적 ${r.unlocked}건`); await load(ym)
@@ -3821,7 +3841,7 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
           style={{padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}>
           {months.map(m=><option key={m} value={m}>{m.slice(0,4)}년 {Number(m.slice(5,7))}월</option>)}
         </select>
-        {/* 사람별로 확정하므로 「몇 명이 끝났는지」를 그대로 보여 준다 */}
+        {/* 사람별·단계별이므로 「어디까지 왔는지」를 그대로 보여 준다 */}
         {allSettled
           ?<span style={{fontSize:12,fontWeight:700,color:'#065f46',background:'#ecfdf5',
             border:'1px solid #6ee7b7',borderRadius:20,padding:'4px 12px'}}>
@@ -3829,7 +3849,9 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
           </span>
           :<span style={{fontSize:12,fontWeight:700,color:'#9a3412',background:'#fff7ed',
             border:'1px solid #fdba74',borderRadius:20,padding:'4px 12px'}}>
-            {settledCount>0?`${settledCount}/${totalCount}명 정산 완료`:'미정산'}
+            {notifiedCount+settledCount>0
+              ?`미정산 ${openCount} · 입금 대기 ${notifiedCount} · 완료 ${settledCount}`
+              :'미정산'}
           </span>}
         {changed.length>0&&(
           <span style={{fontSize:12,fontWeight:700,color:'#c2410c',background:'#fff7ed',
@@ -3923,6 +3945,7 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
                 <tbody>
                   {data.workers.map(w=>{
                     const s=savedOf(w.worker_id)
+                    const stage=stageOf(w.worker_id)
                     const diff=diffOf(w,s)
                     return(
                     <tr key={w.worker_id} style={s?{background:'#f7fdfa'}:undefined}>
@@ -3951,27 +3974,37 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
                       </td>
                       <td style={tdS}>{cell(w,s,'transit_amount',money)}</td>
                       <td style={{...tdS,whiteSpace:'nowrap'}}>
-                        {s
-                          ?<>
-                            <div style={{fontSize:11,fontWeight:700,color:'#065f46'}}>✅ 확정</div>
-                            <div style={{fontSize:10,color:'#6b7280'}}>
-                              {s.settled_by_name||''}
-                              {s.settled_at?` · ${String(s.settled_at).slice(0,10)}`:''}
-                            </div>
-                            {diff.length>0&&
-                              <div style={{fontSize:10,color:'#c2410c',fontWeight:700}}>⚠ 확정 뒤 변경</div>}
-                            {data.can_approve&&
-                              <button onClick={()=>reopen(w.worker_id,w.worker_name)} disabled={busy}
-                                style={{...rowBtn,border:'1px solid #fca5a5',background:'#fff',
-                                  color:'#dc2626'}}>해제</button>}
-                          </>
-                          :<>
-                            <div style={{fontSize:11,fontWeight:700,color:'#9a3412'}}>미정산</div>
-                            {data.can_approve&&
-                              <button onClick={()=>approve(w.worker_id,w.worker_name)} disabled={busy}
-                                style={{...rowBtn,border:'none',background:'#059669',
-                                  color:'#fff'}}>확정</button>}
-                          </>}
+                        {stage==='settled'&&<>
+                          <div style={{fontSize:11,fontWeight:700,color:'#065f46'}}>✅ 완료</div>
+                          <div style={{fontSize:10,color:'#6b7280'}}>
+                            {s.settled_by_name||''}
+                            {s.settled_at?` · ${String(s.settled_at).slice(0,10)}`:''}
+                          </div>
+                        </>}
+                        {stage==='notified'&&<>
+                          <div style={{fontSize:11,fontWeight:700,color:'#b45309'}}>📨 입금 대기</div>
+                          <div style={{fontSize:10,color:'#6b7280'}}>
+                            1차 {s.notified_at?String(s.notified_at).slice(0,10):''}
+                            {s.notified_by_name?` · ${s.notified_by_name}`:''}
+                          </div>
+                          {data.can_approve&&
+                            <button onClick={()=>complete(w.worker_id,w.worker_name)} disabled={busy}
+                              style={{...rowBtn,border:'none',background:'#059669',
+                                color:'#fff'}}>입금 확인</button>}
+                        </>}
+                        {stage==='open'&&<>
+                          <div style={{fontSize:11,fontWeight:700,color:'#9a3412'}}>미정산</div>
+                          {data.can_approve&&
+                            <button onClick={()=>notify(w.worker_id,w.worker_name)} disabled={busy}
+                              style={{...rowBtn,border:'none',background:'#1a56db',
+                                color:'#fff'}}>1차 안내</button>}
+                        </>}
+                        {diff.length>0&&
+                          <div style={{fontSize:10,color:'#c2410c',fontWeight:700}}>⚠ 확정 뒤 변경</div>}
+                        {stage!=='open'&&data.can_approve&&
+                          <button onClick={()=>reopen(w.worker_id,w.worker_name)} disabled={busy}
+                            style={{...rowBtn,border:'1px solid #fca5a5',background:'#fff',
+                              color:'#dc2626',marginLeft:4}}>해제</button>}
                       </td>
                     </tr>
                   )})}
@@ -4027,23 +4060,34 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
             {data.can_approve
               ?<div>
                 <div style={{fontSize:12,color:'#374151',marginBottom:12,lineHeight:1.7}}>
-                  확정하면 그 금액이 <strong>승인 시점 값으로 저장</strong>되고 실적이 잠깁니다.
-                  나중에 단가나 연비가 바뀌어도 지난 정산액은 흔들리지 않습니다.<br/>
-                  <strong>사람별로 확정</strong>합니다 — 위 「사람별」 표의 오른쪽 끝에서
-                  한 분씩 처리하시고, 아래 단추는 남은 분을 한꺼번에 처리할 때 쓰십시오.
+                  정산은 <strong>두 단계</strong>입니다.<br/>
+                  <strong>1차 안내</strong> — 금액이 <strong>이 시점 값으로 저장</strong>되고 실적이 잠기며,
+                  각 직원에게 <strong>자기 정산 내역 메일</strong>이 갑니다. 이후 단가·연비가 바뀌어도
+                  알린 금액은 흔들리지 않습니다. <strong>입금할 금액이 없는 분은 그 자리에서 완료</strong>됩니다.<br/>
+                  <strong>2차 입금 확인</strong> — 통장에 실제로 들어온 것을 보시고 완료로 넘깁니다.<br/>
+                  <span style={{color:'#6b7280'}}>
+                    1차 뒤에도 <strong>대표이사는 실적을 그대로 고칠 수 있습니다</strong> —
+                    하이패스 추가 건이 뒤늦게 올라오는 일이 있어서입니다. 직원은 고칠 수 없습니다.
+                  </span>
                 </div>
                 <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-                  {settledCount<totalCount&&
-                    <button onClick={()=>approve()} disabled={busy}
+                  {openCount>0&&
+                    <button onClick={()=>notify()} disabled={busy}
+                      style={{padding:'11px 22px',borderRadius:8,border:'none',background:'#1a56db',
+                        color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
+                      {busy?'처리 중…':`남은 ${openCount}명 1차 안내 발송`}
+                    </button>}
+                  {notifiedCount>0&&
+                    <button onClick={()=>complete()} disabled={busy}
                       style={{padding:'11px 22px',borderRadius:8,border:'none',background:'#059669',
                         color:'#fff',cursor:'pointer',fontSize:14,fontWeight:700}}>
-                      {busy?'처리 중…':`남은 ${totalCount-settledCount}명 한꺼번에 확정`}
+                      {busy?'처리 중…':`입금 대기 ${notifiedCount}명 완료 처리`}
                     </button>}
-                  {settledCount>0&&
+                  {notifiedCount+settledCount>0&&
                     <button onClick={()=>reopen()} disabled={busy}
                       style={{padding:'11px 22px',borderRadius:8,border:'1px solid #fca5a5',
                         background:'#fff',color:'#dc2626',cursor:'pointer',fontSize:14,fontWeight:700}}>
-                      {busy?'처리 중…':`확정된 ${settledCount}명 전원 잠금 해제`}
+                      {busy?'처리 중…':`${notifiedCount+settledCount}명 전원 잠금 해제`}
                     </button>}
                 </div>
               </div>

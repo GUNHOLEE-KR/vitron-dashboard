@@ -398,6 +398,102 @@ function buildPurchase({ kind, actorName, actorEmail, p, to, reason, sender }) {
   }
 }
 
+// 정산 «1차 안내» (2026-09-04 신설)
+// ════════════════════════════════════════════════════════════
+// 대표이사가 그달 정산을 확정하면서 «각 직원에게» 자기 몫을 알린다.
+//
+// 🔑 이 메일만 받는 사람이 «직원» 이다. 나머지(차량·완료·휴가·구매 신청)는 전부
+//    대표이사에게 간다. 그래서 to 를 c.toBoss 로 두면 안 된다 — 여덟 통이 전부
+//    대표이사 사서함으로 쏟아진다.
+// ⚠ 다만 시험 중(MAIL_TO_TEST)에는 «직원에게 갈 것도» 시험 주소로 돌린다.
+//   남의 사서함에 「입금해 주십시오」 가 날아가면 안 된다 — 휴가 승인 메일과 같은 이유다.
+//
+// 보내는 사람은 «대표이사» 다(사용자 지시). 부르는 쪽이 그 계정을 sender 로 넣어 준다.
+function buildSettlement({ ym, row, actorName, actorEmail, sender }) {
+  const c = cfg()
+  const charge = Number(row.personal_amount || 0) + Number(row.toll_amount || 0)
+  const liter = Number(row.own_car_liter || 0)
+  const transit = Number(row.transit_amount || 0)
+  const label = `${ym.slice(0, 4)}년 ${Number(ym.slice(5, 7))}월`
+
+  // 제목이 «무엇을 해야 하는지» 를 먼저 말한다 — 입금할 것이 있으면 그것부터.
+  const head = charge > 0 ? `입금 ${won(charge)}원`
+    : liter > 0 ? `주유 환급 ${liter}L`
+      : transit > 0 ? `대중교통 ${won(transit)}원`
+        : '정산 내역 없음'
+  const subject = `[정산] ${label} · ${row.worker_name} · ${head}`
+
+  const body = [`${row.worker_name} 님, ${label} 정산 내역입니다.`, '']
+  if (charge > 0) {
+    body.push('■ 회사에 입금하실 금액',
+      `    개인 사용 ${row.personal_km}km × 차량 단가 = ${won(row.personal_amount)}원`,
+      `    하이패스 = ${won(row.toll_amount)}원`,
+      `    합계 = ${won(charge)}원`, '')
+  }
+  if (liter > 0) {
+    body.push('■ 주유 환급 (회사 → 본인)',
+      `    자차 업무 ${row.own_car_km}km ÷ 연비 = ${liter}L`,
+      '    금액이 아니라 주유 한도(리터)로 지급합니다.', '')
+  }
+  if (transit > 0) {
+    body.push('■ 대중교통 실비 (회사 → 본인)', `    ${won(transit)}원`, '')
+  }
+  if (charge === 0 && liter === 0 && transit === 0) {
+    body.push('이달에는 청구하거나 환급할 금액이 없습니다.', '')
+  }
+
+  body.push('■ 금액은 이 시점 값으로 «확정» 되었습니다',
+    '    이후 차량 단가나 연비가 바뀌어도 위 금액은 달라지지 않습니다.',
+    '    실적을 고쳐야 할 일이 있으면 대표이사에게 말씀해 주십시오.', '')
+  if (charge > 0) {
+    body.push('입금 계좌 — 기업은행 456-010313-04-011 (주) 바이트론 이앤에스',
+      '입금이 확인되면 대표이사가 «완료» 로 처리합니다.', '')
+  }
+  body.push('자세한 내역은 스케줄 탭의 [💰 정산] 에서 보실 수 있습니다.',
+    '', 'http://vitron-nas:8082', '', '— 바이트론 이앤에스 업무 현황 대시보드')
+
+  return {
+    ...fromOf({ sender, actorName, actorEmail }),
+    // 🔴 시험 중이면 «직원에게 갈 것도» 시험 주소로 돌린다 (위 주석 참고)
+    to: c.testTo || row.worker_email || c.toBoss,
+    subject,
+    text: body.join('\n'),
+  }
+}
+
+// 정산 안내. 사람마다 «한 통씩» 간다 — 내용이 각자 다르므로 묶지 않는다.
+// ⚠ 부르는 쪽은 await 하지 않아도 된다. 메일이 실패해도 확정은 이미 끝나 있다.
+function notifySettlement({ ym, rows, actor, sender, onSenderFail }) {
+  try {
+    if (!isEnabled()) return
+    const list = (Array.isArray(rows) ? rows : [rows]).filter(Boolean)
+    for (const row of list) {
+      // 🔑 청구도 환급도 실비도 없는 사람에게는 «보내지 않는다» (2026-09-04 실측 뒤 결정).
+      //    사무실 내근만 한 달에도 실적이 있어 목록에는 오르는데, 그분들께 「정산할
+      //    것이 없습니다」 를 여덟 통 보내면 다음 달부터 아무도 안 읽는다.
+      //    화면에는 「입금액이 없어 바로 완료」로 그대로 나온다 — 사실이 사라지지는 않는다.
+      const nothing = Number(row.personal_amount || 0) === 0
+        && Number(row.toll_amount || 0) === 0
+        && Number(row.own_car_liter || 0) === 0
+        && Number(row.transit_amount || 0) === 0
+      if (nothing) continue
+      // 받을 주소가 없으면 조용히 건너뛴다 — 공용 주소로 보내면 남의 금액이 섞인다
+      if (!row.worker_email && !cfg().testTo) {
+        console.error(`[mail] notifySettlement skip :: ${row.worker_name} 주소 없음`)
+        continue
+      }
+      send(buildSettlement({
+        ym, row,
+        actorName: actor?.name || null,
+        actorEmail: actor?.email || null,
+        sender: sender || null,
+      }), sender || null, onSenderFail || null)
+    }
+  } catch (e) {
+    console.error(`[mail] notifySettlement error :: ${e.message}`)
+  }
+}
+
 // ── 여러 날짜를 한 통으로 묶기 ───────────────────────────────
 // 화면이 「출장 3일」을 넣으면 계획을 «날짜마다 따로» 저장한다(addPlan 반복).
 // 그대로 두면 메일이 세 통 간다. 화면이 한 번의 등록마다 붙여 보내는
@@ -604,5 +700,5 @@ function notifyPurchase({ kind, actor, purchase, to, reason, sender, onSenderFai
   }
 }
 
-module.exports = { notify, notifyDone, notifyVacation, notifyPurchase,
+module.exports = { notify, notifyDone, notifyVacation, notifyPurchase, notifySettlement,
   isEnabled, lastResult, isVehiclePlan, vacDays, verifyLogin, setAccount }
