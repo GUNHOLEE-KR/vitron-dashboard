@@ -7,6 +7,7 @@ const cors = require('cors')
 // DATE 타입을 JS Date 객체가 아닌 YYYY-MM-DD 문자열로 반환
 const mailer = require('./mailer')
 const mailcred = require('./mailcred')
+const { parseHipass } = require('./hipass')
 const { types } = require('pg')
 types.setTypeParser(1082, val => val)
 
@@ -25,7 +26,10 @@ function todayLocal() {
 
 const app = express()
 app.use(cors())
-app.use(express.json())
+// 🔑 기본값(100kb)으로는 하이패스 엑셀을 못 받는다 — 파일을 base64 로 실어 보내므로
+//    본문이 파일보다 «3분의 4배» 커진다. 두 달치가 16KB 였으니 넉넉히 잡아 둔다.
+//    ⚠ 무제한으로 두지는 않는다. 실수로 큰 파일을 올려 메모리를 먹는 것을 막는다.
+app.use(express.json({ limit: '12mb' }))
 
 // ─── 로그인 게이트 ───────────────────────────────────────────
 // 2026-08-21 부터 «화면 전체» 가 로그인 뒤에 있다. 그 전에는 정산 화면만 막았다.
@@ -2157,6 +2161,10 @@ async function buildSettlement(ym) {
         worker_email: r.worker_email,
         personal_km: 0, personal_amount: 0, toll_amount: 0,
         own_car_km: 0, own_car_liter: 0, own_car_missing_efficiency: false,
+        // 🔴 자차로 «업무» 다녀온 하이패스는 여태 어디에도 담기지 않았다 —
+        //    직원이 자기 돈으로 낸 통행료를 돌려받을 길이 없었다 (2026-09-04 확인).
+        //    사용자 결정: 전액 회사 부담이므로 대중교통 실비와 같은 자리에 둔다.
+        own_toll_amount: 0,
         transit_amount: 0, business_km: 0, fuel_amount: 0, rows: [],
       })
     }
@@ -2172,6 +2180,8 @@ async function buildSettlement(ym) {
       w.transit_amount += Number(r.transit_fee || 0)
       if (r.vehicle_kind === 'own') {
         w.own_car_km += km
+        // 자차 업무 하이패스 = 전액 회사 부담 (2026-09-04 지시)
+        w.own_toll_amount += Number(r.toll_fee || 0)
         if (r.km_per_liter) w.own_car_liter += km / Number(r.km_per_liter)
         else if (km > 0) w.own_car_missing_efficiency = true
       }
@@ -2333,20 +2343,21 @@ app.post(['/api/schedule/settlement/:ym/notify',
       await client.query(
         `INSERT INTO schedule_settlements
            (ym, worker_id, personal_km, personal_amount, toll_amount,
-            own_car_km, own_car_liter, transit_amount,
+            own_car_km, own_car_liter, own_toll_amount, transit_amount,
             status, notified_by, notified_at, settled_by, settled_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),$11,$12)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$13,$8,$9,$10,now(),$11,$12)
          ON CONFLICT (ym, worker_id) DO UPDATE
          SET personal_km=EXCLUDED.personal_km, personal_amount=EXCLUDED.personal_amount,
              toll_amount=EXCLUDED.toll_amount, own_car_km=EXCLUDED.own_car_km,
              own_car_liter=EXCLUDED.own_car_liter, transit_amount=EXCLUDED.transit_amount,
+             own_toll_amount=EXCLUDED.own_toll_amount,
              status=EXCLUDED.status,
              notified_by=EXCLUDED.notified_by, notified_at=now(),
              settled_by=EXCLUDED.settled_by, settled_at=EXCLUDED.settled_at,
              updated_at=now()`,
         [ym, w.worker_id, w.personal_km, w.personal_amount, w.toll_amount,
          w.own_car_km, w.own_car_liter, w.transit_amount,
-         status, req.session.uid, settledBy, settledAt])
+         status, req.session.uid, settledBy, settledAt, w.own_toll_amount])
     }
     // 안내한 사람의 실적만 잠근다 — 알린 금액과 근거가 어긋나지 않게 한다.
     // ⚠ 여기에 worker_id 를 걸지 않으면 한 사람을 확정해도 그달 전원의 실적이
@@ -2441,6 +2452,231 @@ app.post('/api/schedule/settlement/:ym/reopen', requireLogin, async (req, res) =
     res.status(500).json({ error: e.message })
   } finally {
     client.release()
+  }
+})
+
+// ─── 하이패스 통행 내역 ──────────────────────────────────────
+// 조회 API 가 없어 «내려받은 엑셀» 을 올려서 쌓는다 (2026-09-04 신설).
+//   법인차량  대표이사 또는 관리자가 한 번 올리면 전 직원이 자기 것만 골라 쓴다
+//   자차      본인이 자기 것을 올린다
+//
+// 🔴 날짜를 자를 때는 «반드시» AT TIME ZONE 'Asia/Seoul' 을 쓴다.
+//    거래일시가 TIMESTAMPTZ 라, 세션 표준시가 UTC 면 새벽·아침 통행이 «전날» 로
+//    밀린다 — 실물 파일의 마지막 줄이 9/4 07:46(KST) = 9/3 22:46(UTC) 였다.
+//    이걸 놓치면 「분명히 그날 갔는데 목록에 없다」 가 된다.
+const HIPASS_DATE = "(t.used_at AT TIME ZONE 'Asia/Seoul')::date"
+
+// 이 차량의 내역을 «올릴» 수 있는가.
+//   법인차량 = 관리자 또는 정산 승인 권한자 (법인카드 명세라 아무나 못 받는다)
+//   자차     = 그 차의 주인 본인 (개인 카드)
+async function canUploadFor(vehicle, session) {
+  if (!vehicle) return '차량을 찾을 수 없습니다.'
+  if (vehicle.kind === 'own') {
+    if (Number(vehicle.owner_worker_id) === Number(session?.workerId)) return null
+    return '자차 명세는 본인만 올릴 수 있습니다.'
+  }
+  if (session?.role === 'admin' || await canApprove(session?.uid)) return null
+  return '법인차량 명세는 관리자 또는 대표이사만 올릴 수 있습니다.'
+}
+
+// 엑셀 올리기 — 본문에 base64 로 싣는다(파일 업로드 미들웨어를 들이지 않기 위함).
+app.post('/api/hipass/upload', requireLogin, async (req, res) => {
+  const b = req.body || {}
+  if (!b.file_base64) return res.status(400).json({ error: '파일이 없습니다.' })
+  let parsed
+  try {
+    // ⚠ 확장자를 믿지 않는다. 하이패스가 주는 파일은 `.xls` 인데 속이 xlsx 다.
+    parsed = parseHipass(Buffer.from(String(b.file_base64), 'base64'))
+  } catch (e) {
+    return res.status(400).json({ error: `엑셀을 읽지 못했습니다 — ${e.message}` })
+  }
+  if (parsed.rows.length === 0) {
+    return res.status(400).json({ error: parsed.warnings[0] || '읽을 내용이 없습니다.', warnings: parsed.warnings })
+  }
+  if (parsed.cards.length > 1) {
+    return res.status(400).json({ error: parsed.warnings.find(w => w.includes('카드')) || '카드가 섞여 있습니다.', warnings: parsed.warnings })
+  }
+  try {
+    // 차량 고르기 — ① 본문이 지정했으면 그것 ② 아니면 카드번호로 찾는다
+    const card = parsed.cards[0] || null
+    let vehicle = null
+    if (b.vehicle_id) {
+      const { rows } = await pool.query('SELECT * FROM schedule_vehicles WHERE id = $1', [Number(b.vehicle_id)])
+      vehicle = rows[0] || null
+    } else if (card) {
+      const { rows } = await pool.query(
+        'SELECT * FROM schedule_vehicles WHERE hipass_card = $1 AND active', [card])
+      if (rows.length > 1) {
+        return res.status(409).json({ error: `카드 ${card} 가 차량 여러 대에 등록돼 있습니다. 설정에서 정리해 주십시오.` })
+      }
+      vehicle = rows[0] || null
+    }
+    if (!vehicle) {
+      // 🔑 못 찾았다고 아무 차에나 넣지 않는다 — 남의 통행료가 내 차에 붙는다.
+      //    화면이 차량을 고르게 하고, 고르면 그 카드를 차량에 «기억» 시킨다.
+      return res.status(404).json({
+        error: card
+          ? `카드 ${card} 에 연결된 차량이 없습니다. 차량을 골라 주시면 다음부터 자동으로 찾습니다.`
+          : '카드번호가 없어 차량을 알 수 없습니다. 차량을 골라 주십시오.',
+        need_vehicle: true, card, warnings: parsed.warnings,
+      })
+    }
+    const deny = await canUploadFor(vehicle, req.session)
+    if (deny) return res.status(403).json({ error: deny })
+
+    // 고른 차량에 카드번호를 «기억» 시킨다 — 다음부터는 고르지 않아도 된다
+    if (card && !vehicle.hipass_card) {
+      await pool.query('UPDATE schedule_vehicles SET hipass_card = $1 WHERE id = $2', [card, vehicle.id])
+    }
+
+    // 넣기 — 같은 통행을 두 번 올려도 유니크 인덱스가 걸러 준다
+    let inserted = 0
+    for (const r of parsed.rows) {
+      const { rowCount } = await pool.query(
+        `INSERT INTO hipass_tolls
+           (vehicle_id, used_at, entry_at, exit_at, gate_in, gate_out,
+            amount, card_no, note, source_file, uploaded_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         ON CONFLICT DO NOTHING`,
+        [vehicle.id, r.used_at, r.entry_at, r.exit_at, r.gate_in, r.gate_out,
+         r.amount, r.card_no, r.note, String(b.filename || '').slice(0, 200) || null,
+         req.session.uid])
+      inserted += rowCount
+    }
+    res.json({
+      ok: true,
+      vehicle: { id: vehicle.id, name: vehicle.name, plate: vehicle.plate, kind: vehicle.kind },
+      period: parsed.period, sheet: parsed.sheet, card,
+      parsed: parsed.rows.length,
+      inserted,
+      // 🔑 「이미 있던 것」 을 숨기지 않고 말해 준다 — 두 번 올렸을 때 「아무 일도
+      //    안 일어났다」 로 보이면 올라간 줄 알고 넘어가거나, 반대로 다시 올린다.
+      duplicated: parsed.rows.length - inserted,
+      amount: parsed.rows.reduce((s, x) => s + x.amount, 0),
+      warnings: parsed.warnings,
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 목록 — 기간·차량으로 좁힌다. mine=1 이면 «내 실적에 붙은 것» 만.
+// 🔑 아직 아무도 안 가져간 것(actual_id IS NULL)이 기본이다 — 고를 수 있는 것들이다.
+app.get('/api/hipass', requireLogin, async (req, res) => {
+  const { from, to, vehicle_id } = req.query
+  try {
+    const { rows } = await pool.query(
+      `SELECT t.*, ${HIPASS_DATE} AS used_date,
+              v.name AS vehicle_name, v.plate AS vehicle_plate, v.kind AS vehicle_kind,
+              a.worker_id AS claimed_worker_id, w.name AS claimed_worker_name
+         FROM hipass_tolls t
+         LEFT JOIN schedule_vehicles v ON v.id = t.vehicle_id
+         LEFT JOIN schedule_actuals  a ON a.id = t.actual_id
+         LEFT JOIN workers w           ON w.id = a.worker_id
+        WHERE ($1::date IS NULL OR ${HIPASS_DATE} >= $1::date)
+          AND ($2::date IS NULL OR ${HIPASS_DATE} <= $2::date)
+          AND ($3::int  IS NULL OR t.vehicle_id = $3::int)
+          AND ($4::boolean IS FALSE OR t.actual_id IS NULL)
+        ORDER BY t.used_at ASC`,
+      [from || null, to || null, vehicle_id || null, String(req.query.unclaimed) === '1'])
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 실적의 하이패스 금액을 «붙어 있는 통행의 합» 으로 다시 센다.
+// 🔑 금액을 두 곳에 두지 않는다 — 목록이 정본이고 toll_fee 는 그 합계다.
+//    이렇게 해야 떼었다 붙였다 해도 금액이 어긋나지 않는다.
+async function retotalToll(actualId, client = pool) {
+  const { rows } = await client.query(
+    'SELECT coalesce(sum(amount),0)::int AS s FROM hipass_tolls WHERE actual_id = $1', [actualId])
+  await client.query('UPDATE schedule_actuals SET toll_fee = $1, updated_at = now() WHERE id = $2',
+    [rows[0].s, actualId])
+  return rows[0].s
+}
+
+// 실적에 붙이기 / 떼기. 붙일 때 실적 주인 판정은 «DB 의 worker_id» 로 한다.
+app.post('/api/hipass/:id/claim', requireLogin, async (req, res) => {
+  const id = Number(req.params.id)
+  const actualId = req.body?.actual_id === null ? null : Number(req.body?.actual_id)
+  try {
+    const { rows: t } = await pool.query('SELECT * FROM hipass_tolls WHERE id = $1', [id])
+    if (!t.length) return res.status(404).json({ error: '해당 통행 내역을 찾을 수 없습니다.' })
+
+    // 떼기 — 붙어 있던 실적의 합계를 다시 센다
+    if (!actualId) {
+      const was = t[0].actual_id
+      await pool.query(
+        'UPDATE hipass_tolls SET actual_id=NULL, claimed_by=NULL, claimed_at=NULL, updated_at=now() WHERE id=$1',
+        [id])
+      if (was) await retotalToll(was)
+      return res.json({ ok: true, detached: true, actual_id: was, toll_fee: was ? await retotalToll(was) : 0 })
+    }
+
+    const { rows: a } = await pool.query(
+      'SELECT id, worker_id, work_date, locked, vehicle_id FROM schedule_actuals WHERE id = $1', [actualId])
+    if (!a.length) return res.status(404).json({ error: '해당 실적을 찾을 수 없습니다.' })
+    if (!canEditWorker(req.session, a[0].worker_id)) return denyOther(res)
+    const lockErr = await lockedError(a[0], req.session)
+    if (lockErr) return res.status(409).json({ error: lockErr })
+    // ⚠ 다른 차의 통행료를 붙이지 못하게 막는다. 화면이 걸러 주지만 여기서도 본다.
+    if (a[0].vehicle_id && Number(a[0].vehicle_id) !== Number(t[0].vehicle_id)) {
+      return res.status(400).json({ error: '그 실적에 적힌 차량의 통행료가 아닙니다.' })
+    }
+    if (t[0].actual_id && Number(t[0].actual_id) !== actualId) {
+      return res.status(409).json({ error: '이미 다른 실적에 붙어 있는 통행료입니다.' })
+    }
+    await pool.query(
+      `UPDATE hipass_tolls SET actual_id=$1, claimed_by=$2, claimed_at=now(), updated_at=now()
+        WHERE id=$3`, [actualId, req.session.uid, id])
+    res.json({ ok: true, actual_id: actualId, toll_fee: await retotalToll(actualId) })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 손으로 넣기 — 자동으로 못 잡는 것(현금 통행·명세가 늦게 뜬 건)을 위해 (지시).
+app.post('/api/hipass/manual', requireLogin, async (req, res) => {
+  const b = req.body || {}
+  const vehicleId = Number(b.vehicle_id)
+  const amount = Math.round(Number(b.amount))
+  if (!Number.isInteger(vehicleId) || vehicleId <= 0) return res.status(400).json({ error: '차량을 골라 주세요.' })
+  if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: '금액을 올바르게 넣어 주세요.' })
+  if (!b.used_date) return res.status(400).json({ error: '날짜가 필요합니다.' })
+  try {
+    const { rows: v } = await pool.query('SELECT * FROM schedule_vehicles WHERE id = $1', [vehicleId])
+    const deny = await canUploadFor(v[0], req.session)
+    if (deny) return res.status(403).json({ error: deny })
+    // 시각을 모르면 그날 정오로 둔다 — 날짜로만 맞추므로 상관없고, 자정으로 두면
+    // 표준시가 밀릴 때 «전날» 이 될 수 있다.
+    const { rows } = await pool.query(
+      `INSERT INTO hipass_tolls
+         (vehicle_id, used_at, gate_in, gate_out, amount, note, manual, uploaded_by)
+       VALUES ($1, ($2::date + time '12:00') AT TIME ZONE 'Asia/Seoul', $3,$4,$5,$6, TRUE, $7)
+       RETURNING *`,
+      [vehicleId, b.used_date, String(b.gate_in || '').slice(0, 60) || null,
+       String(b.gate_out || '').slice(0, 60) || null, amount,
+       String(b.note || '손으로 넣음').slice(0, 120), req.session.uid])
+    res.json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 지우기 — 잘못 올린 것. 실적에 붙어 있으면 합계를 다시 센다.
+app.delete('/api/hipass/:id', requireLogin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM hipass_tolls WHERE id = $1', [Number(req.params.id)])
+    if (!rows.length) return res.status(404).json({ error: '해당 통행 내역을 찾을 수 없습니다.' })
+    const { rows: v } = await pool.query('SELECT * FROM schedule_vehicles WHERE id = $1', [rows[0].vehicle_id])
+    const deny = await canUploadFor(v[0], req.session)
+    if (deny) return res.status(403).json({ error: deny })
+    await pool.query('DELETE FROM hipass_tolls WHERE id = $1', [Number(req.params.id)])
+    if (rows[0].actual_id) await retotalToll(rows[0].actual_id)
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
   }
 })
 

@@ -435,10 +435,15 @@ function buildSettlement({ ym, row, actorName, actorEmail, sender }) {
       `    자차 업무 ${row.own_car_km}km ÷ 연비 = ${liter}L`,
       '    금액이 아니라 주유 한도(리터)로 지급합니다.', '')
   }
+  const ownToll = Number(row.own_toll_amount || 0)
+  if (ownToll > 0) {
+    body.push('■ 자차 업무 하이패스 (회사 → 본인)',
+      `    ${won(ownToll)}원 — 업무로 다녀오신 통행료는 회사가 전액 부담합니다.`, '')
+  }
   if (transit > 0) {
     body.push('■ 대중교통 실비 (회사 → 본인)', `    ${won(transit)}원`, '')
   }
-  if (charge === 0 && liter === 0 && transit === 0) {
+  if (charge === 0 && liter === 0 && transit === 0 && ownToll === 0) {
     body.push('이달에는 청구하거나 환급할 금액이 없습니다.', '')
   }
 
@@ -475,6 +480,7 @@ function notifySettlement({ ym, rows, actor, sender, onSenderFail }) {
       const nothing = Number(row.personal_amount || 0) === 0
         && Number(row.toll_amount || 0) === 0
         && Number(row.own_car_liter || 0) === 0
+        && Number(row.own_toll_amount || 0) === 0
         && Number(row.transit_amount || 0) === 0
       if (nothing) continue
       // 받을 주소가 없으면 조용히 건너뛴다 — 공용 주소로 보내면 남의 금액이 섞인다
