@@ -62,3 +62,34 @@ export function getHipass({ from, to, vehicleId, unclaimed } = {}) {
 export const claimHipass = (id, actualId) => request('POST', `/${id}/claim`, { actual_id: actualId })
 export const addManualHipass = (row) => request('POST', '/manual', row)
 export const removeHipass = (id) => request('DELETE', `/${id}`)
+
+// ── 근거 자료 (2026-09-04 신설) ──
+// 🔑 올린 «파일 원본» 을 DB 에 남긴다. 그래야 나중에 「이 금액의 근거가 무엇이냐」에
+//    답할 수 있다. 자동으로 지우지 않는다 — 사람이 손으로만 지운다(지시).
+export const getHipassSummary = (ym) => request('GET', `/summary?ym=${ym}`)
+export const getHipassByWorker = (ym, workerId) =>
+  request('GET', `/by-worker?ym=${ym}${workerId ? `&worker_id=${workerId}` : ''}`)
+export const removeHipassUpload = (id) => request('DELETE', `/uploads/${id}`)
+// 원본은 «주소» 로 연다. fetch 로 받아 Blob 을 만들 수도 있지만, 그러면 파일 이름을
+// 서버가 붙여 준 것(Content-Disposition)이 아니라 우리가 지어내야 한다.
+export const hipassFileUrl = (id) => `/api/hipass/uploads/${id}/file`
+
+// 인원별 근거를 CSV 로 만든다.
+// 🔴 맨 앞에 «BOM» 을 붙인다 — 없으면 엑셀이 UTF-8 을 못 알아채 한글이 통째로 깨진다.
+export function tollsToCsv(rows) {
+  const esc = v => {
+    const s = v == null ? '' : String(v)
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  }
+  const head = ['직원', '작업일', '통행일', '차량', '번호판', '구간', '금액(원)', '용도', '비고', '원본파일']
+  const body = rows.map(r => [
+    r.worker_name, r.work_date, r.used_date,
+    r.vehicle_name, r.vehicle_plate,
+    `${r.gate_in || '-'} → ${r.gate_out || '-'}`,
+    r.amount,
+    r.use_type === 'personal' ? '개인 사용' : '업무',
+    r.manual ? '손으로 넣음' : (r.note || ''),
+    r.source_filename || '',
+  ].map(esc).join(','))
+  return '﻿' + [head.join(','), ...body].join('\r\n')
+}

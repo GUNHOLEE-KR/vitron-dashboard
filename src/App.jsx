@@ -21,7 +21,8 @@ import { getPurchases, addPurchase, setPurchaseStatus,
 // ⚠ removeHipass 는 아직 화면에서 부르지 않는다 — 잘못 올린 건을 지우는 자리를
 //   만들 때 쓴다(서버·호출기는 이미 있다). 지금 넣으면 쓰지 않는 import 가 된다.
 import { getHipass, uploadHipass, claimHipass, addManualHipass,
-         readFileAsBase64 } from './repositories/hipassRepo'
+         readFileAsBase64, getHipassSummary, getHipassByWorker,
+         removeHipassUpload, hipassFileUrl, tollsToCsv } from './repositories/hipassRepo'
 // 🔑 스케줄 달력은 «사내 포털과 함께 쓰는» 조각이라 여기 두지 않는다 (2026-08-26).
 //    각자 그리면 언젠가 한쪽만 고쳐 두 화면이 어긋난다.
 //    ⚠ CLAUDE.md 의 「App.jsx 단일 파일 유지」에 대한 예외 — 사용자 승인.
@@ -3733,6 +3734,7 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
   const [data,setData]=useState(null)
   const [loading,setLoading]=useState(false)
   const [busy,setBusy]=useState(false)
+  const [tollView,setTollView]=useState(null)   // {worker, rows} — 하이패스 근거 보기
 
   // 🔑 정산은 «사람별»이다 (2026-09-03). 종전에는 한 명만 확정돼도 화면 전체가
   //    「정산 완료」로 보였다 — 그 착시 때문에 남은 사람의 정산이 잊히기 쉬웠다.
@@ -3853,6 +3855,25 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
   const rowBtn={padding:'3px 9px',borderRadius:6,fontSize:11,cursor:'pointer',
     fontWeight:700,marginTop:4}
 
+  // ── 인원별 하이패스 근거 (2026-09-04 신설) ──────────────────
+  // 「이 금액이 어느 통행에서 나왔나」 를 낱건으로 보여 주고 CSV 로 내려준다.
+  async function showTolls(w){
+    try{
+      const rows=await getHipassByWorker(ym,w?w.worker_id:null)
+      if(rows.length===0){ showToast(w?`${w.worker_name} 님의 하이패스 내역이 없습니다`:'이 달 하이패스 내역이 없습니다'); return }
+      setTollView({worker:w,rows})
+    }catch(e){ showToast('불러오지 못했습니다: '+e.message) }
+  }
+  function downloadTollCsv(rows,label){
+    // 🔴 CSV 는 «BOM» 이 있어야 엑셀에서 한글이 안 깨진다 (tollsToCsv 가 붙인다)
+    const blob=new Blob([tollsToCsv(rows)],{type:'text/csv;charset=utf-8'})
+    const a=document.createElement('a')
+    a.href=URL.createObjectURL(blob)
+    a.download=`하이패스_${ym}${label?'_'+label:''}.csv`
+    document.body.appendChild(a); a.click()
+    setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove() },0)
+  }
+
   return(
     <div>
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'12px 16px',
@@ -3931,7 +3952,7 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
           처음에는 설정 탭에 두었는데, 매월 정산하면서 하는 일이라 동선이 어긋났다.
           여기에 있으면 «올리고 → 실적에 붙이고 → 확정» 이 한 화면에서 이어진다.
           ⚠ 실적이 0건인 달에도 보여야 한다 — 명세를 먼저 올려야 실적을 채울 수 있다. */}
-      {data&&<div style={{marginBottom:16}}><HipassUploader showToast={showToast}/></div>}
+      {data&&<div style={{marginBottom:16}}><HipassUploader ym={ym} showToast={showToast}/></div>}
 
       {data&&data.actual_count===0
         ?<Card title={`${ym} 정산`}>
@@ -3980,6 +4001,10 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
                       <td style={{...tdS,textAlign:'left',fontWeight:700}}>
                         {w.worker_name}
                         {w.team&&<div style={{fontSize:10,color:'#6b7280',fontWeight:500}}>{w.team}</div>}
+                        {/* 근거 — 이 사람의 하이패스가 어느 통행에서 나왔는지 */}
+                        <button onClick={()=>showTolls(w)}
+                          style={{...rowBtn,border:'1px solid #e5e7eb',background:'#fff',
+                            color:'#1a56db',fontWeight:600}}>🛣 내역</button>
                       </td>
                       <td style={tdS}>{cell(w,s,'personal_km',kmTxt)}</td>
                       <td style={tdS}>{cell(w,s,'personal_amount',money)}</td>
@@ -4042,6 +4067,13 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
                   )})}
                 </tbody>
               </table>
+            </div>
+            <div style={{marginTop:10,display:'flex',gap:8,flexWrap:'wrap'}}>
+              <button onClick={()=>showTolls(null)}
+                style={{padding:'6px 12px',borderRadius:7,border:'1px solid #e5e7eb',
+                  background:'#fff',color:'#374151',cursor:'pointer',fontSize:12,fontWeight:700}}>
+                🛣 이 달 하이패스 내역 (전원)
+              </button>
             </div>
             <div style={{marginTop:10,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
               💡 <strong>입금액</strong> = 개인 사용 거리 × 차량 단가 + 하이패스 — 직원이 회사 계좌로 입금합니다.<br/>
@@ -4157,6 +4189,75 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
             </div>
           </Card>
         </>
+      )}
+
+      {/* ── 하이패스 근거 보기 (2026-09-04 신설) ──
+          「이 금액이 어느 통행에서 나왔나」 를 낱건으로 보여 준다. CSV 로 내려받아
+          그대로 근거 자료로 쓸 수 있다. */}
+      {tollView&&(
+        <div onClick={()=>setTollView(null)}
+          style={{position:'fixed',inset:0,background:'rgba(17,24,39,.5)',zIndex:9400,
+            display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'40px 16px',overflowY:'auto'}}>
+          <div onClick={e=>e.stopPropagation()}
+            style={{background:'#fff',borderRadius:12,width:'100%',maxWidth:760,padding:22,
+              maxHeight:MODAL_MAX_H,overflowY:'auto',boxShadow:'0 20px 50px rgba(0,0,0,.3)'}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
+              <strong style={{fontSize:16}}>
+                🛣 {ym} 하이패스 내역{tollView.worker?` — ${tollView.worker.worker_name}`:' — 전원'}
+              </strong>
+              <span style={{fontSize:12,color:'#6b7280'}}>
+                {tollView.rows.length}건 ·{' '}
+                {tollView.rows.reduce((s,r)=>s+Number(r.amount||0),0).toLocaleString()}원
+              </span>
+              <div style={{flex:1}}/>
+              <button onClick={()=>downloadTollCsv(tollView.rows,tollView.worker?.worker_name)}
+                style={{padding:'6px 12px',borderRadius:7,border:'none',background:'#1a56db',
+                  color:'#fff',cursor:'pointer',fontSize:12,fontWeight:700}}>CSV 내려받기</button>
+              <button onClick={()=>setTollView(null)}
+                style={{border:'none',background:'none',fontSize:20,cursor:'pointer',color:'#6b7280'}}>×</button>
+            </div>
+            <div style={{overflowX:'auto'}}>
+              <table style={{width:'100%',borderCollapse:'collapse',minWidth:640}}>
+                <thead><tr>
+                  {!tollView.worker&&<th style={{...thS,textAlign:'left'}}>직원</th>}
+                  <th style={thS}>작업일</th><th style={thS}>통행일</th>
+                  <th style={{...thS,textAlign:'left'}}>차량</th>
+                  <th style={{...thS,textAlign:'left'}}>구간</th>
+                  <th style={thS}>금액</th><th style={thS}>용도</th>
+                  <th style={{...thS,textAlign:'left'}}>원본</th>
+                </tr></thead>
+                <tbody>
+                  {tollView.rows.map(r=>(
+                    <tr key={r.id}>
+                      {!tollView.worker&&<td style={{...tdS,textAlign:'left',fontWeight:700}}>{r.worker_name}</td>}
+                      <td style={tdS}>{String(r.work_date).slice(5)}</td>
+                      <td style={tdS}>{String(r.used_date).slice(5)}</td>
+                      <td style={{...tdS,textAlign:'left'}}>
+                        {r.vehicle_name}
+                        {r.vehicle_kind==='own'&&<span style={{fontSize:10,color:'#7c3aed'}}> 자차</span>}
+                      </td>
+                      <td style={{...tdS,textAlign:'left'}}>{r.gate_in||'-'} → {r.gate_out||'-'}</td>
+                      <td style={{...tdS,fontWeight:700}}>{Number(r.amount).toLocaleString()}원</td>
+                      <td style={tdS}>{r.use_type==='personal'?'개인 사용':'업무'}</td>
+                      <td style={{...tdS,textAlign:'left',fontSize:10,color:'#6b7280'}}>
+                        {r.manual?'손으로 넣음'
+                          :r.upload_id
+                            ?<a href={hipassFileUrl(r.upload_id)} style={{color:'#1a56db'}}>
+                              {r.source_filename||'원본'}
+                            </a>
+                            :'-'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{marginTop:10,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
+              💡 「원본」을 누르면 그 통행이 담겨 있던 <strong>하이패스 명세 파일</strong>을 그대로 받습니다.<br/>
+              💡 CSV 는 엑셀에서 바로 열립니다 — 근거 자료로 붙이거나 메일에 첨부하실 수 있습니다.
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
@@ -5353,7 +5454,7 @@ const FUEL_TYPES=['가솔린','디젤','LPG','전기']
 //   자차      본인이 자기 것을 올린다
 // 🔑 파일에 «어느 차인지» 가 없다. 처음 한 번만 차량을 고르면 카드번호를 기억해
 //    다음부터는 저절로 찾는다 — 그래서 고르개를 늘 띄우지 않고 «물어볼 때만» 띄운다.
-function HipassUploader({showToast}){
+function HipassUploader({ym,showToast}){
   const [busy,setBusy]=useState(false)
   const [result,setResult]=useState(null)
   const [askVehicle,setAskVehicle]=useState(null)   // {card, base64, filename}
@@ -5366,6 +5467,26 @@ function HipassUploader({showToast}){
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(()=>{ loadVehicles() },[])
 
+  // 🔑 이 달 현황 — 「올렸나 / 누가 아직 자기 것을 안 챙겼나」 (2026-09-04 신설).
+  //    이것이 없으면 매월 들어와도 빈 카드만 보여, 두 번 올리거나 아예 안 올리게 된다.
+  const [sum,setSum]=useState(null)
+  const loadSum=async()=>{ try{ setSum(await getHipassSummary(ym)) }catch{ setSum(null) } }
+  // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
+  useEffect(()=>{ loadSum() },[ym])
+
+  async function dropUpload(u){
+    if(!confirm(`올린 파일을 지울까요?\n\n· ${u.filename||'(이름 없음)'}\n· ${u.vehicle_name} · ${u.rows_inserted}건\n\n`
+      +'이 파일에서 온 통행 가운데 «실적에 붙지 않은 것» 도 함께 지워집니다.\n'
+      +'붙어 있는 것이 하나라도 있으면 지워지지 않습니다 — 정산 근거이기 때문입니다.'))return
+    try{
+      setBusy(true)
+      const r=await removeHipassUpload(u.id)
+      showToast(`파일과 통행 ${r.removed_tolls}건을 지웠습니다`)
+      loadSum()
+    }catch(e){ showToast(e.message) }
+    finally{ setBusy(false) }
+  }
+
   const inputS={padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}
   const usable=vehicles.filter(v=>v.active!==false)
 
@@ -5376,6 +5497,7 @@ function HipassUploader({showToast}){
       setResult(r); setAskVehicle(null); setPickId('')
       showToast(`하이패스 ${r.inserted}건을 넣었습니다`+(r.duplicated?` (이미 있던 것 ${r.duplicated}건)`:''))
       loadVehicles()                  // 차량에 카드번호가 기억됐을 수 있다
+      loadSum()                       // 현황·파일 목록을 다시 센다
     }catch(e){
       // 🔑 「차량을 모르겠다」 는 실패가 아니라 «물어볼 것» 이다
       if(e.needVehicle){ setAskVehicle({card:e.card,base64,filename}); setResult(null) }
@@ -5460,8 +5582,79 @@ function HipassUploader({showToast}){
         </div>
       )}
 
+      {/* ── 이 달 현황 — 「올렸나 / 누가 아직 안 챙겼나」 ── */}
+      {sum&&sum.by_vehicle.length>0&&(
+        <div style={{marginTop:12,padding:'10px 12px',background:'#f9fafb',
+          border:'1px solid #e5e7eb',borderRadius:8,fontSize:12,lineHeight:1.8}}>
+          <strong>{ym.slice(0,4)}년 {Number(ym.slice(5,7))}월 — 올라온 통행{' '}
+            {sum.by_vehicle.reduce((s,v)=>s+v.total,0)}건 ·{' '}
+            {sum.by_vehicle.reduce((s,v)=>s+v.amount,0).toLocaleString()}원</strong>
+          <table style={{width:'100%',borderCollapse:'collapse',marginTop:6}}>
+            <tbody>
+              {sum.by_vehicle.map(v=>(
+                <tr key={v.vehicle_id}>
+                  <td style={{...tdS,textAlign:'left',fontWeight:600}}>
+                    {v.vehicle_name} <span style={{color:'#6b7280',fontWeight:400}}>{v.vehicle_plate||''}</span>
+                    {v.vehicle_kind==='own'&&<span style={{fontSize:10,color:'#7c3aed'}}> 자차</span>}
+                  </td>
+                  <td style={tdS}>{v.total}건</td>
+                  <td style={tdS}>{v.amount.toLocaleString()}원</td>
+                  <td style={tdS}>붙음 {v.claimed}</td>
+                  <td style={{...tdS,fontWeight:v.unclaimed?700:400,color:v.unclaimed?'#c2410c':'#9ca3af'}}>
+                    남음 {v.unclaimed}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {/* 🔴 남은 것이 곧 «누락 위험» 이다 — 개인 사용분이 남으면 청구가 조용히 빠진다 */}
+          {sum.by_vehicle.some(v=>v.unclaimed>0)&&(
+            <div style={{marginTop:6,color:'#9a3412'}}>
+              ⚠ 아직 아무도 가져가지 않은 통행{' '}
+              <strong>{sum.by_vehicle.reduce((s,v)=>s+v.unclaimed,0)}건
+                ({sum.by_vehicle.reduce((s,v)=>s+v.unclaimed_amount,0).toLocaleString()}원)</strong>
+              {' '}— 각자 실적에서 골라 붙여야 정산에 잡힙니다.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── 올린 파일 (근거 자료) ── */}
+      {sum&&sum.uploads.length>0&&(
+        <div style={{marginTop:10}}>
+          <div style={{fontSize:12,fontWeight:700,marginBottom:4}}>📄 올린 파일</div>
+          <div style={{display:'flex',flexDirection:'column',gap:4}}>
+            {sum.uploads.map(u=>(
+              <div key={u.id} style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',
+                fontSize:11,color:'#374151',padding:'5px 8px',background:'#fff',
+                border:'1px solid #e5e7eb',borderRadius:6}}>
+                <strong>{u.vehicle_name}</strong>
+                <span style={{color:'#6b7280'}}>{u.vehicle_plate||''}</span>
+                <span>{u.period_from&&u.period_to
+                  ?`${String(u.period_from).slice(5)}~${String(u.period_to).slice(5)}`
+                  :(u.filename||'')}</span>
+                <span style={{color:'#6b7280'}}>{u.rows_inserted}건 넣음</span>
+                <span style={{color:'#6b7280'}}>
+                  {u.uploaded_by_name||''} · {String(u.uploaded_at).slice(0,10)}
+                </span>
+                <div style={{flex:1}}/>
+                {/* 근거 자료 — 원본 그대로 내려받는다 */}
+                <a href={hipassFileUrl(u.id)} style={{color:'#1a56db',fontWeight:700,
+                  textDecoration:'none'}}>내려받기</a>
+                <button onClick={()=>dropUpload(u)} disabled={busy}
+                  title={u.claimed_count>0?'실적에 붙은 통행이 있어 지울 수 없습니다':'지우기'}
+                  style={{padding:'2px 8px',borderRadius:5,fontSize:11,cursor:'pointer',
+                    border:'1px solid '+(u.claimed_count>0?'#e5e7eb':'#fca5a5'),
+                    background:'#fff',color:u.claimed_count>0?'#9ca3af':'#dc2626'}}>지우기</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={{marginTop:10,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
         💡 같은 파일을 다시 올려도 <strong>겹치지 않습니다</strong> — 이미 있는 통행은 건너뜁니다.<br/>
+        💡 올린 <strong>원본 파일은 지우기 전까지 보관</strong>됩니다 — 나중에 근거 자료로 내려받으실 수 있습니다.<br/>
         💡 파일이 <code>.xls</code> 로 내려와도 그대로 올리시면 됩니다.<br/>
         💡 <strong>자차로 업무</strong> 다녀온 통행료는 회사가 <strong>전액</strong> 돌려드립니다.
         법인차량을 <strong>개인 사용</strong>한 통행료는 회사에 입금하시는 쪽입니다.

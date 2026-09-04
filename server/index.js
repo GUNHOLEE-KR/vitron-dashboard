@@ -2620,22 +2620,42 @@ app.post('/api/hipass/upload', requireLogin, async (req, res) => {
       await pool.query('UPDATE schedule_vehicles SET hipass_card = $1 WHERE id = $2', [card, vehicle.id])
     }
 
+    // 🔑 원본 파일을 «먼저» 남긴다 (2026-09-04 지시). 나중에 「이 금액의 근거가
+    //    무엇이냐」 에 답하려면 통행만으로는 부족하다.
+    //    ⚠ 파일로 두지 않고 DB 에 담는다 — 백엔드 컨테이너에 볼륨이 없어 파일은
+    //      재배포할 때마다 사라진다.
+    const bytes = Buffer.from(String(b.file_base64), 'base64')
+    const amountTotal = parsed.rows.reduce((s, x) => s + x.amount, 0)
+    // 파일 머리말의 「사용기간 : 20260705 ~ 20260904」 를 날짜로 바꿔 둔다
+    const ymd8 = s => (/^\d{8}$/.test(s) ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}` : null)
+    const [pf, pt] = String(parsed.period || '').split('~').map(s => ymd8(s.trim()))
+    const { rows: up } = await pool.query(
+      `INSERT INTO hipass_uploads
+         (vehicle_id, filename, content, byte_size, period_from, period_to,
+          rows_parsed, amount_total, uploaded_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+      [vehicle.id, String(b.filename || '').slice(0, 200) || null, bytes, bytes.length,
+       pf, pt, parsed.rows.length, amountTotal, req.session.uid])
+    const uploadId = up[0].id
+
     // 넣기 — 같은 통행을 두 번 올려도 유니크 인덱스가 걸러 준다
     let inserted = 0
     for (const r of parsed.rows) {
       const { rowCount } = await pool.query(
         `INSERT INTO hipass_tolls
            (vehicle_id, used_at, entry_at, exit_at, gate_in, gate_out,
-            amount, card_no, note, source_file, uploaded_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+            amount, card_no, note, source_file, uploaded_by, upload_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
          ON CONFLICT DO NOTHING`,
         [vehicle.id, r.used_at, r.entry_at, r.exit_at, r.gate_in, r.gate_out,
          r.amount, r.card_no, r.note, String(b.filename || '').slice(0, 200) || null,
-         req.session.uid])
+         req.session.uid, uploadId])
       inserted += rowCount
     }
+    await pool.query('UPDATE hipass_uploads SET rows_inserted = $1 WHERE id = $2', [inserted, uploadId])
     res.json({
       ok: true,
+      upload_id: uploadId,
       vehicle: { id: vehicle.id, name: vehicle.name, plate: vehicle.plate, kind: vehicle.kind },
       period: parsed.period, sheet: parsed.sheet, card,
       parsed: parsed.rows.length,
@@ -2670,6 +2690,116 @@ app.get('/api/hipass', requireLogin, async (req, res) => {
           AND ($4::boolean IS FALSE OR t.actual_id IS NULL)
         ORDER BY t.used_at ASC`,
       [from || null, to || null, vehicle_id || null, String(req.query.unclaimed) === '1'])
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 이 달 현황 — 「올렸나 / 누가 아직 자기 것을 안 챙겼나」 를 한눈에.
+// 🔴 «남음»(아무도 안 가져간 통행)이 핵심이다. 법인차량 개인 사용분이 남아 있으면
+//    청구가 조용히 누락된다 — 대표이사가 1차 안내를 보내기 전에 볼 수 있어야 한다.
+app.get('/api/hipass/summary', requireLogin, async (req, res) => {
+  const ym = String(req.query.ym || '')
+  if (!/^\d{4}-\d{2}$/.test(ym)) return res.status(400).json({ error: 'ym 은 YYYY-MM 형식이어야 합니다.' })
+  try {
+    const [from, to] = ymRange(ym)
+    const { rows: byVehicle } = await pool.query(
+      `SELECT t.vehicle_id, v.name AS vehicle_name, v.plate AS vehicle_plate, v.kind AS vehicle_kind,
+              count(*)::int                                    AS total,
+              count(t.actual_id)::int                          AS claimed,
+              count(*) FILTER (WHERE t.actual_id IS NULL)::int  AS unclaimed,
+              coalesce(sum(t.amount), 0)::int                   AS amount,
+              coalesce(sum(t.amount) FILTER (WHERE t.actual_id IS NULL), 0)::int AS unclaimed_amount
+         FROM hipass_tolls t
+         LEFT JOIN schedule_vehicles v ON v.id = t.vehicle_id
+        WHERE ${HIPASS_DATE} >= $1::date AND ${HIPASS_DATE} <= $2::date
+        GROUP BY t.vehicle_id, v.name, v.plate, v.kind
+        ORDER BY v.name`, [from, to])
+    // 올린 파일 — 원본(content)은 빼고 보낸다. 목록에 실어 보내면 응답이 통째로 무거워진다.
+    const { rows: uploads } = await pool.query(
+      `SELECT u.id, u.vehicle_id, u.filename, u.byte_size, u.period_from, u.period_to,
+              u.rows_parsed, u.rows_inserted, u.amount_total, u.uploaded_at,
+              v.name AS vehicle_name, v.plate AS vehicle_plate,
+              k.display_name AS uploaded_by_name,
+              (SELECT count(*) FROM hipass_tolls t
+                WHERE t.upload_id = u.id AND t.actual_id IS NOT NULL)::int AS claimed_count
+         FROM hipass_uploads u
+         LEFT JOIN schedule_vehicles v ON v.id = u.vehicle_id
+         LEFT JOIN kpi_users k         ON k.id = u.uploaded_by
+        ORDER BY u.uploaded_at DESC
+        LIMIT 50`)
+    res.json({ ym, by_vehicle: byVehicle, uploads })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 원본 내려받기 — 근거 자료로 쓰는 길이다.
+app.get('/api/hipass/uploads/:id/file', requireLogin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT filename, content FROM hipass_uploads WHERE id = $1', [Number(req.params.id)])
+    if (!rows.length) return res.status(404).json({ error: '파일을 찾을 수 없습니다.' })
+    const name = rows[0].filename || `hipass-${req.params.id}.xls`
+    // ⚠ 한글 파일 이름은 그대로 실으면 헤더에서 깨진다 — RFC 5987 로 싣는다.
+    res.setHeader('Content-Type', 'application/octet-stream')
+    res.setHeader('Content-Disposition',
+      `attachment; filename="hipass-${req.params.id}"; filename*=UTF-8''${encodeURIComponent(name)}`)
+    res.send(rows[0].content)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 올린 파일 지우기 — 자동 삭제는 없다. 사람이 손으로만 지운다(2026-09-04 지시).
+// 🔑 그 파일에서 온 통행이 «이미 실적에 붙어 있으면» 막는다. 근거를 지우면
+//    정산 금액만 남고 그것이 어디서 왔는지 답할 수 없게 된다.
+app.delete('/api/hipass/uploads/:id', requireLogin, async (req, res) => {
+  const id = Number(req.params.id)
+  try {
+    const { rows } = await pool.query('SELECT * FROM hipass_uploads WHERE id = $1', [id])
+    if (!rows.length) return res.status(404).json({ error: '파일을 찾을 수 없습니다.' })
+    const { rows: v } = await pool.query('SELECT * FROM schedule_vehicles WHERE id = $1', [rows[0].vehicle_id])
+    const deny = await canUploadFor(v[0], req.session)
+    if (deny) return res.status(403).json({ error: deny })
+    const { rows: used } = await pool.query(
+      'SELECT count(*)::int AS n FROM hipass_tolls WHERE upload_id = $1 AND actual_id IS NOT NULL', [id])
+    if (used[0].n > 0) {
+      return res.status(409).json({
+        error: `이 파일에서 온 통행 ${used[0].n}건이 이미 실적에 붙어 있습니다. `
+             + '정산 근거라 지울 수 없습니다 — 실적에서 먼저 떼어 주십시오.',
+      })
+    }
+    const { rowCount } = await pool.query('DELETE FROM hipass_tolls WHERE upload_id = $1', [id])
+    await pool.query('DELETE FROM hipass_uploads WHERE id = $1', [id])
+    res.json({ ok: true, removed_tolls: rowCount })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 인원별 근거 — 그 달 «그 사람» 이 가져간 통행 낱건.
+// 화면에서 보여 주고 CSV 로 내려받는 데 쓴다.
+app.get('/api/hipass/by-worker', requireLogin, async (req, res) => {
+  const ym = String(req.query.ym || '')
+  if (!/^\d{4}-\d{2}$/.test(ym)) return res.status(400).json({ error: 'ym 은 YYYY-MM 형식이어야 합니다.' })
+  try {
+    const [from, to] = ymRange(ym)
+    const wid = req.query.worker_id ? Number(req.query.worker_id) : null
+    const { rows } = await pool.query(
+      `SELECT t.id, ${HIPASS_DATE} AS used_date, t.gate_in, t.gate_out, t.amount, t.note, t.manual,
+              a.worker_id, w.name AS worker_name, a.use_type, a.work_date,
+              v.name AS vehicle_name, v.plate AS vehicle_plate, v.kind AS vehicle_kind,
+              u.filename AS source_filename, u.id AS upload_id
+         FROM hipass_tolls t
+         JOIN schedule_actuals a ON a.id = t.actual_id
+         LEFT JOIN workers w            ON w.id = a.worker_id
+         LEFT JOIN schedule_vehicles v  ON v.id = t.vehicle_id
+         LEFT JOIN hipass_uploads u     ON u.id = t.upload_id
+        WHERE a.work_date >= $1::date AND a.work_date <= $2::date
+          AND ($3::int IS NULL OR a.worker_id = $3::int)
+        ORDER BY w.name, a.work_date, t.used_at`, [from, to, wid])
     res.json(rows)
   } catch (e) {
     res.status(500).json({ error: e.message })
