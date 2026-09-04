@@ -3927,6 +3927,12 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
         </div>
       )}
 
+      {/* 🔑 하이패스 명세는 «정산 화면» 에 둔다 (2026-09-04 사용자 지적).
+          처음에는 설정 탭에 두었는데, 매월 정산하면서 하는 일이라 동선이 어긋났다.
+          여기에 있으면 «올리고 → 실적에 붙이고 → 확정» 이 한 화면에서 이어진다.
+          ⚠ 실적이 0건인 달에도 보여야 한다 — 명세를 먼저 올려야 실적을 채울 수 있다. */}
+      {data&&<div style={{marginBottom:16}}><HipassUploader showToast={showToast}/></div>}
+
       {data&&data.actual_count===0
         ?<Card title={`${ym} 정산`}>
           <div style={{fontSize:12,color:'#6b7280',lineHeight:1.8}}>
@@ -5347,12 +5353,18 @@ const FUEL_TYPES=['가솔린','디젤','LPG','전기']
 //   자차      본인이 자기 것을 올린다
 // 🔑 파일에 «어느 차인지» 가 없다. 처음 한 번만 차량을 고르면 카드번호를 기억해
 //    다음부터는 저절로 찾는다 — 그래서 고르개를 늘 띄우지 않고 «물어볼 때만» 띄운다.
-function HipassUploader({vehicles,onChanged,showToast}){
+function HipassUploader({showToast}){
   const [busy,setBusy]=useState(false)
   const [result,setResult]=useState(null)
   const [askVehicle,setAskVehicle]=useState(null)   // {card, base64, filename}
   const [pickId,setPickId]=useState('')
   const fileRef=useRef(null)
+  // 🔑 차량 목록을 스스로 받아 온다 — 이 카드는 설정 탭이 아니라 «정산 화면» 에 있고
+  //    (매월 하는 일이라 그 자리가 맞다), 거기는 차량을 들고 있지 않다.
+  const [vehicles,setVehicles]=useState([])
+  const loadVehicles=async()=>{ try{ setVehicles(await getVehicles(true)) }catch{ setVehicles([]) } }
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(()=>{ loadVehicles() },[])
 
   const inputS={padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}
   const usable=vehicles.filter(v=>v.active!==false)
@@ -5363,7 +5375,7 @@ function HipassUploader({vehicles,onChanged,showToast}){
       const r=await uploadHipass(base64,filename,vehicleId)
       setResult(r); setAskVehicle(null); setPickId('')
       showToast(`하이패스 ${r.inserted}건을 넣었습니다`+(r.duplicated?` (이미 있던 것 ${r.duplicated}건)`:''))
-      onChanged&&onChanged()          // 차량에 카드번호가 기억됐을 수 있다
+      loadVehicles()                  // 차량에 카드번호가 기억됐을 수 있다
     }catch(e){
       // 🔑 「차량을 모르겠다」 는 실패가 아니라 «물어볼 것» 이다
       if(e.needVehicle){ setAskVehicle({card:e.card,base64,filename}); setResult(null) }
@@ -5384,9 +5396,10 @@ function HipassUploader({vehicles,onChanged,showToast}){
   return(
     <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,
       minWidth:260,maxWidth:'100%',boxSizing:'border-box',flex:'1 1 420px'}}>
-      <strong style={{fontSize:14}}>🛣 하이패스 사용내역</strong>
+      <strong style={{fontSize:14}}>🛣 하이패스 사용내역 올리기</strong>
       <div style={{fontSize:11,color:'#6b7280',marginTop:6,lineHeight:1.8}}>
-        하이패스 누리집에서 <strong>기간별 사용내역</strong>을 내려받아 그대로 올리십시오.
+        <strong>이 달 정산을 시작하기 전에</strong> 하이패스 누리집에서
+        <strong> 기간별 사용내역</strong>을 내려받아 그대로 올리십시오.
         올려 두면 각자 실적을 넣을 때 <strong>자기가 지난 통행만 골라</strong> 쓸 수 있습니다.<br/>
         <strong>법인차량</strong>은 관리자·대표이사가 한 번만 올리면 전 직원이 함께 씁니다.
         <strong> 자차</strong>는 본인이 올리십시오.
@@ -6446,9 +6459,6 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <VehicleManager vehicles={vehicles} workers={workers} dupNames={dupNames}
           onChanged={onVehiclesChanged} showToast={showToast}/>
-      </div>
-      <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
-        <HipassUploader vehicles={vehicles} onChanged={onVehiclesChanged} showToast={showToast}/>
       </div>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <AbsenceManager absences={absences} setAbsences={setAbsences} workers={workers}
