@@ -18,6 +18,10 @@ import { getHolidays, syncHolidays, addHoliday, setHolidayWorking, removeHoliday
          restDaySet } from './repositories/holidayRepo'
 import { getPurchases, addPurchase, setPurchaseStatus,
          removePurchase } from './repositories/purchaseRepo'
+// ⚠ removeHipass 는 아직 화면에서 부르지 않는다 — 잘못 올린 건을 지우는 자리를
+//   만들 때 쓴다(서버·호출기는 이미 있다). 지금 넣으면 쓰지 않는 import 가 된다.
+import { getHipass, uploadHipass, claimHipass, addManualHipass,
+         readFileAsBase64 } from './repositories/hipassRepo'
 // 🔑 스케줄 달력은 «사내 포털과 함께 쓰는» 조각이라 여기 두지 않는다 (2026-08-26).
 //    각자 그리면 언젠가 한쪽만 고쳐 두 화면이 어긋난다.
 //    ⚠ CLAUDE.md 의 「App.jsx 단일 파일 유지」에 대한 예외 — 사용자 승인.
@@ -3732,7 +3736,7 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
   // 확정 뒤에 단가·연비·실적이 바뀌면 «박제된 금액»과 지금 계산이 어긋난다.
   // 숨기지 않고 «둘 다» 보여 준다 — 어느 쪽으로 정리할지는 대표이사가 판단할 일이다.
   const SNAP=['personal_km','personal_amount','toll_amount',
-              'own_car_km','own_car_liter','transit_amount']
+              'own_car_km','own_car_liter','own_toll_amount','transit_amount']
   const diffOf=(w,s)=>s?SNAP.filter(k=>Number(s[k]||0)!==Number(w[k]||0)):[]
   const changed=(data?.workers||[]).filter(w=>diffOf(w,savedOf(w.worker_id)).length>0)
 
@@ -3814,12 +3818,15 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
   const effective=(w)=>{
     const s=savedOf(w.worker_id)
     return s
-      ?{charge:chargeOf(s),liter:Number(s.own_car_liter||0),transit:Number(s.transit_amount||0)}
-      :{charge:w.charge_total,liter:w.own_car_liter,transit:w.transit_amount}
+      ?{charge:chargeOf(s),liter:Number(s.own_car_liter||0),transit:Number(s.transit_amount||0),
+        ownToll:Number(s.own_toll_amount||0)}
+      :{charge:w.charge_total,liter:w.own_car_liter,transit:w.transit_amount,
+        ownToll:Number(w.own_toll_amount||0)}
   }
   const chargeTotal=(data?.workers||[]).reduce((t,w)=>t+effective(w).charge,0)
   const literTotal=(data?.workers||[]).reduce((t,w)=>t+effective(w).liter,0)
   const transitTotal=(data?.workers||[]).reduce((t,w)=>t+effective(w).transit,0)
+  const ownTollTotal=(data?.workers||[]).reduce((t,w)=>t+effective(w).ownToll,0)
 
   // 확정된 줄은 «확정 금액» 을 크게, 지금 계산이 다르면 그 아래에 주황으로 함께 보인다.
   const cell=(w,s,key,fmt)=>{
@@ -3924,6 +3931,7 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
           <Metrics items={[
             {label:'회사에 입금 (개인 사용)',value:won(chargeTotal),unit:'원',color:'#b45309'},
             {label:'주유 환급',value:Math.round(literTotal*100)/100,unit:'L',color:'#047857'},
+            {label:'자차 하이패스 환급',value:won(ownTollTotal),unit:'원',color:'#047857'},
             {label:'대중교통 실비',value:won(transitTotal),unit:'원'},
             {label:'실적',value:data.actual_count,unit:'건'},
           ]}/>
@@ -3939,6 +3947,7 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
                   <th style={thS}>입금액</th>
                   <th style={thS}>자차 업무</th>
                   <th style={thS}>환급</th>
+                  <th style={thS}>자차 하이패스</th>
                   <th style={thS}>대중교통</th>
                   <th style={{...thS,width:110}}>정산</th>
                 </tr></thead>
@@ -3971,6 +3980,10 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
                         {cell(w,s,'own_car_liter',literTxt)}
                         {w.own_car_missing_efficiency&&
                           <div style={{fontSize:10,color:'#c2410c',fontWeight:600}}>연비 미입력</div>}
+                      </td>
+                      {/* 자차 업무 하이패스 — 회사가 전액 돌려주는 쪽이다 */}
+                      <td style={{...tdS,fontWeight:700,color:w.own_toll_amount?'#047857':'#9ca3af'}}>
+                        {cell(w,s,'own_toll_amount',money)}
                       </td>
                       <td style={tdS}>{cell(w,s,'transit_amount',money)}</td>
                       <td style={{...tdS,whiteSpace:'nowrap'}}>
@@ -4014,6 +4027,8 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
             <div style={{marginTop:10,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
               💡 <strong>입금액</strong> = 개인 사용 거리 × 차량 단가 + 하이패스 — 직원이 회사 계좌로 입금합니다.<br/>
               💡 <strong>환급</strong> = 자차 업무 거리 ÷ 그 차의 연비 — 금액이 아니라 <strong>주유 한도(리터)</strong>로 지급합니다.<br/>
+              💡 <strong>자차 하이패스</strong> = 자차로 <strong>업무</strong> 다녀오며 낸 통행료 — 회사가 <strong>전액</strong> 돌려드립니다.
+              (법인차량을 <strong>개인 사용</strong>한 통행료는 반대로 회사에 입금하시는 쪽이라 「하이패스」 열에 있습니다.)<br/>
               💡 확정한 줄은 <strong>확정 당시 금액</strong>을 보여 줍니다. 그 뒤 단가·연비·실적이 바뀌어
               값이 달라졌으면 아래에 <span style={{color:'#c2410c',fontWeight:700}}>→ 현재</span> 로 함께 적습니다.
               위 합계도 <strong>확정된 분은 확정 금액</strong> 기준입니다.
@@ -4148,6 +4163,73 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
   const [memo,setMemo]=useState(actual?.memo||'')
   const [busy,setBusy]=useState(false)
 
+  // ── 하이패스 (2026-09-04 신설) ──────────────────────────────
+  // 그 날짜·그 차량의 통행 내역을 보여 주고 «내가 간 것» 을 고르게 한다.
+  // 🔑 같은 날 같은 차를 둘이 썼을 수 있어 자동으로 붙이지 않는다(지시) —
+  //    목록을 보여 주고 사람이 고른다.
+  // ⚠ 차량이 없거나 휴가면 «부를 것이 없다». 그 사실을 처음부터 값으로 둔다 —
+  //   효과 안에서 곧바로 setState 하면 쓸데없는 두 번째 그리기가 생긴다.
+  const [tolls,setTolls]=useState(()=>plan.vehicle_id&&plan.use_type!=='vacation'?null:[])
+  const [picked,setPicked]=useState(()=>new Set())
+  const [tollErr,setTollErr]=useState('')
+  const [manualOpen,setManualOpen]=useState(false)
+  const [mAmount,setMAmount]=useState('')
+  const [mGate,setMGate]=useState('')
+  // 처음 붙어 있던 것 — 저장할 때 «무엇이 바뀌었는지» 를 알려면 시작값이 필요하다
+  const attachedAtOpen=useRef(new Set())
+
+  useEffect(()=>{
+    if(!plan.vehicle_id||plan.use_type==='vacation') return
+    let alive=true
+    getHipass({from:plan.plan_date,to:plan.plan_date,vehicleId:plan.vehicle_id})
+      .then(rows=>{
+        if(!alive)return
+        // 아직 아무도 안 가져간 것 + 이 실적에 이미 붙어 있는 것만 고를 수 있다
+        const usable=rows.filter(r=>!r.actual_id||(actual&&Number(r.actual_id)===Number(actual.id)))
+        const mineNow=new Set(rows.filter(r=>actual&&Number(r.actual_id)===Number(actual.id)).map(r=>r.id))
+        attachedAtOpen.current=new Set(mineNow)
+        setTolls(rows); setPicked(mineNow)
+        void usable
+      })
+      .catch(e=>{ if(alive){ setTolls([]); setTollErr(e.message) } })
+    return ()=>{ alive=false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[plan.id,plan.vehicle_id,actual?.id])
+
+  const tollList=(tolls||[]).filter(r=>!r.actual_id||(actual&&Number(r.actual_id)===Number(actual.id)))
+  const takenByOther=(tolls||[]).filter(r=>r.actual_id&&!(actual&&Number(r.actual_id)===Number(actual.id)))
+  const pickedSum=tollList.filter(r=>picked.has(r.id)).reduce((s,r)=>s+Number(r.amount||0),0)
+  // 🔑 하나라도 고르면 하이패스 금액은 «목록의 합» 이 정본이다. 손으로 적은 값과
+  //    둘이 남으면 어느 쪽이 맞는지 알 수 없다.
+  const tollFromList=picked.size>0
+  function toggleToll(id){
+    setPicked(prev=>{ const n=new Set(prev); n.has(id)?n.delete(id):n.add(id); return n })
+  }
+
+  async function addManual(){
+    const amt=Number(mAmount)
+    if(!(amt>0)){ showToast('금액을 넣어 주세요'); return }
+    try{
+      setBusy(true)
+      const row=await addManualHipass({
+        vehicle_id:plan.vehicle_id, used_date:plan.plan_date,
+        amount:amt, gate_in:mGate||null, note:'손으로 넣음',
+      })
+      setTolls(prev=>[...(prev||[]),{...row,used_date:plan.plan_date}])
+      setPicked(prev=>new Set(prev).add(row.id))
+      setMAmount(''); setMGate(''); setManualOpen(false)
+      showToast('통행료를 더했습니다')
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
+  // 고른 것과 원래 붙어 있던 것을 견주어 «바뀐 것만» 서버에 알린다.
+  async function syncTolls(actualId){
+    const before=attachedAtOpen.current
+    for(const id of picked) if(!before.has(id)) await claimHipass(id,actualId)
+    for(const id of before) if(!picked.has(id)) await claimHipass(id,null)
+  }
+
   const vacation=plan.use_type==='vacation'
   const personal=plan.use_type==='personal'
   const atOffice=plan.transport==='office'
@@ -4190,13 +4272,18 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
     const body={
       as_planned:asPlanned,
       distance_km:(atOffice||vacation)?null:num(distance),
-      toll_fee:num(toll)??0, fuel_fee:num(fuel)??0, transit_fee:num(transit)??0,
+      // 🔑 목록에서 고른 것이 있으면 하이패스 금액은 «그 합» 이다. 손으로 적은 값을
+      //    함께 보내면 붙이기 뒤 다시 세는 값과 어긋난다(서버가 합으로 덮어쓴다).
+      toll_fee:tollFromList?pickedSum:(num(toll)??0),
+      fuel_fee:num(fuel)??0, transit_fee:num(transit)??0,
       memo:memo||null,
     }
     try{
       setBusy(true)
-      if(isNew) await addActual({plan_id:plan.id,...body})
-      else      await updateActual(actual.id,body)
+      // 새 실적이면 «먼저 만들어» 번호를 받아야 통행료를 붙일 수 있다
+      const saved=isNew?await addActual({plan_id:plan.id,...body}):await updateActual(actual.id,body)
+      const actualId=isNew?saved?.id:actual.id
+      if(actualId) await syncTolls(actualId)
       showToast(isNew?'실적을 기록했습니다':'실적을 수정했습니다')
       await onSaved({focusDate:plan.plan_date})
       onClose()
@@ -4293,9 +4380,15 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,...rowS}}>
             {usesVehicle&&(
               <div>
-                <label style={labelS}>하이패스 (원)</label>
-                <input type="number" value={toll} onChange={e=>setToll(e.target.value)}
-                  placeholder="0" style={inputS}/>
+                <label style={labelS}>
+                  하이패스 (원)
+                  {tollFromList&&<span style={{color:'#1a56db',marginLeft:4}}>— 고른 내역의 합</span>}
+                </label>
+                {/* 목록에서 고르면 그 합이 정본이라 손으로 못 고치게 한다 —
+                    두 값이 남으면 어느 쪽이 맞는지 알 수 없다 */}
+                <input type="number" value={tollFromList?pickedSum:toll}
+                  onChange={e=>setToll(e.target.value)} disabled={tollFromList}
+                  placeholder="0" style={{...inputS,background:tollFromList?'#f1f5f9':'#fff'}}/>
               </div>
             )}
             {usesVehicle&&!personal&&(
@@ -4310,6 +4403,80 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
                 <label style={labelS}>대중교통비 (원)</label>
                 <input type="number" value={transit} onChange={e=>setTransit(e.target.value)}
                   placeholder="0" style={inputS}/>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── 그날 하이패스 내역 — 내가 지난 것을 고른다 (2026-09-04 신설) ── */}
+        {!vacation&&usesVehicle&&mine&&(
+          <div style={{...rowS,background:'#f9fafb',border:'1px solid #e5e7eb',
+            borderRadius:8,padding:'10px 12px'}}>
+            <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+              <strong style={{fontSize:12}}>🛣 그날 하이패스 내역</strong>
+              <span style={{fontSize:11,color:'#6b7280'}}>
+                {plan.vehicle_name||''} · {plan.plan_date}
+              </span>
+              <div style={{flex:1}}/>
+              <button onClick={()=>setManualOpen(v=>!v)}
+                style={{padding:'3px 9px',borderRadius:6,fontSize:11,fontWeight:700,cursor:'pointer',
+                  border:'1px solid #e5e7eb',background:'#fff',color:'#374151'}}>
+                {manualOpen?'취소':'+ 손으로 넣기'}
+              </button>
+            </div>
+
+            {manualOpen&&(
+              <div style={{display:'flex',gap:6,marginBottom:8,flexWrap:'wrap'}}>
+                <input type="number" value={mAmount} onChange={e=>setMAmount(e.target.value)}
+                  placeholder="금액(원)" style={{...inputS,width:110}}/>
+                <input value={mGate} onChange={e=>setMGate(e.target.value)}
+                  placeholder="구간 (선택)" style={{...inputS,width:140}}/>
+                <button onClick={addManual} disabled={busy}
+                  style={{padding:'6px 14px',borderRadius:7,border:'none',background:'#1a56db',
+                    color:'#fff',cursor:'pointer',fontSize:12,fontWeight:700}}>더하기</button>
+              </div>
+            )}
+
+            {tolls===null
+              ?<div style={{fontSize:11,color:'#6b7280'}}>불러오는 중…</div>
+              :tollErr
+                ?<div style={{fontSize:11,color:'#b91c1c'}}>{tollErr}</div>
+                :tollList.length===0
+                  ?<div style={{fontSize:11,color:'#6b7280',lineHeight:1.7}}>
+                    그날 이 차량의 하이패스 내역이 없습니다.
+                    <br/>명세를 아직 안 올렸으면 <strong>[설정] 탭 → 하이패스 사용내역</strong>에서
+                    올린 뒤 다시 열어 주십시오. 현금으로 냈다면 <strong>[+ 손으로 넣기]</strong> 를 쓰십시오.
+                  </div>
+                  :<div style={{display:'flex',flexDirection:'column',gap:3}}>
+                    {tollList.map(r=>(
+                      <label key={r.id} style={{display:'flex',alignItems:'center',gap:7,
+                        padding:'4px 6px',borderRadius:6,cursor:'pointer',fontSize:12,
+                        background:picked.has(r.id)?'#eff6ff':'#fff',
+                        border:'1px solid '+(picked.has(r.id)?'#1a56db':'#e5e7eb')}}>
+                        <input type="checkbox" checked={picked.has(r.id)}
+                          onChange={()=>toggleToll(r.id)} style={{cursor:'pointer',margin:0}}/>
+                        <span style={{fontWeight:700,minWidth:64,textAlign:'right'}}>
+                          {Number(r.amount).toLocaleString()}원
+                        </span>
+                        <span style={{color:'#6b7280'}}>
+                          {r.gate_in||'-'} → {r.gate_out||'-'}
+                        </span>
+                        {r.manual&&<span style={{fontSize:10,color:'#7c3aed',fontWeight:700}}>손입력</span>}
+                        {String(r.note||'').includes('출퇴근')&&
+                          <span style={{fontSize:10,color:'#b45309',fontWeight:700}}>출퇴근할인</span>}
+                      </label>
+                    ))}
+                    <div style={{fontSize:11,color:'#374151',marginTop:4}}>
+                      고른 것 <strong>{picked.size}건 · {pickedSum.toLocaleString()}원</strong>
+                      {picked.size===0&&<span style={{color:'#6b7280'}}> — 고르지 않으면 하이패스 금액은 직접 적은 값이 됩니다</span>}
+                    </div>
+                  </div>}
+
+            {/* 남이 이미 가져간 건 — 숨기면 「내 것이 왜 없지」 가 된다 */}
+            {takenByOther.length>0&&(
+              <div style={{fontSize:11,color:'#6b7280',marginTop:6,lineHeight:1.6}}>
+                다른 실적에 붙은 것 {takenByOther.length}건 —
+                {' '}{takenByOther.map(r=>`${Number(r.amount).toLocaleString()}원(${r.claimed_worker_name||'?'})`).join(' · ')}
               </div>
             )}
           </div>
@@ -5054,6 +5221,123 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
 // ⚠ 「하이브리드」는 뺐다 (2026-08-25 사용자 지시 — 네 가지로 줄임).
 //   지금 DB 에 하이브리드인 차량은 없어 지워도 잃는 값이 없다(실측).
 const FUEL_TYPES=['가솔린','디젤','LPG','전기']
+
+// 하이패스 명세 올리기 (2026-09-04 신설)
+// ════════════════════════════════════════════════════════════
+// 하이패스는 조회 API 가 없어 «내려받은 엑셀» 을 올려서 쓴다.
+//   법인차량  대표이사·관리자가 한 번 올리면 전 직원이 자기 것만 골라 쓴다
+//   자차      본인이 자기 것을 올린다
+// 🔑 파일에 «어느 차인지» 가 없다. 처음 한 번만 차량을 고르면 카드번호를 기억해
+//    다음부터는 저절로 찾는다 — 그래서 고르개를 늘 띄우지 않고 «물어볼 때만» 띄운다.
+function HipassUploader({vehicles,onChanged,showToast}){
+  const [busy,setBusy]=useState(false)
+  const [result,setResult]=useState(null)
+  const [askVehicle,setAskVehicle]=useState(null)   // {card, base64, filename}
+  const [pickId,setPickId]=useState('')
+  const fileRef=useRef(null)
+
+  const inputS={padding:'7px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}
+  const usable=vehicles.filter(v=>v.active!==false)
+
+  async function send(base64,filename,vehicleId){
+    setBusy(true); setResult(null)
+    try{
+      const r=await uploadHipass(base64,filename,vehicleId)
+      setResult(r); setAskVehicle(null); setPickId('')
+      showToast(`하이패스 ${r.inserted}건을 넣었습니다`+(r.duplicated?` (이미 있던 것 ${r.duplicated}건)`:''))
+      onChanged&&onChanged()          // 차량에 카드번호가 기억됐을 수 있다
+    }catch(e){
+      // 🔑 「차량을 모르겠다」 는 실패가 아니라 «물어볼 것» 이다
+      if(e.needVehicle){ setAskVehicle({card:e.card,base64,filename}); setResult(null) }
+      else showToast('실패: '+e.message)
+    }finally{ setBusy(false) }
+  }
+
+  async function pick(e){
+    const f=e.target.files?.[0]
+    if(!f)return
+    try{
+      const b64=await readFileAsBase64(f)
+      await send(b64,f.name)
+    }catch(err){ showToast('실패: '+err.message) }
+    finally{ if(fileRef.current) fileRef.current.value='' }
+  }
+
+  return(
+    <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:18,
+      minWidth:260,maxWidth:'100%',boxSizing:'border-box',flex:'1 1 420px'}}>
+      <strong style={{fontSize:14}}>🛣 하이패스 사용내역</strong>
+      <div style={{fontSize:11,color:'#6b7280',marginTop:6,lineHeight:1.8}}>
+        하이패스 누리집에서 <strong>기간별 사용내역</strong>을 내려받아 그대로 올리십시오.
+        올려 두면 각자 실적을 넣을 때 <strong>자기가 지난 통행만 골라</strong> 쓸 수 있습니다.<br/>
+        <strong>법인차량</strong>은 관리자·대표이사가 한 번만 올리면 전 직원이 함께 씁니다.
+        <strong> 자차</strong>는 본인이 올리십시오.
+      </div>
+
+      <div style={{marginTop:10,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+        <input ref={fileRef} type="file" accept=".xls,.xlsx" onChange={pick} disabled={busy}
+          style={{fontSize:12}}/>
+        {busy&&<span style={{fontSize:11,color:'#6b7280'}}>읽는 중…</span>}
+      </div>
+
+      {/* 차량을 못 찾았을 때만 묻는다 */}
+      {askVehicle&&(
+        <div style={{marginTop:10,padding:'10px 12px',background:'#fff7ed',
+          border:'1px solid #fdba74',borderRadius:8,fontSize:12,color:'#9a3412',lineHeight:1.7}}>
+          <strong>이 카드가 어느 차량인가요?</strong>
+          <div style={{fontFamily:'monospace',marginTop:2}}>{askVehicle.card||'(카드번호 없음)'}</div>
+          <div style={{marginTop:6,display:'flex',gap:6,flexWrap:'wrap',alignItems:'center'}}>
+            <select value={pickId} onChange={e=>setPickId(e.target.value)} style={inputS}>
+              <option value="">차량 선택</option>
+              {usable.map(v=>(
+                <option key={v.id} value={v.id}>
+                  {v.name}{v.plate?' '+v.plate:''}{v.kind==='own'?` (자차·${v.owner_name||''})`:''}
+                </option>
+              ))}
+            </select>
+            <button onClick={()=>pickId&&send(askVehicle.base64,askVehicle.filename,Number(pickId))}
+              disabled={busy||!pickId}
+              style={{padding:'7px 14px',borderRadius:7,border:'none',
+                background:pickId?'#1a56db':'#cbd5e1',color:'#fff',
+                cursor:pickId?'pointer':'default',fontSize:12,fontWeight:700}}>이 차량으로 넣기</button>
+            <button onClick={()=>setAskVehicle(null)}
+              style={{padding:'7px 12px',borderRadius:7,border:'1px solid #e5e7eb',
+                background:'#fff',color:'#6b7280',cursor:'pointer',fontSize:12}}>취소</button>
+          </div>
+          <div style={{marginTop:6,opacity:.9}}>
+            한 번 고르면 이 카드번호를 차량에 기억시켜 <strong>다음부터는 묻지 않습니다.</strong>
+          </div>
+        </div>
+      )}
+
+      {/* 결과 — «이미 있던 것» 을 숨기지 않는다. 아무 일도 안 일어난 것처럼 보이면
+          올라간 줄 알고 넘어가거나 반대로 또 올린다 */}
+      {result&&(
+        <div style={{marginTop:10,padding:'10px 12px',background:'#f0f9ff',
+          border:'1px solid #bae6fd',borderRadius:8,fontSize:12,color:'#075985',lineHeight:1.8}}>
+          <strong>{result.vehicle?.name} {result.vehicle?.plate||''}</strong>
+          {result.period&&<span style={{marginLeft:6,color:'#0369a1'}}>{result.period}</span>}
+          <div>
+            읽은 것 <strong>{result.parsed}건</strong> ·
+            새로 넣은 것 <strong style={{color:'#047857'}}>{result.inserted}건</strong> ·
+            이미 있던 것 <strong>{result.duplicated}건</strong>
+            {' '}· 합계 {Number(result.amount||0).toLocaleString()}원
+          </div>
+          {result.warnings?.length>0&&(
+            <div style={{color:'#9a3412',marginTop:4}}>⚠ {result.warnings.join(' / ')}</div>
+          )}
+        </div>
+      )}
+
+      <div style={{marginTop:10,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
+        💡 같은 파일을 다시 올려도 <strong>겹치지 않습니다</strong> — 이미 있는 통행은 건너뜁니다.<br/>
+        💡 파일이 <code>.xls</code> 로 내려와도 그대로 올리시면 됩니다.<br/>
+        💡 <strong>자차로 업무</strong> 다녀온 통행료는 회사가 <strong>전액</strong> 돌려드립니다.
+        법인차량을 <strong>개인 사용</strong>한 통행료는 회사에 입금하시는 쪽입니다.
+      </div>
+    </div>
+  )
+}
 
 function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
   const [adding,setAdding]=useState(false)
@@ -6044,6 +6328,9 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <VehicleManager vehicles={vehicles} workers={workers} dupNames={dupNames}
           onChanged={onVehiclesChanged} showToast={showToast}/>
+      </div>
+      <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
+        <HipassUploader vehicles={vehicles} onChanged={onVehiclesChanged} showToast={showToast}/>
       </div>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <AbsenceManager absences={absences} setAbsences={setAbsences} workers={workers}
