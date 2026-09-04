@@ -64,8 +64,11 @@ export function PlanBadge({ plan, workers, onClick, todayStr, compact = false })
 // ⚠ 하나짜리 묶음은 예전 배지를 그대로 쓴다. 한 사람인데 「1명」 이라 적으면 군더더기다.
 export function PlanGroupBadge({ plans, workers, onClick, todayStr, compact = false }) {
   if (plans.length === 1) {
+    // 🔴 PlanBadge 는 onClick 을 «인자 없이» 부른다. 그대로 넘기면 부르는 쪽이 받는
+    //    계획이 undefined 가 되어, 그 일정이 열리는 대신 «빈 계획 창» 이 뜬다
+    //    (2026-09-04 테스트 서버에서 잡음 — 배지를 눌렀는데 「계획 추가」가 떴다).
     return <PlanBadge plan={plans[0]} workers={workers} todayStr={todayStr}
-      onClick={onClick} compact={compact} />
+      onClick={() => onClick && onClick(plans[0])} compact={compact} />
   }
   const color = groupColor(plans, workers)
   const top = topWorkerOf(plans, workers)
