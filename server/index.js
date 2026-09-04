@@ -1362,7 +1362,18 @@ app.get('/api/purchases', async (req, res) => {
     const { from, to, status } = req.query
     // 🔴 직원 고르개는 «관리자에게만» 뜻이 있다. 일반 직원이 남의 번호를 넣어 보내도
     //    첫 줄($1이 false)이 본인 것으로 이미 묶어 두므로 새어 나가지 않는다.
-    const pickWorker = isAdmin && req.query.worker_id ? Number(req.query.worker_id) : null
+    // 🔑 여러 명을 한꺼번에 본다 (2026-09-04 지시). 콤보 하나로는 「이 셋만」 을 볼 수 없어
+    //    사람을 바꿔 가며 세 번 봐야 했다. worker_ids 는 쉼표로 이어 보낸다.
+    //    ⚠ 옛 worker_id 도 그대로 받는다 — 포털·북마크가 아직 그것으로 부를 수 있다.
+    // ⚠ 「보내지 않았다」와 「빈 값을 보냈다」는 다른 뜻이다. 값이 비었다고 전원으로
+    //   떨어뜨리면 화면에서 «다 껐는데 다 나온다». 있는지(undefined)로 가른다.
+    const idsRaw = req.query.worker_ids ?? req.query.worker_id
+    const pickWorkers = isAdmin && idsRaw !== undefined
+      ? String(idsRaw).split(',').map(s => Number(s.trim())).filter(n => Number.isInteger(n) && n > 0)
+      : null
+    // 빈 배열은 «아무도 고르지 않았다» 는 뜻이라 «전원» 이 아니라 «없음» 으로 답한다.
+    // 전원을 보려면 아예 보내지 않는다 — 그래야 「다 껐는데 다 나온다」가 생기지 않는다.
+    const workerFilter = pickWorkers === null ? null : (pickWorkers.length ? pickWorkers : [-1])
     // ⚠ 기간은 «요청일»(created_at) 기준이다. 승인일로 잡으면 아직 결재 안 난 건이
     //   기간에서 통째로 빠져 「이 달에 얼마 달라고 했나」 를 볼 수 없다.
     const { rows } = await pool.query(
@@ -1371,9 +1382,9 @@ app.get('/api/purchases', async (req, res) => {
           AND ($3::date IS NULL OR p.created_at >= $3::date)
           AND ($4::date IS NULL OR p.created_at < ($4::date + 1))
           AND ($5::text IS NULL OR p.status = $5::text)
-          AND ($6::int  IS NULL OR p.worker_id = $6::int)
+          AND ($6::int[] IS NULL OR p.worker_id = ANY($6::int[]))
         ORDER BY p.created_at DESC`,
-      [isAdmin, mine, from || null, to || null, status || null, pickWorker])
+      [isAdmin, mine, from || null, to || null, status || null, workerFilter])
 
     // 누적 금액 — 🔑 «승인된 것만» 더한다. 대기·반려를 섞으면 「얼마 썼나」가 아니라
     //    「얼마 달라고 했나」가 된다.

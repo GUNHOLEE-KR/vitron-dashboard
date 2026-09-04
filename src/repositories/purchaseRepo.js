@@ -24,13 +24,16 @@ async function request(method, path, body) {
 }
 
 // 관리자가 아니면 서버가 «본인 것만» 돌려준다. 화면에서 거르지 않는다.
-// ⚠ workerId 는 관리자에게만 뜻이 있다 — 일반 직원이 남의 번호를 넣어도 서버가 막는다.
-export function getPurchases({ from, to, status, workerId } = {}) {
+// ⚠ workerIds 는 관리자에게만 뜻이 있다 — 일반 직원이 남의 번호를 넣어도 서버가 막는다.
+// 🔑 workerIds 를 «주지 않으면» 전 직원이고, «빈 배열» 이면 아무도 아니다. 둘은 다른 뜻이다.
+export function getPurchases({ from, to, status, workerIds } = {}) {
   const q = new URLSearchParams()
   if (from) q.set('from', from)
   if (to) q.set('to', to)
   if (status) q.set('status', status)
-  if (workerId) q.set('worker_id', workerId)
+  // ⚠ `if (workerIds)` 로 쓰면 «빈 배열» 이 truthy 라 통과하고, 빈 문자열이 나가
+  //   서버가 「안 보냈다」로 읽어 전 직원을 돌려준다. undefined 인지로 가른다.
+  if (workerIds !== undefined) q.set('worker_ids', workerIds.join(','))
   const s = q.toString()
   return request('GET', s ? `?${s}` : '')
 }

@@ -1327,6 +1327,27 @@ function Dashboard({me,onLoggedOut}){
       .catch(()=>{ /* 띠가 안 뜰 뿐, 화면은 그대로 돈다 */ })
     return ()=>{ alive=false }
   },[])
+
+  // 🔑 머리글·탭 줄을 한 덩어리로 «고정» 한다 (2026-09-04 지시).
+  //    업무 입력 화면에서 저장 단추까지 올라가려면 스크롤이 너무 길었다.
+  //    ⚠ 높이를 상수로 박지 않는다 — 화면이 좁으면 머리글이 두 줄이 되고, 테스트 서버
+  //      붉은 띠가 있는지에 따라서도 달라진다. 실제 높이를 재서 아래 칸에 알려 준다.
+  const topRef=useRef(null)
+  const [topH,setTopH]=useState(0)
+  useEffect(()=>{
+    const el=topRef.current
+    if(!el) return
+    const measure=()=>setTopH(el.getBoundingClientRect().height)
+    measure()
+    if(typeof ResizeObserver==='undefined'){
+      window.addEventListener('resize',measure)
+      return ()=>window.removeEventListener('resize',measure)
+    }
+    const ro=new ResizeObserver(measure)
+    ro.observe(el)
+    return ()=>ro.disconnect()
+  },[])
+
   const [workers,setWorkers]=useState([])
   const [history,setHistory]=useState([])
   const [absences,setAbsences]=useState([])   // 장기출장·휴직·파견 기간
@@ -1543,8 +1564,12 @@ function Dashboard({me,onLoggedOut}){
       {/* 🔴 테스트 서버라는 사실이 «한눈에» 보여야 한다 (2026-08-26 신설).
           운영인 줄 알고 만지거나, 반대로 운영을 테스트인 줄 알고 만지는 것을 막는다.
           띠는 sticky 헤더보다 위에 두어 화면을 내려도 계속 보이게 한다. */}
+      {/* 🔑 붉은 띠·머리글·탭 줄을 «한 덩어리» 로 묶어 통째로 고정한다 (2026-09-04).
+          예전에는 띠와 머리글이 각자 top:0 이라 스크롤하면 서로 겹쳤다. 한 덩어리면
+          겹칠 일이 없고, 아래 칸이 붙을 자리(높이)도 한 번만 재면 된다. */}
+      <div ref={topRef} style={{position:'sticky',top:0,zIndex:200,background:'#fff'}}>
       {envInfo?.env==='test'&&(
-        <div style={{position:'sticky',top:0,zIndex:200,background:'#b91c1c',color:'#fff',
+        <div style={{background:'#b91c1c',color:'#fff',
           padding:'6px 20px',fontSize:12.5,fontWeight:700,letterSpacing:'.3px',
           display:'flex',gap:12,alignItems:'center',flexWrap:'wrap'}}>
           <span>🔴 테스트 서버</span>
@@ -1557,7 +1582,7 @@ function Dashboard({me,onLoggedOut}){
           </a>
         </div>
       )}
-      <header style={{background:'#fff',borderBottom:'1px solid #e5e7eb',padding:'12px 20px',display:'flex',alignItems:'center',justifyContent:'space-between',position:'sticky',top:0,zIndex:100}}>
+      <header style={{background:'#fff',borderBottom:'1px solid #e5e7eb',padding:'12px 20px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
         <div>
           <div style={{fontSize:16,fontWeight:700}}>바이트론 이앤에스 업무 현황</div>
           <div style={{fontSize:12,color:'#6b7280'}}>{new Date().toLocaleDateString('ko-KR')} ({dayName(today())}요일)</div>
@@ -1577,13 +1602,6 @@ function Dashboard({me,onLoggedOut}){
               cursor:'pointer',fontSize:12,color:'#6b7280'}}>로그아웃</button>
         </div>
       </header>
-      {/* 🔴 «발송이 실패한» 사람에게 먼저 알린다 — 앱 비밀번호가 틀어졌다는 뜻이다.
-          아직 등록만 안 한 경우보다 급하므로 둘 다 해당하면 이쪽만 띄운다. */}
-      {me?.mail_sender_error
-        ? <MailSenderBrokenBanner detail={me.mail_sender_error} at={me.mail_sender_failed_at}
-            onGo={()=>setTab('settings')}/>
-        : me?.need_mail_password && <MailSetupBanner onGo={()=>setTab('settings')}/>}
-      <TokenExpiryBanner status={tokenStatus}/>
       <nav style={{background:'#fff',borderBottom:'1px solid #e5e7eb',display:'flex',padding:'0 20px',overflowX:'auto'}}>
         {TABS.map(t=>(
           <button key={t} onClick={()=>setTab(t)}
@@ -1593,11 +1611,21 @@ function Dashboard({me,onLoggedOut}){
               cursor:'pointer',whiteSpace:'nowrap'}}>{TAB_LABELS[t]}</button>
         ))}
       </nav>
+      </div>
+      {/* 🔴 «발송이 실패한» 사람에게 먼저 알린다 — 앱 비밀번호가 틀어졌다는 뜻이다.
+          아직 등록만 안 한 경우보다 급하므로 둘 다 해당하면 이쪽만 띄운다.
+          ⚠ 고정 덩어리 «밖» 에 둔다 — 긴 오류 문구가 화면 위를 계속 차지하면
+            정작 봐야 할 표가 좁아진다. 화면을 열면 맨 위에 보이므로 놓치지 않는다. */}
+      {me?.mail_sender_error
+        ? <MailSenderBrokenBanner detail={me.mail_sender_error} at={me.mail_sender_failed_at}
+            onGo={()=>setTab('settings')}/>
+        : me?.need_mail_password && <MailSetupBanner onGo={()=>setTab('settings')}/>}
+      <TokenExpiryBanner status={tokenStatus}/>
       <main style={{padding:'16px 20px'}}>
         {tab==='today'   &&<TabToday   workers={inputWorkers} dupNames={dupNames} grid={grid} setGrid={setGrid}
           jiraTree={jiraTree} jiraDone={jiraDone} selWorkerId={selWorkerId} setSelWorkerId={setSelWorkerId}
           onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}
-          history={historyForStats} me={me} canEditOthers={canEditOthers}/>}
+          history={historyForStats} me={me} canEditOthers={canEditOthers} stickyTop={topH}/>}
         {tab==='daily'   &&<TabDaily   history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} holidayMap={holidayMap} plans={plans} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
         {tab==='weekly'  &&<TabWeekly  history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} holidayMap={holidayMap} plans={plans} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
         {tab==='monthly' &&<TabMonthly history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} holidayMap={holidayMap} plans={plans} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
@@ -1652,7 +1680,7 @@ function Dashboard({me,onLoggedOut}){
 }
 
 // ── 오늘 업무 탭 ─────────────────────────────────────────
-function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),selWorkerId,setSelWorkerId,onSave,onLoadDate,parentSel,setParentSel,history=[],me,canEditOthers=false}){
+function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),selWorkerId,setSelWorkerId,onSave,onLoadDate,parentSel,setParentSel,history=[],me,canEditOthers=false,stickyTop=0}){
   const [ldDate,setLdDate]=useState(today())
   // 끝난 업무는 기본으로 감춘다. 다만 «완료 처리한 뒤에도 보완 작업이 이어지는» 경우가
   // 실제로 있어(최근 30일에도 완료 업무에 76건이 적혔다) 체크 한 번으로 꺼낼 수 있게 둔다.
@@ -1711,7 +1739,12 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),sel
   }
   return(
     <div>
-      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 18px',marginBottom:16,display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:12}}>
+      {/* 🔑 날짜·조회·저장 줄은 «머리글 바로 아래에 붙여» 고정한다 (2026-09-04 지시).
+          시간표가 24줄이라 저장 단추를 누르려면 끝까지 올라가야 했다.
+          ⚠ 이름 단추(아래 카드)는 «함께 스크롤» 시킨다 — 그것까지 고정하면 좁은 화면에서
+            고정 영역이 화면 절반을 먹어 정작 시간표가 안 보인다(②안, 사용자 선택). */}
+      <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'14px 18px',marginBottom:16,display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:12,
+        position:'sticky',top:stickyTop,zIndex:90,boxShadow:'0 2px 6px rgba(0,0,0,.06)'}}>
         <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
           <strong>오늘 업무 입력</strong>
           <input type="date" value={ldDate} onChange={e=>setLdDate(e.target.value)} style={{padding:'6px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
@@ -2665,6 +2698,17 @@ function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan
 
       {loading&&<div style={{fontSize:12,color:'#6b7280',marginBottom:10}}>불러오는 중…</div>}
 
+      {/* 🔑 범례는 달력 «위» 에 둔다 (2026-09-04 지시). 아래에 두었더니 달력이 길어질수록
+          멀어져, 기호를 확인하려면 끝까지 내려가야 했다. 위에 있으면 늘 보인다. */}
+      {!isSettle&&<div style={{marginBottom:10,fontSize:11,color:'#6b7280',display:'flex',gap:14,
+        flexWrap:'wrap',background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,
+        padding:'8px 12px'}}>
+        <span>🏢 사무실</span><span>🚗 법인차량</span><span>🚙 자차</span><span>🚌 대중교통</span><span>🌴 휴가</span>
+        <span style={{color:'#c2410c'}}>● 확인 필요(지난 날짜인데 실적 없음)</span>
+        <span>↺ 계획과 달랐음</span>
+        <span style={{borderBottom:'1px dashed #6b7280'}}>점선 = 개인 사용</span>
+      </div>}
+
       {view==='month'&&<ScheduleMonth ym={ym} byDate={byDate} workers={workers} todayStr={todayStr}
         onOpenPlan={onOpenPlan} onPickDate={d=>{setAnchor(d);setView('day')}}
         onOpenCell={openCell} pasting={pasting} isPicked={isPicked} togglePick={togglePick}/>}
@@ -2681,12 +2725,6 @@ function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan
         onOpenActual={onOpenActual} showToast={showToast}/>}
       {view==='vac'&&<ScheduleVacation showToast={showToast} onOpenPlan={onOpenPlan}/>}
 
-      {!isSettle&&<div style={{marginTop:14,fontSize:11,color:'#6b7280',display:'flex',gap:14,flexWrap:'wrap'}}>
-        <span>🏢 사무실</span><span>🚗 법인차량</span><span>🚙 자차</span><span>🚌 대중교통</span><span>🌴 휴가</span>
-        <span style={{color:'#c2410c'}}>● 확인 필요(지난 날짜인데 실적 없음)</span>
-        <span>↺ 계획과 달랐음</span>
-        <span style={{borderBottom:'1px dashed #6b7280'}}>점선 = 개인 사용</span>
-      </div>}
     </div>
   )
 }
@@ -3092,7 +3130,23 @@ function TabPurchase({workers,me,canEditOthers,showToast}){
   const [from,setFrom]=useState(()=>buyRange('thisMonth').from)
   const [to,setTo]=useState(()=>buyRange('thisMonth').to)
   const [fStatus,setFStatus]=useState('')
-  const [fWorker,setFWorker]=useState('')
+  // 🔑 직원 거르개는 «여러 명» 이다 (2026-09-04 지시). 콤보 하나로는 「이 셋만」 을 볼 수
+  //    없어 사람을 바꿔 가며 세 번 봐야 했다. 기본은 전원 체크다.
+  const [fWorkers,setFWorkers]=useState(()=>workers.map(w=>w.id))
+  const allPicked=fWorkers.length===workers.length
+  // ⚠ 전원이면 아예 «보내지 않는다». 전 직원과 「여덟 명을 하나씩 고름」은 같은 결과지만
+  //   보내지 않는 쪽이 URL 도 짧고 서버도 필터를 타지 않는다.
+  const workerParam=allPicked?undefined:fWorkers
+  const workerKey=allPicked?'*':fWorkers.join(',')
+  function toggleWorker(id){
+    setFWorkers(prev=>prev.includes(id)?prev.filter(x=>x!==id):[...prev,id])
+  }
+
+  // 정렬 — 날짜·금액·상태. 화면에서 세운다(서버 합계는 정렬과 무관하다).
+  // 🔑 상태는 글자순(ㄱㄴㄷ)이 아니라 «할 일 순» 으로 세운다 — 대기가 맨 위라야 쓸모 있다.
+  const [sortKey,setSortKey]=useState('date')
+  const [sortDesc,setSortDesc]=useState(true)
+  const STATUS_ORDER={pending:0,approved:1,rejected:2}
 
   // 입력 칸 — 물품명 · 수량 · 단가 · 구매 링크 · 사용처 · 기타
   const [workerId,setWorkerId]=useState(me?.worker_id??'')
@@ -3105,11 +3159,12 @@ function TabPurchase({workers,me,canEditOthers,showToast}){
 
   useEffect(()=>{
     let alive=true
-    getPurchases({from,to,status:fStatus||undefined,workerId:fWorker||undefined})
+    getPurchases({from,to,status:fStatus||undefined,workerIds:workerParam})
       .then(d=>{ if(alive){ setData(d); setErr('') } })
       .catch(e=>{ if(alive) setErr(e.message) })
     return ()=>{ alive=false }
-  },[tick,from,to,fStatus,fWorker])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[tick,from,to,fStatus,workerKey])
 
   function pickRange(key){
     setRange(key)
@@ -3173,7 +3228,15 @@ function TabPurchase({workers,me,canEditOthers,showToast}){
   if(err)return <Card title="🛒 구매"><div style={{fontSize:12,color:'#b91c1c'}}>불러오지 못했습니다: {err}</div></Card>
   if(!data)return <Card title="🛒 구매"><div style={{fontSize:12,color:'#6b7280'}}>불러오는 중…</div></Card>
 
-  const items=data.items||[]
+  // 서버는 늘 «요청일 최신순» 으로 준다. 화면에서 다시 세운다.
+  // ⚠ 원본 배열을 뒤집지 않는다 — sort 는 제자리에서 바꾸므로 사본을 만든다.
+  const items=[...(data.items||[])].sort((a,b)=>{
+    const d=sortKey==='amount'?Number(a.amount||0)-Number(b.amount||0)
+      :sortKey==='status'?(STATUS_ORDER[a.status]??9)-(STATUS_ORDER[b.status]??9)
+      :String(a.created_at||'').localeCompare(String(b.created_at||''))
+    // 같은 값이면 늘 요청일로 갈라 준다 — 순서가 새로고침마다 흔들리지 않게 한다
+    return (sortDesc?-d:d)||String(b.created_at||'').localeCompare(String(a.created_at||''))
+  })
   // 🔑 승인 대기는 서버가 «거르개와 무관하게» 따로 내려준다.
   //    기간을 지난달로 잡았다고 결재할 것이 사라지면 안 된다.
   const pending=data.pending||[]
@@ -3295,13 +3358,19 @@ function TabPurchase({workers,me,canEditOthers,showToast}){
         </Card>
       )}
 
+      {/* 제목이 «지금 무엇을 보고 있는지» 를 말한다 — 걸러 둔 것을 잊고 자료가 사라졌다고
+          여기기 쉬워서다. 여러 명이면 이름을 이어 적고, 넷을 넘으면 사람 수로 줄인다. */}
       <Card title={data.scope!=='all'
         ? '내 구매 이력'
-        : fWorker
-          ? `구매 이력 — ${workers.find(w=>String(w.id)===String(fWorker))?.name||''}`
-          : '구매 이력 — 전 직원'}>
+        : allPicked
+          ? '구매 이력 — 전 직원'
+          : fWorkers.length===0
+            ? '구매 이력 — 고른 직원 없음'
+            : fWorkers.length<=4
+              ? `구매 이력 — ${fWorkers.map(id=>workers.find(w=>w.id===id)?.name||'').filter(Boolean).join(' · ')}`
+              : `구매 이력 — ${fWorkers.length}명`}>
 
-        {/* 거르개 — 기간 · 직원 · 상태. 🔑 직원 고르개는 «전체를 보는 사람» 에게만 뜻이 있다 */}
+        {/* 거르개 — 기간 · 상태 · 정렬. 🔑 직원 고르개는 «전체를 보는 사람» 에게만 뜻이 있다 */}
         <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',marginBottom:12,
           paddingBottom:12,borderBottom:'1px solid #f3f4f6'}}>
           <div style={{display:'flex',gap:4}}>
@@ -3320,13 +3389,6 @@ function TabPurchase({workers,me,canEditOthers,showToast}){
           <span style={{color:'#9ca3af',fontSize:12}}>~</span>
           <input type="date" value={to} onChange={e=>{setTo(e.target.value); setRange('')}}
             style={{...inputS,width:'auto'}}/>
-          {data.scope==='all'&&(
-            <select value={fWorker} onChange={e=>setFWorker(e.target.value)}
-              style={{...inputS,width:'auto'}}>
-              <option value="">전 직원</option>
-              {workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
-            </select>
-          )}
           <select value={fStatus} onChange={e=>setFStatus(e.target.value)}
             style={{...inputS,width:'auto'}}>
             <option value="">모든 상태</option>
@@ -3334,7 +3396,56 @@ function TabPurchase({workers,me,canEditOthers,showToast}){
             <option value="approved">승인</option>
             <option value="rejected">반려</option>
           </select>
+          {/* 정렬 — 무엇으로 세울지와 방향을 따로 고른다 */}
+          <div style={{display:'flex',gap:4,alignItems:'center',marginLeft:'auto'}}>
+            <span style={{fontSize:11,color:'#6b7280',fontWeight:700}}>정렬</span>
+            {[['date','요청일'],['amount','금액'],['status','상태']].map(([k,label])=>(
+              <button key={k} onClick={()=>setSortKey(k)}
+                style={{padding:'6px 10px',borderRadius:7,fontSize:12,fontWeight:700,cursor:'pointer',
+                  border:'1px solid '+(sortKey===k?'#1a56db':'#e5e7eb'),
+                  background:sortKey===k?'#eff6ff':'#fff',
+                  color:sortKey===k?'#1a56db':'#6b7280'}}>{label}</button>
+            ))}
+            <button onClick={()=>setSortDesc(v=>!v)} title={sortDesc?'내림차순':'오름차순'}
+              style={{padding:'6px 10px',borderRadius:7,fontSize:12,fontWeight:700,cursor:'pointer',
+                border:'1px solid #e5e7eb',background:'#fff',color:'#374151'}}>
+              {sortDesc?'▼ 내림차순':'▲ 오름차순'}
+            </button>
+          </div>
         </div>
+
+        {/* 직원 거르개 — 여러 명을 한꺼번에 본다. 🔑 «전체를 보는 사람» 에게만 뜻이 있다 */}
+        {data.scope==='all'&&(
+          <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center',marginBottom:12,
+            paddingBottom:12,borderBottom:'1px solid #f3f4f6'}}>
+            <span style={{fontSize:11,color:'#6b7280',fontWeight:700,marginRight:2}}>직원</span>
+            <button onClick={()=>setFWorkers(allPicked?[]:workers.map(w=>w.id))}
+              style={{padding:'5px 12px',borderRadius:20,fontSize:12,fontWeight:700,cursor:'pointer',
+                border:'1px solid '+(allPicked?'#1a56db':'#e5e7eb'),
+                background:allPicked?'#1a56db':'#fff',color:allPicked?'#fff':'#6b7280'}}>
+              {allPicked?'전체 해제':'전체 선택'}
+            </button>
+            {workers.map(w=>{
+              const on=fWorkers.includes(w.id)
+              return(
+                <label key={w.id} style={{display:'flex',alignItems:'center',gap:5,cursor:'pointer',
+                  padding:'5px 12px',borderRadius:20,fontSize:12,fontWeight:on?700:500,
+                  border:'1px solid '+(on?'#1a56db':'#e5e7eb'),
+                  background:on?'#eff6ff':'#fff',color:on?'#1a56db':'#6b7280'}}>
+                  {/* 이름은 이미 부르는 쪽에서 동명이인까지 가려 놓았다 (workerLabel) */}
+                  <input type="checkbox" checked={on} onChange={()=>toggleWorker(w.id)}
+                    style={{cursor:'pointer',margin:0}}/>
+                  {w.name}
+                </label>
+              )
+            })}
+            {fWorkers.length===0&&(
+              <span style={{fontSize:11,color:'#9a3412',fontWeight:600}}>
+                아무도 고르지 않아 목록이 비어 있습니다.
+              </span>
+            )}
+          </div>
+        )}
 
         <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:12}}>
           {[['건수',`${items.length}건`,'#111827'],
@@ -3352,9 +3463,11 @@ function TabPurchase({workers,me,canEditOthers,showToast}){
           ?<div style={{fontSize:12,color:'#6b7280'}}>
             {/* 🔑 「없다」와 「걸러져서 안 보인다」를 구분한다 —
                 기간을 좁혀 둔 것을 잊고 자료가 사라졌다고 여기기 쉽다 */}
-            {from||to||fStatus||fWorker
-              ?'고른 조건에 맞는 구매가 없습니다. 기간이나 상태를 넓혀 보세요.'
-              :'아직 요청한 구매가 없습니다.'}
+            {fWorkers.length===0&&data.scope==='all'
+              ?'고른 직원이 없습니다. 위에서 직원을 하나 이상 골라 주세요.'
+              :from||to||fStatus||!allPicked
+                ?'고른 조건에 맞는 구매가 없습니다. 기간·상태·직원을 넓혀 보세요.'
+                :'아직 요청한 구매가 없습니다.'}
           </div>
           :<table style={{width:'100%',borderCollapse:'collapse'}}>
             <thead><tr>
