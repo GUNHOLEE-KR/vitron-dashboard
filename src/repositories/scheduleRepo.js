@@ -39,6 +39,15 @@ export const getVehicles = (all = false) => request('GET', `/vehicles${all ? '?a
 export const addVehicle = (vehicle) => request('POST', '/vehicles', vehicle)
 export const updateVehicle = (id, patch) => request('PATCH', `/vehicles/${id}`, patch)
 
+// ── 장소 쌍 거리 (2026-09-04 신설) ──
+// 「이동」 일정(현장 → 현장)이 쓴다. 장소의 distance_km 는 「회사 → 장소」 하나뿐이라
+// 현장끼리의 거리는 거기에 없다.
+// 🔑 한 쌍은 한 줄이고 방향을 가리지 않는다 — A→B 를 찾으면 B→A 로도 쓴다.
+export const getPlaceDistance = (from, to) =>
+  authRequest('GET', `/schedule/place-distances?from=${from}&to=${to}`)
+export const getPlaceDistances = () => authRequest('GET', '/schedule/place-distances')
+export const savePlaceDistance = (row) => authRequest('POST', '/schedule/place-distances', row)
+
 // ── 계획 ──
 // 차량 알림 메일이 살아 있는가 (설정 탭 카드용).
 // 🔑 «조용히 멈추는 것» 이 이 기능의 가장 큰 위험이라 상태를 늘 볼 수 있게 둔다.

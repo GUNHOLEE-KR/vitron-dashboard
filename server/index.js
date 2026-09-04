@@ -664,11 +664,92 @@ function findSimilarPlaces(name, places) {
 
 // 편도 일정의 방향(출발/복귀). 왕복이면 방향이 없으므로 «지운다» —
 // 왕복으로 바꿔 놓고 옛 방향이 남아 있으면 달력에 「→ 현장」이 그대로 붙어 거짓말이 된다.
-const ONE_WAY_DIRS = ['출발', '복귀']
+// 이동 = 출장지에서 복귀하지 않고 «다음 출장지로 곧장» 가는 하루 (2026-09-04 신설).
+// 사무실을 거치지 않으므로 출발·복귀 어느 쪽으로도 적을 수 없었다.
+const ONE_WAY_DIRS = ['출발', '복귀', '이동']
 function oneWayDir(roundTrip, value) {
   if (roundTrip) return null
   return ONE_WAY_DIRS.includes(value) ? value : null
 }
+
+// 「이동」이 아닌 일정의 출발지는 «지운다».
+// 🔑 남으면 왕복·출발·복귀 일정에 엉뚱한 출발지가 붙어, 달력이 「A→B」 라고
+//    거짓말을 한다. 왕복이면 방향을 지우는 것(oneWayDir)과 같은 이유다.
+function fromPlaceOf(roundTrip, dir, value) {
+  if (roundTrip || dir !== '이동') return null
+  const id = Number(value)
+  return Number.isInteger(id) && id > 0 ? id : null
+}
+
+// ── 장소 쌍 거리 ────────────────────────────────────────────
+// 「인천공장 → 위례」 처럼 사무실을 거치지 않는 구간의 거리.
+// 🔑 한 쌍은 한 줄이고 «방향을 가리지 않는다» — A→B 를 찾으면 B→A 로도 쓴다.
+//    실무에서 두 방향이 다르지 않고, 두 줄로 두면 한쪽만 고쳐져 조용히 어긋난다.
+async function pairDistance(fromId, toId) {
+  if (!fromId || !toId || Number(fromId) === Number(toId)) return null
+  const { rows } = await pool.query(
+    `SELECT * FROM place_distances
+      WHERE least(from_place_id, to_place_id)    = least($1::int, $2::int)
+        AND greatest(from_place_id, to_place_id) = greatest($1::int, $2::int)`,
+    [fromId, toId])
+  return rows[0] || null
+}
+
+app.get('/api/schedule/place-distances', requireLogin, async (req, res) => {
+  try {
+    const { from, to } = req.query
+    if (from && to) {
+      const row = await pairDistance(Number(from), Number(to))
+      return res.json(row ? [row] : [])
+    }
+    const { rows } = await pool.query(
+      `SELECT d.*, f.name AS from_name, t.name AS to_name
+         FROM place_distances d
+         LEFT JOIN schedule_places f ON f.id = d.from_place_id
+         LEFT JOIN schedule_places t ON t.id = d.to_place_id
+        ORDER BY f.name, t.name`)
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 넣기·고치기 — 한 쌍에 한 줄이므로 있으면 갱신한다.
+// ⚠ 로그인한 사람이면 누구나 넣을 수 있다. 거리는 «찾아서 적는 사실» 이지 결재할 값이
+//   아니고, 막아 두면 현장에서 이동 일정을 아예 등록하지 못한다.
+app.post('/api/schedule/place-distances', requireLogin, async (req, res) => {
+  const b = req.body || {}
+  const fromId = Number(b.from_place_id)
+  const toId = Number(b.to_place_id)
+  const km = Number(b.distance_km)
+  if (!Number.isInteger(fromId) || !Number.isInteger(toId) || fromId <= 0 || toId <= 0) {
+    return res.status(400).json({ error: '출발지와 도착지를 골라 주세요.' })
+  }
+  if (fromId === toId) return res.status(400).json({ error: '출발지와 도착지가 같습니다.' })
+  if (!(km > 0)) return res.status(400).json({ error: '거리를 올바르게 넣어 주세요.' })
+  const min = b.travel_min === '' || b.travel_min == null ? null : Math.round(Number(b.travel_min))
+  const source = b.source === 'google' ? 'google' : 'manual'
+  try {
+    const cur = await pairDistance(fromId, toId)
+    if (cur) {
+      const { rows } = await pool.query(
+        `UPDATE place_distances
+            SET distance_km = $1, travel_min = $2, source = $3,
+                updated_by = $4, updated_at = now()
+          WHERE id = $5 RETURNING *`,
+        [km, min, source, req.session.uid, cur.id])
+      return res.json(rows[0])
+    }
+    const { rows } = await pool.query(
+      `INSERT INTO place_distances
+         (from_place_id, to_place_id, distance_km, travel_min, source, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [fromId, toId, km, min, source, req.session.uid])
+    res.json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
 
 // 시간대가 겹치는가. 종일은 모든 시간대와 겹치고, 오전과 오후는 겹치지 않는다.
 function slotsOverlap(a, b) {
@@ -866,12 +947,14 @@ app.patch('/api/schedule/vehicles/:id', async (req, res) => {
 const PLAN_SELECT = `
   SELECT p.*, w.name AS worker_name, w.team AS worker_team, w.email AS worker_email,
          pl.name AS place_name, pl.category AS place_category,
+         fp.name AS from_place_name,
          v.name AS vehicle_name, v.plate AS vehicle_plate, v.kind AS vehicle_kind,
          v.assigned_worker_id AS vehicle_assigned_worker_id,
          a.id AS actual_id, a.as_planned, a.distance_km AS actual_distance_km
     FROM schedule_plans p
     LEFT JOIN workers w          ON w.id  = p.worker_id
     LEFT JOIN schedule_places pl ON pl.id = p.place_id
+    LEFT JOIN schedule_places fp ON fp.id = p.from_place_id
     LEFT JOIN schedule_vehicles v ON v.id = p.vehicle_id
     LEFT JOIN schedule_actuals a  ON a.plan_id = p.id`
 
@@ -1016,13 +1099,15 @@ app.post('/api/schedule/plans', async (req, res) => {
          (worker_id, plan_date, slot, start_time, end_time, use_type,
           place_id, place_text, purpose, transport, vehicle_id,
           est_distance_km, est_travel_min, round_trip, vacation_type, one_way_dir,
-          approval, approved_at, approved_by_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,
+          approval, approved_at, approved_by_id, from_place_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING *`,
       [b.worker_id, b.plan_date, b.slot || 'allday', b.start_time || null, b.end_time || null,
        useType, placeId, placeText, purpose, b.transport || 'office', b.vehicle_id ?? null,
        b.est_distance_km ?? null, b.est_travel_min ?? null,
        roundTrip, vacationType, oneWayDir(roundTrip, b.one_way_dir),
-       approval, selfApprove ? new Date() : null, selfApprove ? req.session.uid : null]
+       approval, selfApprove ? new Date() : null, selfApprove ? req.session.uid : null,
+       // 이동이 아니면 서버가 지운다 — 남으면 달력이 「A→B」 라고 거짓말을 한다
+       keepPlace ? fromPlaceOf(roundTrip, b.one_way_dir, b.from_place_id) : null]
     )
     // 🔑 차량 알림 — 저장은 이미 끝났다. 메일은 «덤» 이라 await 하지 않는다.
     //    이름(차량·장소·직원)이 붙은 줄이 필요해 조회용 SELECT 로 한 번 더 읽는다.
@@ -1100,7 +1185,7 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
               est_distance_km = $11, est_travel_min = $12,
               round_trip = COALESCE($13, round_trip),
               status = COALESCE($14, status), vacation_type = $15,
-              one_way_dir = $17, updated_at = now()
+              one_way_dir = $17, from_place_id = $18, updated_at = now()
         WHERE id = $16`,
       [b.plan_date || null, b.slot || null, b.start_time || null, b.end_time || null, useType,
        keepPlace ? (b.place_id ?? cur[0].place_id) : null,
@@ -1115,7 +1200,13 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
        req.params.id,
        // 왕복 여부를 안 보냈으면 원래 값을 기준으로 방향을 판정한다.
        oneWayDir(b.round_trip === undefined ? cur[0].round_trip : !!b.round_trip,
-                 b.one_way_dir === undefined ? cur[0].one_way_dir : b.one_way_dir)]
+                 b.one_way_dir === undefined ? cur[0].one_way_dir : b.one_way_dir),
+       // 출발지도 같은 기준으로 — 이동이 아니게 바뀌면 여기서 지워진다
+       keepPlace
+         ? fromPlaceOf(b.round_trip === undefined ? cur[0].round_trip : !!b.round_trip,
+                       b.one_way_dir === undefined ? cur[0].one_way_dir : b.one_way_dir,
+                       b.from_place_id === undefined ? cur[0].from_place_id : b.from_place_id)
+         : null]
     )
     if (rowCount === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
     // 고친 뒤의 모습으로 알린다. 차량이 빠졌으면 mailer 가 알아서 거른다.

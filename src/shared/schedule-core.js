@@ -286,6 +286,13 @@ export function shortPlace(plan) {
   const cut = nm.length > 9 ? nm.slice(0, 9) + '…' : nm
   if (plan.one_way_dir === '출발') return '→' + cut
   if (plan.one_way_dir === '복귀') return cut + '→'
+  // 이동 = 현장에서 현장으로. 「어디서 왔는지」가 이 유형의 핵심이라 함께 적는다.
+  // ⚠ 두 이름을 다 적으면 칸을 넘치므로 출발지는 더 짧게 자른다.
+  if (plan.one_way_dir === '이동') {
+    const f = plan.from_place_name || ''
+    const fcut = f.length > 6 ? f.slice(0, 6) + '…' : f
+    return (fcut ? fcut + '→' : '→') + cut
+  }
   return cut
 }
 // 배지에 붙는 아이콘 — 휴가는 이동 수단이 없으므로 따로 잡는다

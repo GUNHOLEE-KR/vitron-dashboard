@@ -12,8 +12,8 @@ import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatu
 import { getPlaces, addPlace, updatePlace, hidePlace, getVehicles, addVehicle, updateVehicle,
          getPlans, getMailStatus, addPlan, updatePlan, removePlan, getActuals, addActual, updateActual,
          removeActual, login, logout, whoAmI, getSettlement, notifySettlement,
-         completeSettlement, reopenSettlement, setApproval,
-         getVacationSummary } from './repositories/scheduleRepo'
+         completeSettlement, reopenSettlement, setApproval, getVacationSummary,
+         getPlaceDistance, savePlaceDistance } from './repositories/scheduleRepo'
 import { getHolidays, syncHolidays, addHoliday, setHolidayWorking, removeHoliday,
          restDaySet } from './repositories/holidayRepo'
 import { getPurchases, addPurchase, setPurchaseStatus,
@@ -122,8 +122,21 @@ const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'
 // 편도 일정의 방향. 왕복은 나갔다 돌아오는 하루라 방향을 따질 것이 없어 저장하지 않는다.
 const ONE_WAY_DIRS=[
   {value:'출발',icon:'🏢→',hint:'사무실에서 그 장소로'},
-  {value:'복귀',icon:'→🏢',hint:'그 장소에서 사무실로'}
+  {value:'복귀',icon:'→🏢',hint:'그 장소에서 사무실로'},
+  // 출장지에서 복귀하지 않고 다음 출장지로 곧장 가는 하루 (2026-09-04 신설).
+  // 사무실을 거치지 않아 위 둘 중 어느 것으로도 적을 수 없었다.
+  {value:'이동',icon:'📍→📍',hint:'현장에서 다른 현장으로 (사무실 안 거침)'},
 ]
+
+// 구글 지도 길찾기 링크 — 좌표 없이 «이름만» 으로 열린다.
+// 🔑 네이버 새 지도는 좌표를 요구해 이름만으로는 안정적으로 안 열린다. 그래서 구글이다.
+// 🔑 주소가 등록돼 있으면 주소를 쓴다 — 이름만으로는 동명 지점으로 튈 수 있다.
+const mapQuery=(place)=>place?.address?.trim()||place?.name||''
+const googleDirUrl=(from,to)=>
+  'https://www.google.com/maps/dir/?api=1'
+  +`&origin=${encodeURIComponent(mapQuery(from))}`
+  +`&destination=${encodeURIComponent(mapQuery(to))}`
+  +'&travelmode=driving'
 
 // 일정 유형 — 무엇을 등록하는가. 이것을 먼저 고르면 그 뒤에 «필요한 것만» 나온다.
 // (예전에는 「업무/개인 사용」이 차량과 무관한 자리에 먼저 나와 순서가 어긋났다)
@@ -4581,6 +4594,12 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   const [roundTrip,setRoundTrip]=useState(src?src.round_trip:true)
   // 편도일 때만 쓰는 방향. 기본은 「출발」 — 사무실에서 나가는 쪽이 훨씬 흔하다.
   const [oneWayDir,setOneWayDir]=useState(src?.one_way_dir||'출발')
+  // 「이동」 — 현장에서 다른 현장으로 곧장 가는 하루. place_id 는 «도착지» 이고
+  // 출발지가 따로 필요하다 (2026-09-04 신설).
+  const [fromPlaceId,setFromPlaceId]=useState(src?.from_place_id||'')
+  const [pair,setPair]=useState(null)              // 장소 쌍 거리 {distance_km, travel_min}
+  const [pairKmInput,setPairKmInput]=useState('')
+  const [pairMinInput,setPairMinInput]=useState('')
   const [busy,setBusy]=useState(false)
 
   const isWork=kind==='work'
@@ -4592,14 +4611,52 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   const tp=TRANSPORT_MAP[atOffice?'office':transport]||TRANSPORT_MAP.office
   const place=places.find(p=>String(p.id)===String(placeId))
   // 장소를 고르면 거리·시간이 자동으로 들어온다 (한 번 입력해 두면 계속 재사용)
-  const estKm=(atOffice||!isWork)?null:(place?.distance_km??null)
-  const estMin=(atOffice||!isWork)?null:(place?.travel_min??null)
+  // 🔑 「이동」은 사무실을 거치지 않으므로 «장소 쌍» 거리를 쓴다. 장소의 distance_km
+  //    (회사 → 장소)를 그대로 쓰면 실제와 전혀 다른 값이 정산에 들어간다.
+  const moveNow=!roundTrip&&oneWayDir==='이동'
+  const estKm=(atOffice||!isWork)?null
+    :moveNow?(pair?Number(pair.distance_km):null)
+      :(place?.distance_km??null)
+  const estMin=(atOffice||!isWork)?null
+    :moveNow?(pair?.travel_min!=null?Number(pair.travel_min):null)
+      :(place?.travel_min??null)
+  // 이동은 «한 번 가는 것» 이라 왕복 배수를 적용하지 않는다(애초에 편도다)
   const showKm=estKm!=null?(roundTrip?estKm*2:estKm):null
   const showMin=estMin!=null?(roundTrip?estMin*2:estMin):null
   // 외부 장소를 골랐는지 (이동 수단을 물어야 하는 상태)
   const needsTransport=isWork&&!atOffice&&!!placeId
   // 차량 예약은 이동 수단이 «법인차량 또는 자차» 뿐이다(대중교통은 차량이 아니다)
   const vehicleTransports=OUT_TRANSPORTS.filter(t=>t.needsVehicle)
+
+  // ── 「이동」의 거리는 «장소 쌍» 표에서 온다 ──────────────────
+  // 🔑 장소의 distance_km 는 「회사 → 장소」 하나뿐이라 현장끼리의 거리는 거기에 없다.
+  //    두 값을 더하거나 빼서 구할 수도 없다(경로가 다르다).
+  const isMove=!roundTrip&&oneWayDir==='이동'
+  useEffect(()=>{
+    if(!isMove||!fromPlaceId||!placeId||String(fromPlaceId)===String(placeId)) return
+    let alive=true
+    getPlaceDistance(fromPlaceId,placeId)
+      .then(rows=>{ if(alive) setPair(rows[0]||null) })
+      .catch(()=>{ if(alive) setPair(null) })
+    return ()=>{ alive=false }
+  },[isMove,fromPlaceId,placeId])
+  const pairKm=pair?Number(pair.distance_km):null
+  const pairMin=pair?.travel_min!=null?Number(pair.travel_min):null
+
+  async function savePair(){
+    const km=Number(pairKmInput)
+    if(!(km>0)){ showToast('거리를 넣어 주세요'); return }
+    try{
+      setBusy(true)
+      const row=await savePlaceDistance({
+        from_place_id:Number(fromPlaceId), to_place_id:Number(placeId),
+        distance_km:km, travel_min:pairMinInput===''?null:Number(pairMinInput), source:'manual',
+      })
+      setPair(row); setPairKmInput(''); setPairMinInput('')
+      showToast('이 구간 거리를 저장했습니다 — 다음부터 저절로 채워집니다')
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
 
   // 🔑 자차는 «그 일정의 주인» 것만 고를 수 있다 (2026-09-03 지시).
   //    종전에는 kind==='own' 만 보아 등록된 모든 사람의 자차가 나왔다. 남의 차로
@@ -4633,6 +4690,11 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
     // 외부 장소면 이동 수단을 반드시 고르게 한다. 기본값을 넣어 두면
     // 실제와 다른 수단으로 정산될 수 있다.
     if(needsTransport&&!transport){showToast('이동 수단을 선택해 주세요');return false}
+    // 🔑 「이동」은 출발지가 없으면 뜻이 없다 — 어디서 왔는지가 이 유형의 전부다
+    if(isWork&&!atOffice&&!roundTrip&&oneWayDir==='이동'){
+      if(!fromPlaceId){showToast('출발지를 골라 주세요');return false}
+      if(String(fromPlaceId)===String(placeId)){showToast('출발지와 도착지가 같습니다');return false}
+    }
     if(isVehicleOnly&&!vehicleId){showToast('차량을 선택해 주세요');return false}
     if(isWork&&tp.needsVehicle&&!vehicleId){showToast('차량을 선택해 주세요');return false}
     // 휴가 종류는 늘 하나가 골라져 있어 따로 검사할 것이 없다
@@ -4654,6 +4716,9 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
       vehicle_id:(isVehicleOnly||(isWork&&!atOffice&&tp.needsVehicle))?Number(vehicleId):null,
       est_distance_km:isWork?km:null, est_travel_min:isWork?min:null,
       round_trip:(isWork&&!atOffice)?roundTrip:false,
+      // 「이동」일 때만 출발지를 싣는다. 그 밖에는 서버가 어차피 지운다.
+      from_place_id:(isWork&&!atOffice&&!roundTrip&&oneWayDir==='이동'&&fromPlaceId)
+        ?Number(fromPlaceId):null,
       // 방향은 «편도 외부 업무» 일 때만 뜻이 있다. 그 밖에는 비워 보내 서버가 지우게 한다.
       one_way_dir:(isWork&&!atOffice&&!roundTrip)?oneWayDir:null,
       vacation_type:isVacation?vk.type:null,
@@ -5139,12 +5204,65 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
                 ))}
               </div>
             )}
+            {/* ── 「이동」이면 출발지를 묻는다 (2026-09-04 신설) ──
+                place_id 는 «도착지» 다. 사무실을 거치지 않으므로 출발지가 따로 필요하다. */}
+            {!roundTrip&&oneWayDir==='이동'&&(
+              <div style={{marginTop:10,paddingTop:10,borderTop:'1px dashed #e5e7eb'}}>
+                <label style={labelS}>출발지 (어느 현장에서 오셨나요)</label>
+                <select value={fromPlaceId} onChange={e=>setFromPlaceId(e.target.value)}
+                  disabled={!canEdit} style={inputS}>
+                  <option value="">선택</option>
+                  {places.filter(p=>p.id!==OFFICE_PLACE&&String(p.id)!==String(placeId))
+                    .map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+                {/* 🔑 거리는 «장소 쌍» 표에서 온다. 장소의 distance_km 는 「회사 → 장소」
+                    하나뿐이라 현장끼리의 거리는 거기에 없다. */}
+                {fromPlaceId&&placeId&&(
+                  <div style={{marginTop:8,fontSize:12,lineHeight:1.8}}>
+                    {pairKm!=null
+                      ?<span style={{color:'#065f46'}}>
+                        저장된 거리 <strong>{pairKm}km</strong>
+                        {pairMin!=null&&<> · <strong>{pairMin}분</strong></>}
+                        <span style={{color:'#6b7280'}}> — 아래 칸에서 고치면 다음부터 이 값이 바뀝니다</span>
+                      </span>
+                      :<span style={{color:'#9a3412'}}>
+                        이 구간의 거리가 아직 없습니다. 지도에서 보고 적어 주시면
+                        <strong> 다음부터 저절로 채워집니다.</strong>
+                      </span>}
+                    <div style={{display:'flex',gap:6,marginTop:6,flexWrap:'wrap',alignItems:'center'}}>
+                      <a href={googleDirUrl(places.find(p=>String(p.id)===String(fromPlaceId)),
+                                            places.find(p=>String(p.id)===String(placeId)))}
+                        target="_blank" rel="noreferrer"
+                        style={{padding:'6px 12px',borderRadius:7,border:'1px solid #1a56db',
+                          background:'#eff6ff',color:'#1a56db',fontSize:12,fontWeight:700,
+                          textDecoration:'none'}}>📍 구글 지도에서 거리 보기</a>
+                      <input type="number" value={pairKmInput} onChange={e=>setPairKmInput(e.target.value)}
+                        placeholder="km" disabled={!canEdit} style={{...inputS,width:90}}/>
+                      <input type="number" value={pairMinInput} onChange={e=>setPairMinInput(e.target.value)}
+                        placeholder="분(선택)" disabled={!canEdit} style={{...inputS,width:100}}/>
+                      <button type="button" onClick={savePair} disabled={!canEdit||busy}
+                        style={{padding:'6px 14px',borderRadius:7,border:'none',background:'#059669',
+                          color:'#fff',cursor:'pointer',fontSize:12,fontWeight:700}}>거리 저장</button>
+                    </div>
+                    {!places.find(p=>String(p.id)===String(fromPlaceId))?.address&&(
+                      <div style={{fontSize:11,color:'#6b7280',marginTop:4}}>
+                        💡 장소에 <strong>주소</strong>를 넣어 두면 지도가 정확한 곳을 찾습니다.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
             <div style={{fontSize:12,color:'#374151',marginTop:6}}>
               {showKm!=null||showMin!=null
                 ?<>예상 {showKm!=null&&<strong>{showKm}km</strong>}
                    {showMin!=null&&<> · 이동 <strong>{showMin}분</strong></>}
-                   <span style={{color:'#6b7280'}}> (장소에 등록된 값)</span></>
-                :<span style={{color:'#6b7280'}}>장소를 고르면 거리·시간이 표시됩니다.</span>}
+                   <span style={{color:'#6b7280'}}>
+                     {' '}({oneWayDir==='이동'?'장소 쌍에 등록된 값':'장소에 등록된 값'})
+                   </span></>
+                :<span style={{color:'#6b7280'}}>
+                  {oneWayDir==='이동'?'출발지를 고르면 거리가 표시됩니다.':'장소를 고르면 거리·시간이 표시됩니다.'}
+                </span>}
             </div>
           </div>
         )}
