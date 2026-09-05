@@ -2682,6 +2682,26 @@ app.post('/api/hipass/upload', requireLogin, async (req, res) => {
   }
 })
 
+// 통행 한 건을 «그날 그 차의 실적» 과 맞대 본다 (2026-09-04 지시).
+// ════════════════════════════════════════════════════════════
+// 🔑 값은 정산의 방향을 말한다 — 누가 누구에게 내는가.
+//    deposit  법인차량을 «개인 사용» 한 날  → 직원이 회사에 입금
+//    refund   자차로 «업무» 다녀온 날        → 회사가 직원에게 전액 환급
+//    company  법인차량으로 «업무» 다녀온 날 → 회사 비용, 정산에 잡히지 않는다
+//    mixed    한 날에 개인 사용과 업무가 함께 → 사람이 골라야 한다
+//    none     그날 그 차로 등록된 실적이 없다 → 출퇴근·개인 용도로 보인다
+//
+// 🔴 이것은 «참고» 다. 출장 당일 아침에도 출퇴근 통행이 찍히므로, 같은 날이라고
+//    그 통행이 곧 업무 통행인 것은 아니다. 마지막 판단은 사람이 한다.
+function tollHint(kind, matches) {
+  if (!matches || matches.length === 0) return 'none'
+  const personal = matches.some(m => m.use_type === 'personal')
+  const business = matches.some(m => m.use_type !== 'personal')
+  if (personal && business) return 'mixed'
+  if (personal) return 'deposit'
+  return kind === 'own' ? 'refund' : 'company'
+}
+
 // 목록 — 기간·차량으로 좁힌다. mine=1 이면 «내 실적에 붙은 것» 만.
 // 🔑 아직 아무도 안 가져간 것(actual_id IS NULL)이 기본이다 — 고를 수 있는 것들이다.
 app.get('/api/hipass', requireLogin, async (req, res) => {
@@ -2690,18 +2710,33 @@ app.get('/api/hipass', requireLogin, async (req, res) => {
     const { rows } = await pool.query(
       `SELECT t.*, ${HIPASS_DATE} AS used_date,
               v.name AS vehicle_name, v.plate AS vehicle_plate, v.kind AS vehicle_kind,
-              a.worker_id AS claimed_worker_id, w.name AS claimed_worker_name
+              a.worker_id AS claimed_worker_id, w.name AS claimed_worker_name,
+              coalesce(m.j, '[]'::json) AS day_actuals
          FROM hipass_tolls t
          LEFT JOIN schedule_vehicles v ON v.id = t.vehicle_id
          LEFT JOIN schedule_actuals  a ON a.id = t.actual_id
          LEFT JOIN workers w           ON w.id = a.worker_id
+         -- 그날 그 차를 쓴 실적 — 통행을 어느 실적에 붙이면 되는지 알려 준다.
+         -- ⚠ 실적이 없어도 통행은 보여야 하므로 LEFT JOIN LATERAL 이다.
+         LEFT JOIN LATERAL (
+           SELECT json_agg(json_build_object(
+                    'actual_id', a2.id, 'worker_id', a2.worker_id, 'worker_name', w2.name,
+                    'use_type',  a2.use_type,
+                    'place',     coalesce(p2.name, a2.place_text),
+                    'toll_fee',  a2.toll_fee) ORDER BY a2.use_type, a2.id) AS j
+             FROM schedule_actuals a2
+             LEFT JOIN workers        w2 ON w2.id = a2.worker_id
+             LEFT JOIN schedule_places p2 ON p2.id = a2.place_id
+            WHERE a2.vehicle_id = t.vehicle_id
+              AND a2.work_date  = ${HIPASS_DATE}
+         ) m ON TRUE
         WHERE ($1::date IS NULL OR ${HIPASS_DATE} >= $1::date)
           AND ($2::date IS NULL OR ${HIPASS_DATE} <= $2::date)
           AND ($3::int  IS NULL OR t.vehicle_id = $3::int)
           AND ($4::boolean IS FALSE OR t.actual_id IS NULL)
         ORDER BY t.used_at ASC`,
       [from || null, to || null, vehicle_id || null, String(req.query.unclaimed) === '1'])
-    res.json(rows)
+    res.json(rows.map(r => ({ ...r, hint: tollHint(r.vehicle_kind, r.day_actuals) })))
   } catch (e) {
     res.status(500).json({ error: e.message })
   }

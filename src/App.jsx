@@ -4407,7 +4407,7 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
           처음에는 설정 탭에 두었는데, 매월 정산하면서 하는 일이라 동선이 어긋났다.
           여기에 있으면 «올리고 → 실적에 붙이고 → 확정» 이 한 화면에서 이어진다.
           ⚠ 실적이 0건인 달에도 보여야 한다 — 명세를 먼저 올려야 실적을 채울 수 있다. */}
-      {data&&<div style={{marginBottom:16}}><HipassUploader ym={ym} showToast={showToast}/></div>}
+      {data&&<div style={{marginBottom:16}}><HipassUploader ym={ym} me={me} showToast={showToast}/></div>}
 
       {data&&data.actual_count===0
         ?<Card title={`${ym} 정산`}>
@@ -5915,12 +5915,30 @@ const FUEL_TYPES=['가솔린','디젤','LPG','전기']
 //    «정산 전에» 눈으로 보고 걷어낼 수 있어야 한다.
 // ⚠ 지운 줄은 «같은 파일을 다시 올리면 되살아난다» — 중복 판정이 파일의 번호가 아니라
 //   차량+거래일시+입구+출구+금액 이라, 지워진 자리는 비어 있는 것으로 보인다(지시대로).
-function HipassTable({ym,showToast,onChanged,refresh}){
+// 대조 판정 — 서버의 tollHint 가 준 값에 «색과 말» 을 입힌다.
+// 🔑 정산의 «방향» 을 그대로 쓴다 (정산 계산식과 같은 낱말이어야 헷갈리지 않는다) —
+//    입금은 직원이 회사로, 환급은 회사가 직원에게.
+const TOLL_HINTS={
+  deposit:{label:'입금 대상',  color:'#b45309',bg:'#fffbeb',bd:'#fde68a',
+           desc:'그날 이 차를 «개인 사용» 한 실적이 있습니다 — 회사에 입금하시는 통행입니다.'},
+  refund :{label:'환급 대상',  color:'#047857',bg:'#ecfdf5',bd:'#a7f3d0',
+           desc:'자차로 «업무» 다녀온 날입니다 — 회사가 전액 돌려드립니다.'},
+  company:{label:'회사 부담',  color:'#1a56db',bg:'#eff6ff',bd:'#bfdbfe',
+           desc:'법인차량으로 «업무» 다녀온 날입니다 — 회사 비용이라 정산에 잡히지 않습니다.'},
+  mixed  :{label:'골라야 함',  color:'#9333ea',bg:'#faf5ff',bd:'#e9d5ff',
+           desc:'그날 «개인 사용» 과 «업무» 가 함께 있습니다 — 어느 쪽인지 사람이 정해야 합니다.'},
+  none   :{label:'해당 없음',  color:'#6b7280',bg:'#f9fafb',bd:'#e5e7eb',
+           desc:'그날 이 차로 등록된 실적이 없습니다 — 출퇴근·개인 용도로 보입니다.'},
+}
+
+function HipassTable({ym,me,showToast,onChanged,refresh}){
   const [rows,setRows]=useState(null)
   const [err,setErr]=useState('')
   const [picked,setPicked]=useState(()=>new Set())
   const [busy,setBusy]=useState(false)
   const [onlyFree,setOnlyFree]=useState(false)   // 아직 아무도 안 가져간 것만
+  const [onlyMine,setOnlyMine]=useState(false)   // 그날 내가 그 차를 쓴 것만
+  const [hintFilter,setHintFilter]=useState('')  // 대조 결과로 좁히기
 
   const load=async()=>{
     try{
@@ -5935,7 +5953,13 @@ function HipassTable({ym,showToast,onChanged,refresh}){
   // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
   useEffect(()=>{ load() },[ym,refresh])
 
-  const list=(rows||[]).filter(r=>!onlyFree||!r.actual_id)
+  const mineOf=r=>(r.day_actuals||[]).some(a=>Number(a.worker_id)===Number(me?.worker_id))
+  const list=(rows||[]).filter(r=>
+    (!onlyFree||!r.actual_id)
+    &&(!onlyMine||mineOf(r))
+    &&(!hintFilter||r.hint===hintFilter))
+  // 대조 결과별 건수 — 고르개에 「(26)」처럼 붙여 «무엇이 몇 건인지» 를 열기 전에 보인다.
+  const hintCount=(rows||[]).reduce((m,r)=>{ m[r.hint]=(m[r.hint]||0)+1; return m },{})
   const sum=list.reduce((s,r)=>s+Number(r.amount||0),0)
   const pickedRows=list.filter(r=>picked.has(r.id))
   const pickedSum=pickedRows.reduce((s,r)=>s+Number(r.amount||0),0)
@@ -5976,6 +6000,22 @@ function HipassTable({ym,showToast,onChanged,refresh}){
             style={{cursor:'pointer'}}/>
           아직 안 가져간 것만
         </label>
+        {/* 🔑 직원이 «자기 것» 을 미리 확인하는 자리다 (2026-09-04 지시).
+            그날 그 차를 쓴 실적이 내 것인 통행만 남긴다. */}
+        {me?.worker_id&&(
+          <label style={{display:'flex',alignItems:'center',gap:5,fontSize:11,color:'#374151',cursor:'pointer'}}>
+            <input type="checkbox" checked={onlyMine} onChange={e=>setOnlyMine(e.target.checked)}
+              style={{cursor:'pointer'}}/>
+            내가 그날 쓴 것만
+          </label>
+        )}
+        <select value={hintFilter} onChange={e=>setHintFilter(e.target.value)}
+          style={{padding:'3px 6px',border:'1px solid #e5e7eb',borderRadius:6,fontSize:11}}>
+          <option value="">대조 — 전체</option>
+          {Object.entries(TOLL_HINTS).map(([k,h])=>(
+            <option key={k} value={k}>{h.label} ({hintCount[k]||0})</option>
+          ))}
+        </select>
         <div style={{flex:1}}/>
         {picked.size>0&&(
           <span style={{fontSize:11,fontWeight:700,color:'#1a56db'}}>
@@ -6003,12 +6043,14 @@ function HipassTable({ym,showToast,onChanged,refresh}){
             <th style={{...thTop,textAlign:'left'}}>차량</th>
             <th style={{...thTop,textAlign:'left'}}>구간</th>
             <th style={thTop}>금액</th>
+            <th style={{...thTop,textAlign:'left'}}>대조 — 그날 이 차를 쓴 실적</th>
             <th style={{...thTop,textAlign:'left'}}>비고</th>
             <th style={{...thTop,textAlign:'left'}}>가져간 사람</th>
           </tr></thead>
           <tbody>
             {list.map(r=>{
               const commute=String(r.note||'').includes('출퇴근')
+              const hint=TOLL_HINTS[r.hint]||TOLL_HINTS.none
               return(
                 <tr key={r.id} style={{background:picked.has(r.id)?'#eff6ff':'#fff'}}>
                   <td style={{...tdS,width:34}}>
@@ -6022,6 +6064,22 @@ function HipassTable({ym,showToast,onChanged,refresh}){
                   </td>
                   <td style={{...tdS,textAlign:'left'}}>{r.gate_in||'-'} → {r.gate_out||'-'}</td>
                   <td style={{...tdS,fontWeight:700}}>{Number(r.amount).toLocaleString()}원</td>
+                  {/* 🔴 대조는 «참고» 다 — 출장 당일 아침에도 출퇴근 통행이 찍히므로
+                      같은 날이라고 그 통행이 곧 업무 통행인 것은 아니다. 판단은 사람이 한다. */}
+                  <td style={{...tdS,textAlign:'left'}}>
+                    <span title={hint.desc}
+                      style={{display:'inline-block',padding:'1px 7px',borderRadius:10,fontSize:10,
+                        fontWeight:700,color:hint.color,background:hint.bg,border:'1px solid '+hint.bd}}>
+                      {hint.label}
+                    </span>
+                    {(r.day_actuals||[]).length>0&&(
+                      <span style={{marginLeft:6,fontSize:10,color:'#6b7280'}}>
+                        {r.day_actuals.map(a=>
+                          `${a.worker_name||'?'}${a.use_type==='personal'?'(개인)':''}`
+                          +(a.place?` · ${a.place}`:'')).join(' / ')}
+                      </span>
+                    )}
+                  </td>
                   <td style={{...tdS,textAlign:'left',fontSize:10,color:'#6b7280'}}>
                     {r.manual
                       ?<span style={{color:'#7c3aed',fontWeight:700}}>손으로 넣음</span>
@@ -6041,7 +6099,20 @@ function HipassTable({ym,showToast,onChanged,refresh}){
           </tbody>
         </table>
       </div>
-      <div style={{marginTop:6,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
+      {/* 대조 뜻풀이 — 색만 보고는 무슨 뜻인지 알 수 없다 */}
+      <div style={{marginTop:8,display:'flex',gap:10,flexWrap:'wrap',fontSize:10,color:'#6b7280'}}>
+        {Object.entries(TOLL_HINTS).map(([k,h])=>(
+          <span key={k}>
+            <span style={{display:'inline-block',padding:'1px 7px',borderRadius:10,fontWeight:700,
+              color:h.color,background:h.bg,border:'1px solid '+h.bd}}>{h.label}</span>
+            {' '}{h.desc}
+          </span>
+        ))}
+      </div>
+
+      <div style={{marginTop:8,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
+        🔴 <strong>대조는 참고일 뿐입니다.</strong> 출장 당일 아침에도 출퇴근 통행이 함께 찍히므로,
+        같은 날이라고 그 통행이 곧 업무 통행인 것은 아닙니다 — <strong>마지막 선택은 사람이</strong> 하십시오.<br/>
         💡 출퇴근·개인 용도처럼 <strong>회사와 무관한 통행</strong>은 골라서 지우십시오.
         지우지 않아도 아무도 가져가지 않으면 정산에 잡히지 않습니다.<br/>
         💡 <strong>실적에 붙은 줄은 지워지지 않습니다</strong> — 그 실적의 주인이 먼저 떼어야 합니다.<br/>
@@ -6051,7 +6122,7 @@ function HipassTable({ym,showToast,onChanged,refresh}){
   )
 }
 
-function HipassUploader({ym,showToast}){
+function HipassUploader({ym,me,showToast}){
   const [busy,setBusy]=useState(false)
   const [result,setResult]=useState(null)
   const [askVehicle,setAskVehicle]=useState(null)   // {card, base64, filename}
@@ -6254,7 +6325,7 @@ function HipassUploader({ym,showToast}){
       )}
 
       {/* ── 불러온 낱건 표 — 여기서 «필요 없는 것을 걷어낸다» (2026-09-04 지시) ── */}
-      <HipassTable ym={ym} showToast={showToast} onChanged={reloadAll} refresh={tick}/>
+      <HipassTable ym={ym} me={me} showToast={showToast} onChanged={reloadAll} refresh={tick}/>
 
       <div style={{marginTop:10,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
         💡 같은 파일을 다시 올려도 <strong>겹치지 않습니다</strong> — 이미 있는 통행은 건너뜁니다.<br/>
