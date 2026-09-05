@@ -262,6 +262,58 @@ const SHOTS = [
         const a=pick('금액'); if(a)a.click()
         setTimeout(()=>{const b=pick('상태'); if(b)b.click()},400)},1600)})()`,
     clipCard: '구매 이력' },
+
+  // 정산 «사람별» 표 — 1차 안내 · 2차 입금 확인이 사람마다 따로 있다
+  { file: '84_정산_사람별.png', wait: 8000,
+    js: `(()=>{const S=(f,t)=>setTimeout(f,t)
+      S(()=>__click('스케줄'),1200)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>/정산/.test(x.textContent)); if(b)b.click()},2300)
+      S(()=>{const s=document.querySelector('select')
+        if(s){const set=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set
+          set.call(s,'2026-08'); s.dispatchEvent(new Event('change',{bubbles:true}))}},3300)
+      S(()=>{const h=[...document.querySelectorAll('div,strong')]
+        .find(x=>x.textContent.trim()==='사람별')
+        if(h)window.scrollTo(0,h.getBoundingClientRect().top+scrollY-110)},5600)
+    })()` },
+
+  // 「이동」 — 현장에서 다른 현장으로. 왕복을 끄고 📍→📍 를 골라야 나온다.
+  // ⚠ 깊게 겹친 setTimeout 은 한 걸음만 어긋나도 통째로 어그러진다.
+  //   걸음마다 «절대 시각» 을 주어 나란히 세운다.
+  { file: '85_일정_이동.png', wait: 10500,
+    js: `(()=>{const S=(f,t)=>setTimeout(f,t)
+      S(()=>__click('스케줄'),1200)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.trim()==='+ 계획 추가'); if(b)b.click()},2400)
+      S(()=>{const p=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.trim()==='장소 선택'); if(p)p.click()},3500)
+      // ⚠ 줄 이름이 「파주 LGD 고객사」라 «꼭 맞는 글자» 로는 못 찾는다.
+      //   먼저 검색으로 걸러 낸 뒤, 그 글자를 품은 «가장 안쪽» 칸의 줄을 누른다.
+      S(()=>{const i=[...document.querySelectorAll('input')]
+        .find(x=>(x.placeholder||'').includes('장소 이름'))
+        if(i){const set=Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,'value').set
+          set.call(i,'파주'); i.dispatchEvent(new Event('input',{bubbles:true}))}},4300)
+      // ⚠ 누르는 손잡이는 «줄(tr)» 이 아니라 그 안의 칸에 달려 있다. tr 을 누르면
+      //   위로만 퍼져 아래 칸의 손잡이에 닿지 않는다 — 가장 안쪽을 눌러야 한다.
+      S(()=>{const hits=[...document.querySelectorAll('*')]
+        .filter(n=>(n.textContent||'').includes('파주 LGD'))
+        const el=hits[hits.length-1]; if(el)el.click()},5300)
+      S(()=>{const l=[...document.querySelectorAll('label')]
+        .find(x=>x.textContent.trim()==='왕복')
+        const c=l&&l.querySelector('input[type=checkbox]'); if(c&&c.checked)c.click()},6300)
+      S(()=>{const m=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.includes('📍→📍')); if(m)m.click()},7100)
+      S(()=>{const s=[...document.querySelectorAll('select')]
+        .find(x=>[...x.options].some(o=>o.textContent.trim()==='SKIPC'))
+        if(s){const set=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set
+          const o=[...s.options].find(o=>o.textContent.trim()==='SKIPC')
+          if(o){set.call(s,o.value); s.dispatchEvent(new Event('change',{bubbles:true}))}}},7900)
+      // ⚠ 창이 길어 방향 칸이 화면 밖에 있다. 그 자리로 굴려 놓아야 찍힌다.
+      S(()=>{const l=[...document.querySelectorAll('label')]
+        .find(x=>x.textContent.trim()==='왕복')
+        if(l)l.scrollIntoView({block:'center'})},8800)
+    })()` },
 ]
 
 // --only 로 일부만 찍는다. 파일명에 그 글자가 들어간 것만 고른다.
