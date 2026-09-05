@@ -5507,13 +5507,18 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   const [date,setDate]=useState(editing?.plan_date||defaultDate||today())
   // 새 계획에서 고른 날짜들. 수정 모드에서는 쓰지 않는다.
   const [dates,setDates]=useState(isNew?(defaultDate?[defaultDate]:[today()]):[])
-  // 기간으로 한꺼번에 넣기 (2026-09-05). 기본은 «주말·공휴일을 뺀다» —
-  // 출장·현장 일정이 대부분이라 그쪽이 훨씬 흔하다.
-  const [rangeOpen,setRangeOpen]=useState(false)
-  const [rangeFrom,setRangeFrom]=useState(defaultDate||today())
-  const [rangeTo,setRangeTo]=useState(defaultDate||today())
-  const [skipWeekend,setSkipWeekend]=useState(true)
-  const [skipHoliday,setSkipHoliday]=useState(true)
+  // 날짜 고르개 — «달력에서 누르고 끌어» 고른다 (2026-09-05 개편 지시).
+  // ════════════════════════════════════════════════════════════
+  // 처음에는 날짜 칸에 하루씩 넣어 태그로 쌓고, 「기간으로 넣기」에 시작~끝을 타이핑했다.
+  // 9/8·9/10·9/15~17 처럼 «흩어진» 날짜가 실제로 흔한데 그 방식으로는 손이 너무 갔다.
+  const [pickMonth,setPickMonth]=useState((defaultDate||today()).slice(0,7))
+  // 🔑 쉬는 날 건너뛰기는 «끌었을 때만» 듣는다. 한 번 누르기는 언제나 그 날 그대로 —
+  //    「눌렀는데 안 들어간다」가 되면 휴일 근무를 아예 넣지 못한다.
+  const [skipRest,setSkipRest]=useState(true)
+  // 끌기 중인 상태. 시작 칸이 꺼져 있었으면 «켜면서», 켜져 있었으면 «끄면서» 지나간다
+  // (엑셀에서 칸을 고르는 방식). 손을 떼는 순간 한 번에 반영한다 —
+  // 지나가는 대로 바로 넣으면 되돌아올 때 지나온 자국이 남는다.
+  const [drag,setDrag]=useState(null)   // {from,to,mode:'add'|'del'}
   const [slot,setSlot]=useState(src?.slot||'allday')
   const [useType,setUseType]=useState(src?.use_type||'business')
   // 유형 — 무엇을 등록하는가. 이것이 최상위이고 뒤 칸은 여기에 따라 달라진다.
@@ -5757,42 +5762,67 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   }
 
   // 날짜 태그 조작 — 새 계획에서만 쓴다
-  function addDate(d){
-    if(!d)return
-    setDates(prev=>prev.includes(d)?prev:[...prev,d].sort())
-  }
   function removeDate(d){ setDates(prev=>prev.filter(x=>x!==d)) }
-  // 그 날짜가 속한 주의 평일(월~금)을 한 번에 넣는다
-  function addWeekdays(){
-    const week=calWeekDays(date).slice(0,5)
-    setDates(prev=>[...new Set([...prev,...week])].sort())
-  }
 
-  // 기간으로 한꺼번에 넣기 (2026-09-05 지시).
-  // ════════════════════════════════════════════════════════════
-  // 🔑 태그를 하나씩 누르는 방식만으로는 «2주 출장» 을 넣을 수 없다 — 열네 번 눌러야 한다.
-  // 🔑 주말·공휴일을 «뺄지 말지» 는 고르게 둔다. 주말 근무·휴일 근무가 실제로 있으므로
-  //    빼는 것을 강제하면 그 사람이 자기 일정을 넣지 못한다.
-  // ⚠ 쉬는 날 판정은 restDays 를 그대로 쓴다 — 달력이 회색으로 칠하는 기준과 «같아야»
+  // ── 달력에서 날짜 고르기 (2026-09-05 개편 지시) ───────────────
+  // ⚠ 쉬는 날 판정은 restDays 를 그대로 쓴다 — 달력이 주황으로 칠하는 기준과 «같아야»
   //   한 화면에서 어긋나지 않는다(「그날 근무」로 돌린 날은 공휴일에서 빠진다).
-  function addRange(){
-    if(!rangeFrom||!rangeTo){ showToast('시작일과 종료일을 넣어 주세요'); return }
-    if(rangeFrom>rangeTo){ showToast('종료일이 시작일보다 빠릅니다'); return }
+  const isRest=d=>{ const w=new Date(d).getDay(); return w===0||w===6||restDays.has(d) }
+
+  // 지금 끌고 있는 구간이 실제로 «넣거나 뺄» 날들. 미리보기와 확정이 같은 함수를 쓴다 —
+  // 둘을 따로 계산하면 보이는 것과 들어가는 것이 언젠가 어긋난다.
+  function dragDays(g){
+    if(!g) return []
+    const a=g.from<g.to?g.from:g.to, b=g.from<g.to?g.to:g.from
     const out=[]
-    let skippedWeekend=0, skippedHoliday=0
-    // 상한을 둔다 — 손이 미끄러져 2030년을 넣으면 천 건이 만들어진다
-    for(let d=rangeFrom;d<=rangeTo&&out.length<200;d=addDays(d,1)){
-      const dow=new Date(d).getDay()
-      if(skipWeekend&&(dow===0||dow===6)){ skippedWeekend++; continue }
-      if(skipHoliday&&restDays.has(d)&&dow!==0&&dow!==6){ skippedHoliday++; continue }
+    // 상한을 둔다 — 손이 미끄러져 몇 해를 끌면 천 건이 만들어진다
+    for(let d=a;d<=b&&out.length<200;d=addDays(d,1)){
+      // 🔑 한 칸만 누른 것(a===b)은 언제나 그 날 그대로. 지우며 끄는 것도 건너뛰지 않는다 —
+      //    지울 때까지 쉬는 날을 남기면 「지웠는데 남아 있다」가 된다.
+      if(a!==b&&g.mode==='add'&&skipRest&&isRest(d)) continue
       out.push(d)
     }
-    if(out.length===0){ showToast('넣을 날이 없습니다 — 뺀 조건을 확인해 주세요'); return }
-    setDates(prev=>[...new Set([...prev,...out])].sort())
-    const skipped=[skippedWeekend?`주말 ${skippedWeekend}일`:'',
-                   skippedHoliday?`공휴일 ${skippedHoliday}일`:''].filter(Boolean).join(' · ')
-    showToast(`${out.length}일을 넣었습니다${skipped?` (뺀 것 — ${skipped})`:''}`)
+    return out
   }
+  // 끌고 있을 때만 도는 계산이고 많아야 200칸이라 따로 기억해 둘 것이 없다
+  const dragSet=new Set(dragDays(drag))
+
+  function cellDown(e,d){
+    if(!canEdit) return
+    e.preventDefault()
+    // 손가락으로 끌 때도 «옆 칸» 이 반응하게 한다 — 터치는 기본으로 시작 칸에 붙잡혀
+    // pointerenter 가 다른 칸에서 일어나지 않는다.
+    try{ e.currentTarget.releasePointerCapture?.(e.pointerId) }catch{ /* 지원 안 하면 그만 */ }
+    setDrag({from:d,to:d,mode:dates.includes(d)?'del':'add'})
+  }
+  function cellEnter(d){ setDrag(g=>g?{...g,to:d}:g) }
+
+  // 손을 떼는 순간 한 번에 반영한다. 창 밖에서 떼어도 끝나야 하므로 window 에 건다 —
+  // 격자에만 걸면 달력 밖에서 손을 떼었을 때 끌기가 끝나지 않는다.
+  useEffect(()=>{
+    if(!drag) return
+    function finish(){
+      const list=dragDays(drag)
+      if(list.length>0){
+        setDates(prev=>{
+          const s=new Set(prev)
+          if(drag.mode==='add') list.forEach(d=>s.add(d))
+          else list.forEach(d=>s.delete(d))
+          return [...s].sort()
+        })
+        // 여러 날을 한 번에 다뤘을 때만 알린다. 한 칸 누른 것은 눈으로 보면 안다.
+        if(list.length>1) showToast(
+          drag.mode==='add'?`${list.length}일을 넣었습니다`:`${list.length}일을 뺐습니다`)
+      }
+      setDrag(null)
+    }
+    window.addEventListener('pointerup',finish)
+    window.addEventListener('pointercancel',finish)
+    return()=>{
+      window.removeEventListener('pointerup',finish)
+      window.removeEventListener('pointercancel',finish)
+    }
+  })
 
   async function handleDelete(){
     // 휴가를 지우는 것은 «신청을 물린다» 는 뜻이라 대표이사에게 취소 메일이 간다.
@@ -5915,79 +5945,112 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
         {/* 🔑 휴가는 시간대를 여기서 묻지 않는다 (2026-08-26 지시).
             위쪽 「시간대」에서 반차를 고르게 했더니 «찾기 어렵다» 는 지적을 받았다.
             휴가에 관한 것은 아래 「휴가 종류」 한 자리에서 다 정해진다. */}
-        <div style={{display:'grid',gridTemplateColumns:isVacation?'1fr':'1fr 1fr',gap:10,...rowS}}>
-          <div>
-            <label style={labelS}>날짜</label>
-            <input type="date" value={date} onChange={e=>{setDate(e.target.value);if(isNew)addDate(e.target.value)}}
-              disabled={!canEdit} style={inputS}/>
+        {/* 🔑 새 계획의 날짜는 «아래 달력» 에서만 고른다 (2026-09-05 지시).
+            날짜 칸이 위아래로 둘이면 어느 것이 실제로 들어가는지 알 수 없다.
+            고치는 창은 날짜가 하루뿐이라 그대로 입력칸을 쓴다. */}
+        {(!isNew||!isVacation)&&(
+          <div style={{display:'grid',
+            gridTemplateColumns:(!isNew&&!isVacation)?'1fr 1fr':'1fr',gap:10,...rowS}}>
+            {!isNew&&(
+              <div>
+                <label style={labelS}>날짜</label>
+                <input type="date" value={date} onChange={e=>setDate(e.target.value)}
+                  disabled={!canEdit} style={inputS}/>
+              </div>
+            )}
+            {!isVacation&&(
+              <div>
+                <label style={labelS}>시간대</label>
+                <select value={slot} onChange={e=>setSlot(e.target.value)} disabled={!canEdit} style={inputS}>
+                  {SLOTS.map(s=><option key={s.v} value={s.v}>{s.label}</option>)}
+                </select>
+              </div>
+            )}
           </div>
-          {!isVacation&&(
-            <div>
-              <label style={labelS}>시간대</label>
-              <select value={slot} onChange={e=>setSlot(e.target.value)} disabled={!canEdit} style={inputS}>
-                {SLOTS.map(s=><option key={s.v} value={s.v}>{s.label}</option>)}
-              </select>
-            </div>
-          )}
-        </div>
+        )}
 
         {/* 같은 일정을 여러 날 넣는 일이 잦다. 고른 날짜가 태그로 쌓인다. */}
         {isNew&&(
           <div style={{...rowS,background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,padding:'10px 12px'}}>
             <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8,flexWrap:'wrap'}}>
               <strong style={{fontSize:12}}>넣을 날짜 {dates.length}개</strong>
-              <button onClick={()=>addDate(date)}
-                style={{padding:'4px 10px',borderRadius:6,border:'1px solid #1a56db',background:'#eff6ff',
-                  color:'#1a56db',cursor:'pointer',fontSize:11,fontWeight:600}}>+ 위 날짜 추가</button>
-              <button onClick={addWeekdays}
-                style={{padding:'4px 10px',borderRadius:6,border:'1px solid #1a56db',background:'#eff6ff',
-                  color:'#1a56db',cursor:'pointer',fontSize:11,fontWeight:600}}>그 주 평일(월~금)</button>
-              {/* 🔑 며칠짜리 출장은 태그를 하나씩 누를 일이 아니다 (2026-09-05 지시) */}
-              <button onClick={()=>setRangeOpen(v=>!v)}
-                style={{padding:'4px 10px',borderRadius:6,
-                  border:'1px solid '+(rangeOpen?'#1a56db':'#93c5fd'),
-                  background:rangeOpen?'#1a56db':'#eff6ff',
-                  color:rangeOpen?'#fff':'#1a56db',cursor:'pointer',fontSize:11,fontWeight:600}}>
-                📅 기간으로 넣기
-              </button>
+              <span style={{fontSize:11,color:'#6b7280'}}>
+                달력에서 <strong>누르면 켜지고, 다시 누르면 꺼집니다.</strong> 끌면 여러 날이 한 번에 됩니다.
+              </span>
               {dates.length>0&&(
                 <button onClick={()=>setDates([])}
-                  style={{padding:'4px 10px',borderRadius:6,border:'1px solid #e5e7eb',background:'#fff',
-                    color:'#6b7280',cursor:'pointer',fontSize:11}}>모두 지우기</button>
+                  style={{marginLeft:'auto',padding:'4px 10px',borderRadius:6,border:'1px solid #e5e7eb',
+                    background:'#fff',color:'#6b7280',cursor:'pointer',fontSize:11}}>모두 지우기</button>
               )}
             </div>
-            {/* 기간 넣기 — 시작~끝을 정하고 뺄 것을 고른다 */}
-            {rangeOpen&&(
-              <div style={{marginBottom:8,padding:'8px 10px',background:'#fff',
-                border:'1px solid #bfdbfe',borderRadius:7}}>
-                <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
-                  <input type="date" value={rangeFrom} onChange={e=>setRangeFrom(e.target.value)}
-                    style={{padding:'5px 7px',border:'1px solid #e5e7eb',borderRadius:6,fontSize:12}}/>
-                  <span style={{fontSize:12,color:'#6b7280'}}>~</span>
-                  <input type="date" value={rangeTo} onChange={e=>setRangeTo(e.target.value)}
-                    style={{padding:'5px 7px',border:'1px solid #e5e7eb',borderRadius:6,fontSize:12}}/>
-                  <label style={{display:'flex',alignItems:'center',gap:4,fontSize:11,
-                    color:'#374151',cursor:'pointer'}}>
-                    <input type="checkbox" checked={skipWeekend}
-                      onChange={e=>setSkipWeekend(e.target.checked)} style={{cursor:'pointer'}}/>
-                    주말 빼기
-                  </label>
-                  <label style={{display:'flex',alignItems:'center',gap:4,fontSize:11,
-                    color:'#374151',cursor:'pointer'}}>
-                    <input type="checkbox" checked={skipHoliday}
-                      onChange={e=>setSkipHoliday(e.target.checked)} style={{cursor:'pointer'}}/>
-                    공휴일 빼기
-                  </label>
-                  <button onClick={addRange}
-                    style={{padding:'5px 12px',borderRadius:6,border:'none',background:'#1a56db',
-                      color:'#fff',cursor:'pointer',fontSize:11,fontWeight:700}}>넣기</button>
-                </div>
-                <div style={{marginTop:5,fontSize:10,color:'#6b7280'}}>
-                  넣은 뒤에도 아래 태그를 눌러 <strong>하루씩 뺄 수 있습니다.</strong>
-                  {' '}주말·휴일에 일하시는 날이면 체크를 풀고 넣으십시오.
-                </div>
+
+            {/* ── 날짜 고르는 달력 (2026-09-05 개편 지시) ────────────────
+                🔑 흩어진 날짜(9/8·9/10·9/15~17)가 실제로 흔하다. 입력칸에 하루씩 넣는
+                   방식으로는 그때마다 세 번·다섯 번을 눌러야 했다.
+                🔑 달을 넘겨 가며 이어서 고를 수 있다 — 고른 것은 아래 태그에 모두 남으므로
+                   지금 보고 있는 달이 아니어도 무엇을 골랐는지 보인다.
+                ⚠ 42칸 고정 격자라 달을 옮겨도 창 높이가 흔들리지 않는다 */}
+            <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:7,
+              padding:'8px 9px',marginBottom:8}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'center',
+                gap:8,marginBottom:6}}>
+                {[['‹',-1],['›',1]].map(([mark,n],i)=>(
+                  <Fragment key={mark}>
+                    {i===1&&(
+                      <strong style={{fontSize:12,minWidth:92,textAlign:'center'}}>
+                        {Number(pickMonth.slice(0,4))}년 {Number(pickMonth.slice(5,7))}월
+                      </strong>
+                    )}
+                    <button onClick={()=>setPickMonth(m=>shiftMonth(m,n))}
+                      style={{padding:'2px 9px',borderRadius:6,border:'1px solid #e5e7eb',
+                        background:'#fff',cursor:'pointer',fontSize:13,color:'#374151'}}>{mark}</button>
+                  </Fragment>
+                ))}
+                <button onClick={()=>setPickMonth(today().slice(0,7))}
+                  style={{marginLeft:6,padding:'2px 9px',borderRadius:6,border:'1px solid #e5e7eb',
+                    background:'#fff',cursor:'pointer',fontSize:11,color:'#6b7280'}}>오늘</button>
               </div>
-            )}
+              {/* touchAction:'none' 이 없으면 손가락으로 끌 때 화면이 함께 밀린다.
+                  userSelect:'none' 이 없으면 끌 때 날짜 숫자가 파랗게 잡힌다. */}
+              <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:2,
+                touchAction:'none',userSelect:'none'}}>
+                {['월','화','수','목','금','토','일'].map((w,i)=>(
+                  <div key={w} style={{textAlign:'center',fontSize:10,fontWeight:700,padding:'2px 0',
+                    color:i===5?'#2563eb':i===6?'#dc2626':'#6b7280'}}>{w}</div>
+                ))}
+                {monthGridDays(pickMonth).map(d=>{
+                  // 끌고 있는 동안에는 «끝난 뒤의 모습» 을 미리 보여 준다
+                  const on=dragSet.has(d)?drag.mode==='add':dates.includes(d)
+                  const dim=!isSameMonth(d,pickMonth)
+                  const rest=isRest(d)
+                  const isToday=d===today()
+                  const holiday=holidayMap.get(d)
+                  return(
+                    <div key={d}
+                      onPointerDown={e=>cellDown(e,d)}
+                      onPointerEnter={()=>cellEnter(d)}
+                      title={(holiday?holiday+' · ':'')
+                        +`${mdLabel(d)} (${dayName(d)}) — 누르면 ${on?'빠집니다':'들어갑니다'}`}
+                      style={{textAlign:'center',padding:'6px 0',borderRadius:5,fontSize:12,
+                        fontWeight:on?700:(isToday?700:500),
+                        cursor:canEdit?'pointer':'default',
+                        background:on?(rest?'#b45309':'#1a56db'):(rest?'#fff7ed':'#fff'),
+                        color:on?'#fff':(dim?'#d1d5db':(rest?'#b45309':'#374151')),
+                        border:'1px solid '+(isToday?'#1a56db':'#f3f4f6'),
+                        opacity:(dim&&!on)?.55:1}}>
+                      {Number(d.slice(8,10))}
+                    </div>
+                  )
+                })}
+              </div>
+              <label style={{display:'flex',alignItems:'center',gap:5,marginTop:7,
+                fontSize:11,color:'#374151',cursor:'pointer',flexWrap:'wrap'}}>
+                <input type="checkbox" checked={skipRest}
+                  onChange={e=>setSkipRest(e.target.checked)} style={{cursor:'pointer'}}/>
+                끌 때 <strong>주말·공휴일 건너뛰기</strong>
+                <span style={{color:'#6b7280'}}>— 한 칸만 누르면 쉬는 날도 그대로 들어갑니다</span>
+              </label>
+            </div>
             {dates.length===0
               ?<div style={{fontSize:11,color:'#92400e'}}>날짜를 하나 이상 골라 주세요.</div>
               :<div style={{display:'flex',gap:5,flexWrap:'wrap'}}>
