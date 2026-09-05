@@ -511,6 +511,82 @@ function notifySettlement({ ym, rows, actor, sender, onSenderFail }) {
   }
 }
 
+// ── 하이패스 건별 안내 (2026-09-06 지시) ─────────────────────
+// 정산 «월 안내» 와 다르다 — 그것은 사람별 «합계» 고, 이것은 «낱건» 이다.
+// 직원이 건마다 「맞다 / 틀리다」 를 답해야 하므로 낱건으로 보낸다(지시 2·5번).
+const DIR_TEXT = { deposit: '회사에 입금', refund: '회사가 환급', company: '회사 부담' }
+
+function buildHipass({ ym, worker, rows, actorName, actorEmail, sender }) {
+  const c = cfg()
+  const label = `${ym.slice(0, 4)}년 ${Number(ym.slice(5, 7))}월`
+  const sumOf = k => rows.filter(r => r.direction === k)
+    .reduce((s, r) => s + Number(r.amount || 0), 0)
+  const deposit = sumOf('deposit')
+  const refund = sumOf('refund')
+  const total = rows.reduce((s, r) => s + Number(r.amount || 0), 0)
+
+  // 제목이 «무엇을 해야 하는지» 를 먼저 말한다 — 입금할 것이 있으면 그것부터.
+  const head = deposit > 0 ? `입금 ${won(deposit)}원`
+    : refund > 0 ? `환급 ${won(refund)}원`
+      : `${rows.length}건 확인`
+  const subject = `[하이패스] ${label} · ${worker.name} · ${head}`
+
+  const body = [`${worker.name} 님, ${label} 하이패스 통행 내역입니다.`, '']
+  body.push('■ 통행 내역')
+  for (const r of rows) {
+    const car = `${r.vehicle_name || ''}${r.vehicle_plate ? ` ${r.vehicle_plate}` : ''}`.trim()
+    body.push(`    ${r.used_date}  ${r.gate_in || '-'} → ${r.gate_out || '-'}`
+      + `  ${won(r.amount)}원  [${DIR_TEXT[r.direction] || '확인 필요'}]`
+      + (car ? `  ${car}` : ''))
+  }
+  body.push('', `    합계 ${rows.length}건 · ${won(total)}원`, '')
+  if (deposit > 0) {
+    body.push(`■ 회사에 입금하실 금액 — ${won(deposit)}원`,
+      '    법인차량을 «개인 사용» 하신 통행입니다.', '')
+  }
+  if (refund > 0) {
+    body.push(`■ 회사가 돌려드릴 금액 — ${won(refund)}원`,
+      '    «자차» 로 업무 다녀오시며 내신 통행료입니다.', '')
+  }
+
+  // 🔑 「무엇을 해 주셔야 하는지」 를 반드시 적는다. 이 메일의 목적이 그것이다.
+  body.push('■ 하실 일',
+    '    [스케줄] 탭 → [💰 정산] → 「내 하이패스」 에서',
+    '    맞으면 [정산 청구] 를, 틀린 것이 있으면 [정정 요청] 을 눌러 주십시오.',
+    '    정정 요청에는 어디가 잘못됐는지 적어 주시면 대표이사가 확인합니다.', '',
+    'http://vitron-nas:8082', '', '— 바이트론 이앤에스 업무 현황 대시보드')
+
+  return {
+    ...fromOf({ sender, actorName, actorEmail }),
+    // 🔴 시험 중이면 «직원에게 갈 것도» 시험 주소로 돌린다 (정산 안내와 같다)
+    to: c.testTo || worker.email || c.toBoss,
+    subject,
+    text: body.join('\n'),
+  }
+}
+
+// 사람마다 «한 통씩». ⚠ 부르는 쪽은 await 하지 않아도 된다 — 보낸 자취는 이미 DB 에 있다.
+function notifyHipass({ ym, worker, rows, actor, sender, onSenderFail }) {
+  try {
+    if (!isEnabled()) return
+    const list = (Array.isArray(rows) ? rows : [rows]).filter(Boolean)
+    if (!list.length) return
+    // 🔴 받을 주소가 없으면 «공용 주소로 보내지 않는다» — 남의 통행 내역이 섞인다.
+    //    화면은 no_email 로 이 사실을 따로 알려 준다.
+    if (!worker?.email && !cfg().testTo) {
+      console.error(`[mail] notifyHipass skip :: ${worker?.name} 주소 없음`)
+      return
+    }
+    send(buildHipass({
+      ym, worker, rows: list,
+      actorName: actor?.name || null, actorEmail: actor?.email || null,
+      sender: sender || null,
+    }), sender || null, onSenderFail || null)
+  } catch (e) {
+    console.error(`[mail] notifyHipass error :: ${e.message}`)
+  }
+}
+
 // ── 여러 날짜를 한 통으로 묶기 ───────────────────────────────
 // 화면이 「출장 3일」을 넣으면 계획을 «날짜마다 따로» 저장한다(addPlan 반복).
 // 그대로 두면 메일이 세 통 간다. 화면이 한 번의 등록마다 붙여 보내는
@@ -718,4 +794,5 @@ function notifyPurchase({ kind, actor, purchase, to, reason, sender, onSenderFai
 }
 
 module.exports = { notify, notifyDone, notifyVacation, notifyPurchase, notifySettlement,
+  notifyHipass,
   isEnabled, lastResult, isVehiclePlan, vacDays, verifyLogin, setAccount }

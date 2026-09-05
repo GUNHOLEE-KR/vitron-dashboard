@@ -27,7 +27,10 @@ import { getMeetings, addMeeting, updateMeeting,
 import { getHipass, uploadHipass, claimHipass, addManualHipass,
          readFileAsBase64, getHipassSummary, getHipassByWorker,
          removeHipassUpload, hipassFileUrl, tollsToCsv,
-         bulkRemoveHipass } from './repositories/hipassRepo'
+         bulkRemoveHipass,
+         // 정산 흐름 (2026-09-06) — 정리 → 알림 → 직원 확인 → 확정
+         getHipassRoster, notifyHipassTolls, respondHipass,
+         finalizeHipass } from './repositories/hipassRepo'
 // 🔑 스케줄 달력은 «사내 포털과 함께 쓰는» 조각이라 여기 두지 않는다 (2026-08-26).
 //    각자 그리면 언젠가 한쪽만 고쳐 두 화면이 어긋난다.
 //    ⚠ CLAUDE.md 의 「App.jsx 단일 파일 유지」에 대한 예외 — 사용자 승인.
@@ -4637,6 +4640,9 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
   const [loading,setLoading]=useState(false)
   const [busy,setBusy]=useState(false)
   const [tollView,setTollView]=useState(null)   // {worker, rows} — 하이패스 근거 보기
+  // 하이패스 카드(정리·내 하이패스)를 다시 읽게 하는 신호. 확정·반려로 금액이 바뀌면
+  // 정산 표도 함께 다시 읽어야 하므로 한 곳에서 올린다.
+  const [hipassTick,setHipassTick]=useState(0)
 
   // 🔑 정산은 «사람별»이다 (2026-09-03). 종전에는 한 명만 확정돼도 화면 전체가
   //    「정산 완료」로 보였다 — 그 착시 때문에 남은 사람의 정산이 잊히기 쉬웠다.
@@ -4675,8 +4681,26 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
   // workerId 를 주면 그 사람만, 주지 않으면 아직 손대지 않은 전원을 한꺼번에 처리한다.
   // 1차 — 금액을 박제하고 실적을 잠근 뒤 각 직원에게 «안내 메일» 이 나간다.
   async function notify(workerId,workerName){
+    // 🔑 하이패스가 아직 정리 중이면 «경고만» 하고 진행은 막지 않는다 (사용자 결정).
+    //    한 건 때문에 월말 정산 전체가 멈추면 안 되기 때문이다.
+    let warn=''
+    try{
+      const r=await getHipassRoster(ym)
+      const rows=r.workers.filter(w=>!workerId||Number(w.worker_id)===Number(workerId))
+      const pending=rows.reduce((s,w)=>s+(w.count-w.confirmed-w.rejected),0)
+      const disputed=rows.reduce((s,w)=>s+w.disputed,0)
+      // 미배정은 «그 사람» 을 특정할 수 없으므로 전원 확정일 때만 센다
+      const unassigned=workerId?0:r.unassigned.length
+      if(pending||disputed||unassigned){
+        warn='⚠ 하이패스가 아직 정리 중입니다\n'
+          +(pending?`    · 확정 안 된 통행 ${pending}건\n`:'')
+          +(disputed?`    · 정정 요청 ${disputed}건\n`:'')
+          +(unassigned?`    · 아무도 안 가져간 통행 ${unassigned}건 — 청구가 빠질 수 있습니다\n`:'')
+          +'    그대로 보내셔도 됩니다.\n\n'
+      }
+    }catch{ /* 못 읽어도 정산까지 막지는 않는다 */ }
     const who=workerId?`${workerName} 님의 ${ym} 정산`:`${ym} 정산 (아직 안 보낸 ${openCount}명)`
-    if(!confirm(`${who} 1차 안내를 보낼까요?\n\n· 금액이 이 시점 값으로 저장됩니다\n· 그 실적은 잠깁니다 (대표이사는 그대로 고칠 수 있습니다)\n· 각 직원에게 «자기 정산 내역» 메일이 갑니다\n\n입금할 금액이 없는 분은 그 자리에서 완료됩니다.`))return
+    if(!confirm(`${warn}${who} 1차 안내를 보낼까요?\n\n· 금액이 이 시점 값으로 저장됩니다\n· 그 실적은 잠깁니다 (대표이사는 그대로 고칠 수 있습니다)\n· 각 직원에게 «자기 정산 내역» 메일이 갑니다\n\n입금할 금액이 없는 분은 그 자리에서 완료됩니다.`))return
     try{ setBusy(true); const r=await notifySettlement(ym,workerId)
       const closed=r.closed?.length?` · 입금액 없어 바로 완료: ${r.closed.join(', ')}`:''
       showToast(`1차 안내 — ${r.names?.join(', ')||`${r.workers}명`} · 실적 ${r.locked}건 잠금${closed}`)
@@ -4856,6 +4880,18 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
           여기에 있으면 «올리고 → 실적에 붙이고 → 확정» 이 한 화면에서 이어진다.
           ⚠ 실적이 0건인 달에도 보여야 한다 — 명세를 먼저 올려야 실적을 채울 수 있다. */}
       {data&&<div style={{marginBottom:16}}><HipassUploader ym={ym} me={me} showToast={showToast}/></div>}
+
+      {/* ── 하이패스 정산 흐름 (2026-09-06 신설) ──────────────
+          ② 관리자 정리 → ③ 메일 → ④ 직원 확인 → ⑤ 확정.
+          🔑 아래 「정산 확정」(⑥) 앞에 두어 «순서대로 눈에 들어오게» 한다. */}
+      {data&&<div style={{marginBottom:16}}>
+        <HipassRoster ym={ym} showToast={showToast} refresh={hipassTick}
+          onChanged={()=>{ setHipassTick(t=>t+1); load(ym) }}/>
+      </div>}
+      {data&&<div style={{marginBottom:16}}>
+        <MyHipass ym={ym} me={me} showToast={showToast} refresh={hipassTick}
+          onChanged={()=>{ setHipassTick(t=>t+1); load(ym) }}/>
+      </div>}
 
       {data&&data.actual_count===0
         ?<Card title={`${ym} 정산`}>
@@ -6559,6 +6595,72 @@ const TOLL_HINTS={
            desc:'그날 이 차로 등록된 실적이 없습니다 — 출퇴근·개인 용도로 보입니다.'},
 }
 
+// ── 통행 낱건의 «상태» — 흐름의 어디까지 왔는지 (2026-09-06 신설) ──
+const WORKER_STATES={
+  claimed :{label:'본인 확인',color:'#047857',bg:'#ecfdf5',bd:'#a7f3d0'},
+  disputed:{label:'정정 요청',color:'#b91c1c',bg:'#fef2f2',bd:'#fecaca'},
+}
+const FINAL_STATES={
+  confirmed:{label:'확정',color:'#1a56db',bg:'#eff6ff',bd:'#bfdbfe'},
+  rejected :{label:'반려',color:'#6b7280',bg:'#f3f4f6',bd:'#e5e7eb'},
+}
+// 돈의 «방향». 정산 계산식과 같은 낱말을 쓴다 — 서버의 tollDirection 과 짝이다.
+const DIRECTIONS={
+  deposit:{label:'입금',color:'#b45309',bg:'#fffbeb',bd:'#fde68a',desc:'직원이 회사에 입금'},
+  refund :{label:'환급',color:'#047857',bg:'#ecfdf5',bd:'#a7f3d0',desc:'회사가 직원에게 환급'},
+  company:{label:'회사 부담',color:'#1a56db',bg:'#eff6ff',bd:'#bfdbfe',desc:'회사 비용 — 정산에 잡히지 않습니다'},
+}
+function Pill({s,title}){
+  if(!s) return null
+  return(
+    <span title={title||s.desc}
+      style={{display:'inline-block',padding:'1px 7px',borderRadius:10,fontSize:10,
+        fontWeight:700,color:s.color,background:s.bg,border:'1px solid '+s.bd}}>{s.label}</span>
+  )
+}
+
+// 「비고」 를 대신하는 «그날 그 사람의 일정» (2026-09-06 지시 4번).
+// 🔑 실적이 없는 날은 «계획» 이 오고, 그때는 「(계획)」 을 붙여 구분한다 —
+//    아직 안 적은 것과 실제로 한 것을 같은 글씨로 보이면 안 된다.
+// ⚠ 개인 사용은 장소·목적을 «애초에 저장하지 않는다»(사생활) — 「개인 사용」 으로만 나온다.
+function DaySchedule({rows}){
+  const list=(rows||[]).filter(w=>(w.items||[]).length>0)
+  if(list.length===0) return <span style={{color:'#9ca3af',fontSize:10}}>일정 없음</span>
+  return(
+    <div style={{fontSize:10,lineHeight:1.6}}>
+      {list.map(w=>(
+        <div key={w.worker_id}>
+          <strong style={{color:'#374151'}}>{w.worker_name}</strong>{' '}
+          {w.items.map((it,i)=>{
+            const txt=it.use_type==='vacation'?`🌴 ${it.vacation_type||'휴가'}`
+              :it.use_type==='personal'?'개인 사용'
+                :[it.place,it.purpose].filter(Boolean).join(' · ')||'업무'
+            return(
+              <span key={i} style={{color:it.source==='plan'?'#9a3412':'#6b7280'}}>
+                {i>0&&' / '}{txt}
+                {it.source==='plan'&&<span style={{fontWeight:700}}> (계획)</span>}
+              </span>
+            )
+          })}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// 「출퇴근할인」·「손으로 넣음」 — 걷어낼 줄을 찾는 단서다.
+// 🔑 「비고」 열을 없애면서 사라질 뻔했다. 열이 아니라 «대조» 옆의 딱지로 옮겨 살렸다.
+function TollMarks({r}){
+  const commute=String(r.note||'').includes('출퇴근')
+  if(!r.manual&&!commute) return null
+  return(
+    <span style={{marginLeft:6,fontSize:10,fontWeight:700,
+      color:r.manual?'#7c3aed':'#b45309'}}>
+      {r.manual?'손으로 넣음':'출퇴근할인'}
+    </span>
+  )
+}
+
 function HipassTable({ym,me,showToast,onChanged,refresh}){
   const [rows,setRows]=useState(null)
   const [err,setErr]=useState('')
@@ -6672,12 +6774,14 @@ function HipassTable({ym,me,showToast,onChanged,refresh}){
             <th style={{...thTop,textAlign:'left'}}>구간</th>
             <th style={thTop}>금액</th>
             <th style={{...thTop,textAlign:'left'}}>대조 — 그날 이 차를 쓴 실적</th>
-            <th style={{...thTop,textAlign:'left'}}>비고</th>
+            {/* 「비고」 를 걷어내고 그 자리에 넣었다 (2026-09-06 지시 4번) */}
+            <th style={{...thTop,textAlign:'left'}}>당일 스케줄</th>
+            <th style={thTop}>메일</th>
             <th style={{...thTop,textAlign:'left'}}>가져간 사람</th>
           </tr></thead>
           <tbody>
             {list.map(r=>{
-              const commute=String(r.note||'').includes('출퇴근')
+              // 「출퇴근할인」 판정은 TollMarks 안으로 옮겼다 — 쓰는 곳이 거기 하나다
               const hint=TOLL_HINTS[r.hint]||TOLL_HINTS.none
               return(
                 <tr key={r.id} style={{background:picked.has(r.id)?'#eff6ff':'#fff'}}>
@@ -6713,19 +6817,30 @@ function HipassTable({ym,me,showToast,onChanged,refresh}){
                         ↩ {r.card_owner_name||'주 사용자'} 님께 대납 지급
                       </div>
                     )}
+                    {/* 🔑 「출퇴근할인」·「손으로 넣음」 은 «비고» 열이 없어져도 남아야 한다 —
+                        걷어낼 줄을 찾는 단서이기 때문이다. 여기로 옮겼다. */}
+                    <TollMarks r={r}/>
                   </td>
-                  <td style={{...tdS,textAlign:'left',fontSize:10,color:'#6b7280'}}>
-                    {r.manual
-                      ?<span style={{color:'#7c3aed',fontWeight:700}}>손으로 넣음</span>
-                      // 🔑 출퇴근할인은 «회사와 무관한» 통행일 가능성이 크다. 눈에 띄게 둔다 —
-                      //    걷어낼 대상을 찾는 것이 이 표의 쓸모다.
-                      :commute?<span style={{color:'#b45309',fontWeight:700}}>출퇴근할인</span>
-                        :(r.note||'')}
+                  <td style={{...tdS,textAlign:'left'}}>
+                    <DaySchedule rows={r.day_schedule}/>
+                  </td>
+                  {/* 「보냈는지」 를 보여야 같은 사람에게 두 번 보내지 않는다 (지시 3번) */}
+                  <td style={{...tdS,fontSize:10}}>
+                    {r.notified_at
+                      ?<span style={{color:'#047857',fontWeight:700}}
+                        title={new Date(r.notified_at).toLocaleString('ko-KR')}>
+                        ✉ {String(r.notified_at).slice(5,10)}
+                      </span>
+                      :<span style={{color:'#9ca3af'}}>-</span>}
                   </td>
                   <td style={{...tdS,textAlign:'left'}}>
                     {r.claimed_worker_name
                       ?<span style={{color:'#065f46',fontWeight:700}}>{r.claimed_worker_name}</span>
                       :<span style={{color:'#9ca3af'}}>-</span>}
+                    <div style={{display:'flex',gap:3,marginTop:2,flexWrap:'wrap'}}>
+                      <Pill s={WORKER_STATES[r.worker_state]} title={r.worker_note||undefined}/>
+                      <Pill s={FINAL_STATES[r.final_state]}/>
+                    </div>
                   </td>
                 </tr>
               )
@@ -6753,6 +6868,441 @@ function HipassTable({ym,me,showToast,onChanged,refresh}){
         💡 지운 줄은 <strong>같은 파일을 다시 올리면 되살아납니다.</strong>
       </div>
     </div>
+  )
+}
+
+// 하이패스 «정리» — 직원별 · 차량별 · 미배정 (2026-09-06 지시 1·2·3·6번)
+// ════════════════════════════════════════════════════════════
+// 🔑 여태 «직원별» 은 실적에 붙은 뒤에야 보였다(by-worker 가 INNER JOIN). 그래서
+//    관리자가 «붙기 전에» 정리할 자리가 없었고 기능들이 서로 이어지지 않았다(지시 7번).
+// 🔑 미배정은 «대신 붙여 주지 않는다» (사용자 결정) — 그 직원에게 실적 입력을 요청한다.
+//    통행에 사람을 직접 달면 금액의 정본이 실적과 둘로 갈라진다.
+function HipassRoster({ym,showToast,onChanged,refresh}){
+  const [data,setData]=useState(null)
+  const [view,setView]=useState('worker')          // worker / vehicle / unassigned
+  const [open,setOpen]=useState(()=>new Set())     // 펼쳐 둔 직원·차량
+  const [picked,setPicked]=useState(()=>new Set())
+  const [busy,setBusy]=useState(false)
+
+  const load=async()=>{
+    try{ setData(await getHipassRoster(ym)); setPicked(new Set()) }
+    catch{ setData(null) }
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
+  useEffect(()=>{ load() },[ym,refresh])
+
+  if(!data) return null
+  // 정리는 «관리자 또는 대표이사» 의 몫이다. 직원은 아래 「내 하이패스」 를 본다.
+  if(!data.can_approve&&data.me?.role!=='admin') return null
+  if(data.workers.length===0&&data.unassigned.length===0) return null
+
+  const won=n=>Number(n||0).toLocaleString()
+  const toggleOpen=k=>setOpen(p=>{const n=new Set(p); n.has(k)?n.delete(k):n.add(k); return n})
+  const toggle=id=>setPicked(p=>{const n=new Set(p); n.has(id)?n.delete(id):n.add(id); return n})
+  const allTolls=[...data.workers.flatMap(w=>w.days.flatMap(d=>d.tolls)),...data.unassigned]
+  const pickedRows=allTolls.filter(t=>picked.has(t.id))
+  const pickedSum=pickedRows.reduce((s,t)=>s+Number(t.amount||0),0)
+
+  // ③ 골라서 그 직원에게 — 사람마다 한 통이다
+  async function sendMail(){
+    if(picked.size===0){ showToast('보낼 통행을 골라 주세요'); return }
+    const names=[...new Set(pickedRows.map(t=>t.claimed_worker_name).filter(Boolean))]
+    const already=pickedRows.filter(t=>t.notified_at).length
+    const noOwner=pickedRows.filter(t=>!t.claimed_worker_id).length
+    if(!confirm(`고른 ${picked.size}건 · ${won(pickedSum)}원을\n`
+      +`${names.join(', ')||'해당 직원'} 님께 메일로 보낼까요?\n\n`
+      +'· 사람마다 한 통씩 갑니다\n'
+      +(already?`⚠ 그 가운데 ${already}건은 «이미 보낸» 것입니다 — 다시 갑니다\n`:'')
+      +(noOwner?`⚠ ${noOwner}건은 실적에 붙지 않아 보낼 수 없습니다\n`:'')))return
+    try{
+      setBusy(true)
+      const r=await notifyHipassTolls([...picked])
+      const noMail=r.sent.filter(s=>s.no_email).map(s=>s.worker_name)
+      showToast(`${r.sent.map(s=>`${s.worker_name} ${s.count}건`).join(' · ')} 보냈습니다`
+        +(r.skipped?.length?` · ${r.skipped.length}건은 실적이 없어 못 보냈습니다`:'')
+        // 🔴 주소가 없으면 메일은 «안 간다». 숨기면 보낸 줄 알고 넘어간다.
+        +(noMail.length?` · ⚠ 메일 주소 없음: ${noMail.join(', ')}`:''))
+      // onChanged 가 refresh 를 올려 이 카드까지 다시 읽는다 — 둘 다 부르면 같은 조회를 두 번 한다
+      if(onChanged) onChanged(); else await load()
+    }catch(e){ showToast('보내지 못했습니다: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
+  // ⑤ 대표이사의 최종 판정
+  async function finalize(state){
+    if(picked.size===0){ showToast('처리할 통행을 골라 주세요'); return }
+    const word={confirmed:'확정',rejected:'반려',pending:'되돌리기'}[state]
+    const attached=pickedRows.filter(t=>t.actual_id).length
+    if(!confirm(`고른 ${picked.size}건 · ${won(pickedSum)}원을 «${word}» 할까요?\n\n`
+      // 🔴 반려는 «실적에서도 뗀다» — 안 떼면 「빼라고 했는데 금액엔 남는」 상태가 된다
+      +(state==='rejected'
+        ?`🔴 반려하면 실적에서도 떼어 냅니다 (${attached}건).\n`
+         +'   그만큼 그 직원의 정산 금액이 줄어듭니다.\n'
+        :'')))return
+    try{
+      setBusy(true)
+      const r=await finalizeHipass([...picked],state)
+      showToast(`${word} ${r.updated}건`+(r.detached?` · 실적에서 ${r.detached}건 떼어 냈습니다`:''))
+      // onChanged 가 refresh 를 올려 이 카드까지 다시 읽는다 — 둘 다 부르면 같은 조회를 두 번 한다
+      if(onChanged) onChanged(); else await load()
+    }catch(e){ showToast(`${word} 실패: `+e.message) }
+    finally{ setBusy(false) }
+  }
+
+  const tabS=on=>({padding:'5px 12px',borderRadius:7,fontSize:12,fontWeight:700,
+    cursor:'pointer',border:'1px solid '+(on?'#1a56db':'#e5e7eb'),
+    background:on?'#eff6ff':'#fff',color:on?'#1a56db':'#374151'})
+  const actS=(color,on)=>({padding:'5px 12px',borderRadius:7,fontSize:12,fontWeight:700,
+    cursor:on?'pointer':'default',border:'1px solid '+(on?color:'#e5e7eb'),
+    background:'#fff',color:on?color:'#9ca3af'})
+  const emptyS={fontSize:12,color:'#6b7280',padding:'14px 4px',lineHeight:1.7}
+
+  // 낱건 한 줄 — 세 탭이 «같은 모양» 을 쓴다. 갈라 두면 한쪽만 고치게 된다.
+  const tollHead=whoLabel=>(
+    <thead><tr>
+      <th style={{...thS,width:34}}/>
+      <th style={thS}>날짜</th>
+      <th style={{...thS,textAlign:'left'}}>차량</th>
+      <th style={{...thS,textAlign:'left'}}>구간</th>
+      <th style={thS}>금액</th>
+      <th style={thS}>방향</th>
+      <th style={{...thS,textAlign:'left'}}>당일 스케줄</th>
+      <th style={thS}>{whoLabel}</th>
+    </tr></thead>
+  )
+  const tollRow=t=>{
+    // 아직 안 붙은 통행은 «후보» 를 보여 준다 — 누구에게 실적을 요청할지가 이것이다
+    const who=t.claimed_worker_name
+      ||[...new Set((t.day_actuals||[]).map(a=>a.worker_name).filter(Boolean))].join(', ')
+    return(
+      <tr key={t.id} style={{background:picked.has(t.id)?'#eff6ff':'#fff'}}>
+        <td style={{...tdS,width:34}}>
+          <input type="checkbox" checked={picked.has(t.id)} onChange={()=>toggle(t.id)}
+            style={{cursor:'pointer'}}/>
+        </td>
+        <td style={tdS}>{String(t.used_date).slice(5)}</td>
+        <td style={{...tdS,textAlign:'left'}}>
+          {t.vehicle_name}
+          {t.vehicle_kind==='own'&&<span style={{fontSize:10,color:'#7c3aed'}}> 자차</span>}
+        </td>
+        <td style={{...tdS,textAlign:'left'}}>{t.gate_in||'-'} → {t.gate_out||'-'}</td>
+        <td style={{...tdS,fontWeight:700}}>{won(t.amount)}원</td>
+        <td style={tdS}><Pill s={DIRECTIONS[t.direction]}/><TollMarks r={t}/></td>
+        <td style={{...tdS,textAlign:'left'}}><DaySchedule rows={t.day_schedule}/></td>
+        <td style={tdS}>
+          <div style={{fontSize:11,fontWeight:700,
+            color:t.claimed_worker_name?'#065f46':'#9a3412'}}>{who||'-'}</div>
+          <div style={{display:'flex',gap:3,justifyContent:'center',flexWrap:'wrap',marginTop:2}}>
+            {t.notified_at&&<span style={{fontSize:10,color:'#047857',fontWeight:700}}>✉</span>}
+            <Pill s={WORKER_STATES[t.worker_state]} title={t.worker_note||undefined}/>
+            <Pill s={FINAL_STATES[t.final_state]}/>
+          </div>
+        </td>
+      </tr>
+    )
+  }
+
+  return(
+    <Card title="🛣 하이패스 정리 — 누가 · 언제 · 얼마">
+      <div style={{display:'flex',gap:6,flexWrap:'wrap',alignItems:'center',marginBottom:10}}>
+        <button onClick={()=>setView('worker')} style={tabS(view==='worker')}>
+          직원별 ({data.workers.length})
+        </button>
+        <button onClick={()=>setView('vehicle')} style={tabS(view==='vehicle')}>
+          차량별 ({data.vehicles.length})
+        </button>
+        {/* 🔴 미배정이 남으면 청구가 조용히 빠진다 — 숫자를 눈에 띄게 둔다 */}
+        <button onClick={()=>setView('unassigned')}
+          style={{...tabS(view==='unassigned'),
+            ...(data.unassigned.length>0?{borderColor:'#fca5a5',color:'#dc2626'}:{})}}>
+          미배정 ({data.unassigned.length})
+        </button>
+        <div style={{flex:1}}/>
+        {picked.size>0&&(
+          <span style={{fontSize:11,fontWeight:700,color:'#1a56db'}}>
+            고른 것 {picked.size}건 · {won(pickedSum)}원
+          </span>
+        )}
+        <button onClick={sendMail} disabled={busy||picked.size===0}
+          style={actS('#1a56db',picked.size>0&&!busy)}>✉ 메일 보내기</button>
+        {data.can_approve&&<>
+          <button onClick={()=>finalize('confirmed')} disabled={busy||picked.size===0}
+            style={actS('#059669',picked.size>0&&!busy)}>확정</button>
+          <button onClick={()=>finalize('rejected')} disabled={busy||picked.size===0}
+            style={actS('#dc2626',picked.size>0&&!busy)}>반려</button>
+          <button onClick={()=>finalize('pending')} disabled={busy||picked.size===0}
+            style={actS('#6b7280',picked.size>0&&!busy)}>되돌리기</button>
+        </>}
+      </div>
+
+      {/* ── 직원별 — 「이 사람이 이 달에 얼마인가」 ── */}
+      {view==='worker'&&(data.workers.length===0
+        ?<div style={emptyS}>아직 실적에 붙은 통행이 없습니다. 「미배정」 탭을 보십시오.</div>
+        :<table style={{width:'100%',borderCollapse:'collapse'}}>
+          <thead><tr>
+            <th style={{...thS,textAlign:'left'}}>직원</th>
+            <th style={thS}>건수</th><th style={thS}>합계</th>
+            <th style={thS}>입금</th><th style={thS}>환급</th><th style={thS}>회사 부담</th>
+            <th style={thS}>메일</th><th style={thS}>본인 확인</th><th style={thS}>확정</th>
+          </tr></thead>
+          <tbody>
+            {data.workers.map(w=>{
+              const k='w'+w.worker_id
+              return(
+                <Fragment key={k}>
+                  <tr onClick={()=>toggleOpen(k)} style={{cursor:'pointer'}}>
+                    <td style={{...tdS,textAlign:'left',fontWeight:700}}>
+                      {open.has(k)?'▾':'▸'} {w.worker_name}
+                    </td>
+                    <td style={tdS}>{w.count}건</td>
+                    <td style={{...tdS,fontWeight:700}}>{won(w.total)}원</td>
+                    <td style={tdS}>{w.deposit?`${won(w.deposit)}원`:'-'}</td>
+                    <td style={tdS}>{w.refund?`${won(w.refund)}원`:'-'}</td>
+                    <td style={tdS}>{w.company?`${won(w.company)}원`:'-'}</td>
+                    <td style={tdS}>{w.notified}/{w.count}</td>
+                    <td style={tdS}>
+                      {/* 정정 요청이 하나라도 있으면 그것부터 보이게 한다 */}
+                      {w.disputed>0
+                        ?<span style={{color:'#b91c1c',fontWeight:700}}>정정 {w.disputed}건</span>
+                        :`${w.claimed}/${w.count}`}
+                    </td>
+                    <td style={tdS}>{w.confirmed}/{w.count}</td>
+                  </tr>
+                  {open.has(k)&&(
+                    <tr><td colSpan={9} style={{padding:0,background:'#f9fafb'}}>
+                      <table style={{width:'100%',borderCollapse:'collapse'}}>
+                        {tollHead('상태')}
+                        <tbody>{w.days.flatMap(d=>d.tolls).map(tollRow)}</tbody>
+                      </table>
+                    </td></tr>
+                  )}
+                </Fragment>
+              )
+            })}
+          </tbody>
+        </table>)}
+
+      {/* ── 차량별 — 「이 차가 그날 얼마 썼나」 ── */}
+      {view==='vehicle'&&(data.vehicles.length===0
+        ?<div style={emptyS}>이 달 통행 내역이 없습니다.</div>
+        :<table style={{width:'100%',borderCollapse:'collapse'}}>
+          <thead><tr>
+            <th style={{...thS,textAlign:'left'}}>차량</th>
+            <th style={thS}>건수</th><th style={thS}>합계</th><th style={thS}>미배정</th>
+          </tr></thead>
+          <tbody>
+            {data.vehicles.map(v=>{
+              const k='v'+v.vehicle_id
+              return(
+                <Fragment key={k}>
+                  <tr onClick={()=>toggleOpen(k)} style={{cursor:'pointer'}}>
+                    <td style={{...tdS,textAlign:'left',fontWeight:700}}>
+                      {open.has(k)?'▾':'▸'} {v.vehicle_name}
+                      <span style={{fontSize:10,color:'#6b7280',fontWeight:500}}>
+                        {v.vehicle_plate?` ${v.vehicle_plate}`:''}{v.vehicle_kind==='own'?' · 자차':''}
+                      </span>
+                      {/* 이 차의 통행료는 주 사용자 주머니에서 나간다 */}
+                      {v.hipass_personal_card&&(
+                        <div style={{fontSize:10,color:'#047857',fontWeight:700}}>
+                          ↩ {v.card_owner_name||'주 사용자'} 님 개인카드 — 대납 지급
+                        </div>
+                      )}
+                    </td>
+                    <td style={tdS}>{v.count}건</td>
+                    <td style={{...tdS,fontWeight:700}}>{won(v.total)}원</td>
+                    <td style={tdS}>
+                      {v.unclaimed
+                        ?<span style={{color:'#dc2626',fontWeight:700}}>
+                          {v.unclaimed}건 · {won(v.unclaimed_amount)}원
+                        </span>
+                        :<span style={{color:'#9ca3af'}}>없음</span>}
+                    </td>
+                  </tr>
+                  {open.has(k)&&(
+                    <tr><td colSpan={4} style={{padding:0,background:'#f9fafb'}}>
+                      <table style={{width:'100%',borderCollapse:'collapse'}}>
+                        <thead><tr>
+                          <th style={thS}>날짜</th><th style={thS}>건수</th>
+                          <th style={thS}>금액</th><th style={thS}>미배정</th>
+                        </tr></thead>
+                        <tbody>
+                          {v.days.map(d=>(
+                            <tr key={d.date}>
+                              <td style={tdS}>{String(d.date).slice(5)}</td>
+                              <td style={tdS}>{d.count}건</td>
+                              <td style={{...tdS,fontWeight:700}}>{won(d.amount)}원</td>
+                              <td style={tdS}>
+                                {d.unclaimed
+                                  ?<span style={{color:'#dc2626',fontWeight:700}}>{d.unclaimed}건</span>
+                                  :'-'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </td></tr>
+                  )}
+                </Fragment>
+              )
+            })}
+          </tbody>
+        </table>)}
+
+      {/* ── 미배정 — 🔴 청구가 조용히 빠지는 자리 ── */}
+      {view==='unassigned'&&(data.unassigned.length===0
+        ?<div style={emptyS}>남은 통행이 없습니다. 모두 누군가의 실적에 붙었습니다.</div>
+        :<>
+          <div style={{fontSize:11,color:'#9a3412',marginBottom:8,lineHeight:1.8}}>
+            🔴 <strong>여기 남은 것은 정산에 잡히지 않습니다.</strong> 법인차량 개인 사용분이
+            남아 있으면 청구가 조용히 빠집니다.<br/>
+            💡 <strong>관리자가 대신 붙이지 않습니다</strong> — 아래 「그날 이 차를 쓴 분」께
+            <strong> 실적 입력을 요청</strong>해 주십시오. 그분이 실적을 넣고 통행을 고르면
+            이 목록에서 사라집니다.<br/>
+            💡 출퇴근·개인 용도처럼 회사와 무관한 통행은 위 「불러온 내역」에서 골라 지우십시오.
+          </div>
+          <table style={{width:'100%',borderCollapse:'collapse'}}>
+            {tollHead('그날 이 차를 쓴 분')}
+            <tbody>{data.unassigned.map(tollRow)}</tbody>
+          </table>
+        </>)}
+
+      <div style={{marginTop:10,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
+        💡 <strong>차례</strong> — ① 명세 올리기 → ② 여기서 정리 → ③ 골라서 <strong>[✉ 메일 보내기]</strong>
+        → ④ 직원이 「내 하이패스」에서 <strong>정산 청구 / 정정 요청</strong>
+        → ⑤ 대표이사 <strong>[확정]</strong> → ⑥ 아래 <strong>월 정산 1차 안내</strong><br/>
+        🔴 <strong>[반려]</strong>는 실적에서도 떼어 냅니다 — 그만큼 정산 금액이 줄어듭니다.
+      </div>
+    </Card>
+  )
+}
+
+// 「내 하이패스」 — 직원이 자기 청구·입금 예정을 확인하는 자리 (2026-09-06 지시 5번)
+// ════════════════════════════════════════════════════════════
+// 🔑 정산 화면 «안» 에 둔다 (사용자 결정). 월 정산 금액과 같은 화면에서 보아야
+//    「이 금액이 어디서 나왔나」 가 바로 이어진다. 탭을 늘리지 않는 뜻도 있다.
+function MyHipass({ym,me,showToast,onChanged,refresh}){
+  const [data,setData]=useState(null)
+  const [picked,setPicked]=useState(()=>new Set())
+  const [busy,setBusy]=useState(false)
+
+  const load=async()=>{
+    try{ setData(await getHipassRoster(ym)); setPicked(new Set()) }
+    catch{ setData(null) }
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
+  useEffect(()=>{ load() },[ym,refresh])
+
+  if(!data||!me?.worker_id) return null
+  const mine=data.workers.find(w=>Number(w.worker_id)===Number(me.worker_id))
+  if(!mine) return null
+
+  const won=n=>Number(n||0).toLocaleString()
+  const tolls=mine.days.flatMap(d=>d.tolls)
+  const toggle=id=>setPicked(p=>{const n=new Set(p); n.has(id)?n.delete(id):n.add(id); return n})
+  // 확정된 건은 더 답할 것이 없다 — 고르지 못하게 한다
+  const answerable=tolls.filter(t=>t.final_state!=='confirmed')
+  const allPicked=answerable.length>0&&answerable.every(t=>picked.has(t.id))
+
+  async function respond(state){
+    if(picked.size===0){ showToast('건을 골라 주세요'); return }
+    let note=''
+    if(state==='disputed'){
+      // 🔑 사유가 없으면 정정 요청이 성립하지 않는다 — 서버도 막지만 여기서 먼저 묻는다
+      note=(prompt('어디가 잘못됐는지 적어 주십시오.\n(예: 9/12 건은 제가 간 것이 아닙니다)')||'').trim()
+      if(!note){ showToast('사유를 적어 주셔야 정정 요청이 됩니다'); return }
+    }
+    try{
+      setBusy(true)
+      // ⚠ 서버가 «건별» 로 받는다. 한 번에 보내면 어느 건이 왜 막혔는지 알 수 없다.
+      let ok=0; const failed=[]
+      for(const id of picked){
+        try{ await respondHipass(id,state,note); ok++ }
+        catch(e){ failed.push(e.message) }
+      }
+      showToast(`${state==='claimed'?'정산 청구':'정정 요청'} ${ok}건`
+        +(failed.length?` · ${failed.length}건 실패 (${failed[0]})`:''))
+      // onChanged 가 refresh 를 올려 이 카드까지 다시 읽는다 — 둘 다 부르면 같은 조회를 두 번 한다
+      if(onChanged) onChanged(); else await load()
+    }finally{ setBusy(false) }
+  }
+
+  const btnS=(color,on)=>({padding:'6px 14px',borderRadius:7,fontSize:12,fontWeight:700,
+    cursor:on?'pointer':'default',border:'1px solid '+(on?color:'#e5e7eb'),
+    background:'#fff',color:on?color:'#9ca3af'})
+
+  return(
+    <Card title={`🛣 내 하이패스 — ${ym}`}>
+      <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:10,fontSize:12}}>
+        <span><strong>{mine.count}건</strong> · {won(mine.total)}원</span>
+        {mine.deposit>0&&<span style={{color:'#b45309',fontWeight:700}}>
+          회사에 입금 {won(mine.deposit)}원</span>}
+        {mine.refund>0&&<span style={{color:'#047857',fontWeight:700}}>
+          회사가 환급 {won(mine.refund)}원</span>}
+        {mine.company>0&&<span style={{color:'#6b7280'}}>회사 부담 {won(mine.company)}원</span>}
+      </div>
+
+      <div style={{border:'1px solid #e5e7eb',borderRadius:8,overflow:'hidden'}}>
+        <table style={{width:'100%',borderCollapse:'collapse'}}>
+          <thead><tr>
+            <th style={{...thS,width:34}}>
+              <input type="checkbox" checked={allPicked}
+                onChange={()=>setPicked(allPicked?new Set():new Set(answerable.map(t=>t.id)))}
+                style={{cursor:'pointer'}}/>
+            </th>
+            <th style={thS}>날짜</th>
+            <th style={{...thS,textAlign:'left'}}>차량</th>
+            <th style={{...thS,textAlign:'left'}}>구간</th>
+            <th style={thS}>금액</th>
+            <th style={thS}>방향</th>
+            <th style={{...thS,textAlign:'left'}}>그날 내 일정</th>
+            <th style={thS}>상태</th>
+          </tr></thead>
+          <tbody>
+            {tolls.map(t=>{
+              const done=t.final_state==='confirmed'
+              return(
+                <tr key={t.id} style={{background:picked.has(t.id)?'#eff6ff':'#fff'}}>
+                  <td style={{...tdS,width:34}}>
+                    <input type="checkbox" checked={picked.has(t.id)} disabled={done}
+                      onChange={()=>toggle(t.id)}
+                      style={{cursor:done?'default':'pointer'}}/>
+                  </td>
+                  <td style={tdS}>{String(t.used_date).slice(5)}</td>
+                  <td style={{...tdS,textAlign:'left'}}>{t.vehicle_name}</td>
+                  <td style={{...tdS,textAlign:'left'}}>{t.gate_in||'-'} → {t.gate_out||'-'}</td>
+                  <td style={{...tdS,fontWeight:700}}>{won(t.amount)}원</td>
+                  <td style={tdS}><Pill s={DIRECTIONS[t.direction]}/></td>
+                  <td style={{...tdS,textAlign:'left'}}><DaySchedule rows={t.day_schedule}/></td>
+                  <td style={tdS}>
+                    <div style={{display:'flex',gap:3,justifyContent:'center',flexWrap:'wrap'}}>
+                      <Pill s={WORKER_STATES[t.worker_state]} title={t.worker_note||undefined}/>
+                      <Pill s={FINAL_STATES[t.final_state]}/>
+                      {t.worker_state==='none'&&t.final_state==='pending'&&
+                        <span style={{fontSize:10,color:'#9ca3af'}}>대답 전</span>}
+                    </div>
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{display:'flex',gap:8,marginTop:10,alignItems:'center',flexWrap:'wrap'}}>
+        <button onClick={()=>respond('claimed')} disabled={busy||picked.size===0}
+          style={btnS('#059669',picked.size>0&&!busy)}>✅ 정산 청구</button>
+        <button onClick={()=>respond('disputed')} disabled={busy||picked.size===0}
+          style={btnS('#dc2626',picked.size>0&&!busy)}>✋ 정정 요청</button>
+        {picked.size>0&&<span style={{fontSize:11,color:'#6b7280'}}>고른 것 {picked.size}건</span>}
+      </div>
+      <div style={{marginTop:8,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
+        💡 <strong>맞으면</strong> 골라서 [정산 청구] 를, <strong>틀린 것이 있으면</strong> [정정 요청] 과 함께
+        어디가 잘못됐는지 적어 주십시오. 대표이사가 보고 확정하거나 빼 드립니다.<br/>
+        💡 <strong>입금</strong>은 법인차량을 개인 사용하신 통행, <strong>환급</strong>은 자차로 업무 다녀오신 통행입니다.
+        「회사 부담」은 정산에 잡히지 않습니다.<br/>
+        ⚠ <strong>확정</strong>된 건은 더 고를 수 없습니다 — 고치실 것이 있으면 대표이사께 말씀해 주십시오.
+      </div>
+    </Card>
   )
 }
 

@@ -77,6 +77,22 @@ export const bulkRemoveHipass = (ids) => request('POST', '/bulk-delete', { ids }
 // 서버가 붙여 준 것(Content-Disposition)이 아니라 우리가 지어내야 한다.
 export const hipassFileUrl = (id) => `/api/hipass/uploads/${id}/file`
 
+// ── 정산 흐름 (2026-09-06 신설) ──
+// 올리기 → «정리 → 알림 → 직원 확인 → 확정» → 월 정산. 가운데 넷이 없어서
+// 기능이 따로 놀았다 (사용자 지적 7번).
+//
+// 🔑 roster 는 by-worker 와 다르다 — by-worker 는 «실적에 붙은 것» 만 주지만
+//    roster 는 «아직 안 붙은 것(unassigned)» 까지 함께 준다. 관리자가 정리할 자리다.
+export const getHipassRoster = (ym) => request('GET', `/roster?ym=${ym}`)
+// 고른 건을 그 직원에게 메일로. 사람마다 한 통이며 보낸 자취가 남는다.
+export const notifyHipassTolls = (ids) => request('POST', '/notify', { ids })
+// 직원의 대답 — 'claimed'(맞다) 또는 'disputed'(정정 요청 + 사유).
+export const respondHipass = (id, state, note) =>
+  request('POST', `/${id}/respond`, { state, note })
+// 대표이사의 최종 판정 — 'confirmed' · 'rejected' · 'pending'(되돌리기).
+// ⚠ 'rejected' 는 실적에서도 떼어 낸다(금액이 함께 줄어든다).
+export const finalizeHipass = (ids, state) => request('POST', '/finalize', { ids, state })
+
 // 인원별 근거를 CSV 로 만든다.
 // 🔴 맨 앞에 «BOM» 을 붙인다 — 없으면 엑셀이 UTF-8 을 못 알아채 한글이 통째로 깨진다.
 export function tollsToCsv(rows) {
