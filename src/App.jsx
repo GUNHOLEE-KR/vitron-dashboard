@@ -20,11 +20,12 @@ import { getPurchases, addPurchase, setPurchaseStatus,
          removePurchase } from './repositories/purchaseRepo'
 import { getAgenda, addAgenda, updateAgenda, removeAgenda,
          confirmAgenda, agendaToJira } from './repositories/agendaRepo'
-// ⚠ removeHipass 는 아직 화면에서 부르지 않는다 — 잘못 올린 건을 지우는 자리를
-//   만들 때 쓴다(서버·호출기는 이미 있다). 지금 넣으면 쓰지 않는 import 가 된다.
+// ⚠ 낱건 지우기는 «골라서 한꺼번에»(bulkRemoveHipass) 만 화면에 둔다.
+//   한 건짜리 removeHipass 는 서버·호출기에만 있고 화면에서는 부르지 않는다.
 import { getHipass, uploadHipass, claimHipass, addManualHipass,
          readFileAsBase64, getHipassSummary, getHipassByWorker,
-         removeHipassUpload, hipassFileUrl, tollsToCsv } from './repositories/hipassRepo'
+         removeHipassUpload, hipassFileUrl, tollsToCsv,
+         bulkRemoveHipass } from './repositories/hipassRepo'
 // 🔑 스케줄 달력은 «사내 포털과 함께 쓰는» 조각이라 여기 두지 않는다 (2026-08-26).
 //    각자 그리면 언젠가 한쪽만 고쳐 두 화면이 어긋난다.
 //    ⚠ CLAUDE.md 의 「App.jsx 단일 파일 유지」에 대한 예외 — 사용자 승인.
@@ -5908,6 +5909,148 @@ const FUEL_TYPES=['가솔린','디젤','LPG','전기']
 //   자차      본인이 자기 것을 올린다
 // 🔑 파일에 «어느 차인지» 가 없다. 처음 한 번만 차량을 고르면 카드번호를 기억해
 //    다음부터는 저절로 찾는다 — 그래서 고르개를 늘 띄우지 않고 «물어볼 때만» 띄운다.
+// 불러온 하이패스 내역을 «표로» 보여 주고 필요 없는 줄을 골라 지운다 (2026-09-04 지시).
+// ════════════════════════════════════════════════════════════
+// 🔑 올리기만 하면 무엇이 들어왔는지 알 수 없다. 출퇴근·개인 용도 통행이 섞여 들어오므로
+//    «정산 전에» 눈으로 보고 걷어낼 수 있어야 한다.
+// ⚠ 지운 줄은 «같은 파일을 다시 올리면 되살아난다» — 중복 판정이 파일의 번호가 아니라
+//   차량+거래일시+입구+출구+금액 이라, 지워진 자리는 비어 있는 것으로 보인다(지시대로).
+function HipassTable({ym,showToast,onChanged,refresh}){
+  const [rows,setRows]=useState(null)
+  const [err,setErr]=useState('')
+  const [picked,setPicked]=useState(()=>new Set())
+  const [busy,setBusy]=useState(false)
+  const [onlyFree,setOnlyFree]=useState(false)   // 아직 아무도 안 가져간 것만
+
+  const load=async()=>{
+    try{
+      const [y,m]=ym.split('-').map(Number)
+      const from=`${ym}-01`
+      const to=`${ym}-${String(new Date(y,m,0).getDate()).padStart(2,'0')}`
+      setRows(await getHipass({from,to}))
+      setPicked(new Set()); setErr('')
+    }catch(e){ setErr(e.message); setRows([]) }
+  }
+  // 🔑 refresh 는 «새 파일이 올라왔다» 는 신호다 — 이것이 없으면 올린 직후 표가 옛 목록을 보인다
+  // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
+  useEffect(()=>{ load() },[ym,refresh])
+
+  const list=(rows||[]).filter(r=>!onlyFree||!r.actual_id)
+  const sum=list.reduce((s,r)=>s+Number(r.amount||0),0)
+  const pickedRows=list.filter(r=>picked.has(r.id))
+  const pickedSum=pickedRows.reduce((s,r)=>s+Number(r.amount||0),0)
+  const toggle=id=>setPicked(p=>{const n=new Set(p); n.has(id)?n.delete(id):n.add(id); return n})
+  const allPicked=list.length>0&&list.every(r=>picked.has(r.id))
+
+  async function removePicked(){
+    if(picked.size===0){ showToast('지울 줄을 골라 주세요'); return }
+    const attached=pickedRows.filter(r=>r.actual_id).length
+    if(!confirm(`고른 ${picked.size}건을 지울까요?\n\n`
+      +(attached?`⚠ 그 가운데 ${attached}건은 «실적에 붙어 있어» 지워지지 않습니다.\n`
+                  +'  (그 실적의 주인이 실적 창에서 체크를 풀어야 합니다)\n\n':'')
+      +'같은 파일을 다시 올리면 지운 줄은 다시 들어옵니다.'))return
+    try{
+      setBusy(true)
+      const r=await bulkRemoveHipass([...picked])
+      showToast(`${r.removed}건을 지웠습니다`
+        +(r.blocked?.length?` · ${r.blocked.length}건은 남았습니다(실적에 붙어 있음)`:''))
+      // onChanged 가 refresh 를 올려 이 표까지 다시 읽는다 — 둘 다 부르면 같은 조회를 두 번 한다
+      if(onChanged) onChanged(); else await load()
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
+  if(err) return null      // 목록을 못 읽어도 올리기 카드까지 막지는 않는다
+  if(!rows) return null
+  if(rows.length===0) return null
+
+  // 머리글은 공용 thS 를 쓰되 «떠 있게» 만든다 — 줄이 수십 개라 스크롤하면 무엇의 값인지 잃는다
+  const thTop={...thS,position:'sticky',top:0,zIndex:1}
+
+  return(
+    <div style={{marginTop:12,paddingTop:12,borderTop:'1px solid #e5e7eb'}}>
+      <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginBottom:8}}>
+        <strong style={{fontSize:12}}>📋 불러온 내역 {list.length}건 · {sum.toLocaleString()}원</strong>
+        <label style={{display:'flex',alignItems:'center',gap:5,fontSize:11,color:'#374151',cursor:'pointer'}}>
+          <input type="checkbox" checked={onlyFree} onChange={e=>setOnlyFree(e.target.checked)}
+            style={{cursor:'pointer'}}/>
+          아직 안 가져간 것만
+        </label>
+        <div style={{flex:1}}/>
+        {picked.size>0&&(
+          <span style={{fontSize:11,fontWeight:700,color:'#1a56db'}}>
+            고른 것 {picked.size}건 · {pickedSum.toLocaleString()}원
+          </span>
+        )}
+        <button onClick={removePicked} disabled={busy||picked.size===0}
+          style={{padding:'5px 12px',borderRadius:7,fontSize:12,fontWeight:700,
+            cursor:picked.size?'pointer':'default',
+            border:'1px solid '+(picked.size?'#fca5a5':'#e5e7eb'),
+            background:'#fff',color:picked.size?'#dc2626':'#9ca3af'}}>
+          {busy?'지우는 중…':'고른 것 지우기'}
+        </button>
+      </div>
+
+      <div style={{maxHeight:340,overflowY:'auto',border:'1px solid #e5e7eb',borderRadius:8}}>
+        <table style={{width:'100%',borderCollapse:'collapse'}}>
+          <thead><tr>
+            <th style={{...thTop,width:34}}>
+              <input type="checkbox" checked={allPicked}
+                onChange={()=>setPicked(allPicked?new Set():new Set(list.map(r=>r.id)))}
+                style={{cursor:'pointer'}}/>
+            </th>
+            <th style={thTop}>날짜</th>
+            <th style={{...thTop,textAlign:'left'}}>차량</th>
+            <th style={{...thTop,textAlign:'left'}}>구간</th>
+            <th style={thTop}>금액</th>
+            <th style={{...thTop,textAlign:'left'}}>비고</th>
+            <th style={{...thTop,textAlign:'left'}}>가져간 사람</th>
+          </tr></thead>
+          <tbody>
+            {list.map(r=>{
+              const commute=String(r.note||'').includes('출퇴근')
+              return(
+                <tr key={r.id} style={{background:picked.has(r.id)?'#eff6ff':'#fff'}}>
+                  <td style={{...tdS,width:34}}>
+                    <input type="checkbox" checked={picked.has(r.id)} onChange={()=>toggle(r.id)}
+                      style={{cursor:'pointer'}}/>
+                  </td>
+                  <td style={tdS}>{String(r.used_date).slice(5)}</td>
+                  <td style={{...tdS,textAlign:'left'}}>
+                    {r.vehicle_name}
+                    {r.vehicle_kind==='own'&&<span style={{fontSize:10,color:'#7c3aed'}}> 자차</span>}
+                  </td>
+                  <td style={{...tdS,textAlign:'left'}}>{r.gate_in||'-'} → {r.gate_out||'-'}</td>
+                  <td style={{...tdS,fontWeight:700}}>{Number(r.amount).toLocaleString()}원</td>
+                  <td style={{...tdS,textAlign:'left',fontSize:10,color:'#6b7280'}}>
+                    {r.manual
+                      ?<span style={{color:'#7c3aed',fontWeight:700}}>손으로 넣음</span>
+                      // 🔑 출퇴근할인은 «회사와 무관한» 통행일 가능성이 크다. 눈에 띄게 둔다 —
+                      //    걷어낼 대상을 찾는 것이 이 표의 쓸모다.
+                      :commute?<span style={{color:'#b45309',fontWeight:700}}>출퇴근할인</span>
+                        :(r.note||'')}
+                  </td>
+                  <td style={{...tdS,textAlign:'left'}}>
+                    {r.claimed_worker_name
+                      ?<span style={{color:'#065f46',fontWeight:700}}>{r.claimed_worker_name}</span>
+                      :<span style={{color:'#9ca3af'}}>-</span>}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div style={{marginTop:6,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
+        💡 출퇴근·개인 용도처럼 <strong>회사와 무관한 통행</strong>은 골라서 지우십시오.
+        지우지 않아도 아무도 가져가지 않으면 정산에 잡히지 않습니다.<br/>
+        💡 <strong>실적에 붙은 줄은 지워지지 않습니다</strong> — 그 실적의 주인이 먼저 떼어야 합니다.<br/>
+        💡 지운 줄은 <strong>같은 파일을 다시 올리면 되살아납니다.</strong>
+      </div>
+    </div>
+  )
+}
+
 function HipassUploader({ym,showToast}){
   const [busy,setBusy]=useState(false)
   const [result,setResult]=useState(null)
@@ -5925,6 +6068,10 @@ function HipassUploader({ym,showToast}){
   //    이것이 없으면 매월 들어와도 빈 카드만 보여, 두 번 올리거나 아예 안 올리게 된다.
   const [sum,setSum]=useState(null)
   const loadSum=async()=>{ try{ setSum(await getHipassSummary(ym)) }catch{ setSum(null) } }
+  // 낱건 표에 「다시 읽어라」 를 알리는 신호. 현황과 표는 서로 다른 API 라 함께 흔들어야 한다.
+  // ⚠ 첫 화면에서는 올리지 않는다 — 표가 스스로 한 번 읽으므로 같은 조회를 두 번 하게 된다.
+  const [tick,setTick]=useState(0)
+  const reloadAll=()=>{ setTick(t=>t+1); loadSum() }
   // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
   useEffect(()=>{ loadSum() },[ym])
 
@@ -5936,7 +6083,7 @@ function HipassUploader({ym,showToast}){
       setBusy(true)
       const r=await removeHipassUpload(u.id)
       showToast(`파일과 통행 ${r.removed_tolls}건을 지웠습니다`)
-      loadSum()
+      reloadAll()
     }catch(e){ showToast(e.message) }
     finally{ setBusy(false) }
   }
@@ -5951,7 +6098,7 @@ function HipassUploader({ym,showToast}){
       setResult(r); setAskVehicle(null); setPickId('')
       showToast(`하이패스 ${r.inserted}건을 넣었습니다`+(r.duplicated?` (이미 있던 것 ${r.duplicated}건)`:''))
       loadVehicles()                  // 차량에 카드번호가 기억됐을 수 있다
-      loadSum()                       // 현황·파일 목록을 다시 센다
+      reloadAll()                     // 현황·파일 목록·낱건 표를 다시 센다
     }catch(e){
       // 🔑 「차량을 모르겠다」 는 실패가 아니라 «물어볼 것» 이다
       if(e.needVehicle){ setAskVehicle({card:e.card,base64,filename}); setResult(null) }
@@ -6105,6 +6252,9 @@ function HipassUploader({ym,showToast}){
           </div>
         </div>
       )}
+
+      {/* ── 불러온 낱건 표 — 여기서 «필요 없는 것을 걷어낸다» (2026-09-04 지시) ── */}
+      <HipassTable ym={ym} showToast={showToast} onChanged={reloadAll} refresh={tick}/>
 
       <div style={{marginTop:10,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
         💡 같은 파일을 다시 올려도 <strong>겹치지 않습니다</strong> — 이미 있는 통행은 건너뜁니다.<br/>

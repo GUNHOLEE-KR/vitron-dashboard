@@ -70,6 +70,9 @@ export const getHipassSummary = (ym) => request('GET', `/summary?ym=${ym}`)
 export const getHipassByWorker = (ym, workerId) =>
   request('GET', `/by-worker?ym=${ym}${workerId ? `&worker_id=${workerId}` : ''}`)
 export const removeHipassUpload = (id) => request('DELETE', `/uploads/${id}`)
+// 골라서 한꺼번에 지우기. 🔑 실적에 붙은 줄은 지워지지 않고 blocked 로 돌아온다 —
+// 지우면 남의 정산 금액이 조용히 줄어들기 때문이다.
+export const bulkRemoveHipass = (ids) => request('POST', '/bulk-delete', { ids })
 // 원본은 «주소» 로 연다. fetch 로 받아 Blob 을 만들 수도 있지만, 그러면 파일 이름을
 // 서버가 붙여 준 것(Content-Disposition)이 아니라 우리가 지어내야 한다.
 export const hipassFileUrl = (id) => `/api/hipass/uploads/${id}/file`

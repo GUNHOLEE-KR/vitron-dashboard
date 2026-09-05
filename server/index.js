@@ -2570,6 +2570,17 @@ async function canUploadFor(vehicle, session) {
   return '법인차량 명세는 관리자 또는 대표이사만 올릴 수 있습니다.'
 }
 
+// 이 차량의 통행을 «지울» 수 있는가 (2026-09-04 신설).
+// 🔑 올리는 권한보다 넓다 — 그 차의 «주 사용자» 도 지울 수 있어야 한다.
+//    법인차량이라도 하이패스가 주 사용자 개인카드인 차가 있어(QM6·카니발 24구 7598),
+//    자기 출퇴근 통행을 스스로 걷어낼 수 있어야 한다. 관리자만 지울 수 있게 두면
+//    남의 출퇴근 기록을 관리자가 대신 훑어 지워 주는 이상한 일이 된다.
+async function canDeleteTolls(vehicle, session) {
+  if (!vehicle) return '차량을 찾을 수 없습니다.'
+  if (Number(vehicle.assigned_worker_id) === Number(session?.workerId)) return null
+  return canUploadFor(vehicle, session)
+}
+
 // 엑셀 올리기 — 본문에 base64 로 싣는다(파일 업로드 미들웨어를 들이지 않기 위함).
 app.post('/api/hipass/upload', requireLogin, async (req, res) => {
   const b = req.body || {}
@@ -2891,11 +2902,62 @@ app.delete('/api/hipass/:id', requireLogin, async (req, res) => {
     const { rows } = await pool.query('SELECT * FROM hipass_tolls WHERE id = $1', [Number(req.params.id)])
     if (!rows.length) return res.status(404).json({ error: '해당 통행 내역을 찾을 수 없습니다.' })
     const { rows: v } = await pool.query('SELECT * FROM schedule_vehicles WHERE id = $1', [rows[0].vehicle_id])
-    const deny = await canUploadFor(v[0], req.session)
+    const deny = await canDeleteTolls(v[0], req.session)
     if (deny) return res.status(403).json({ error: deny })
     await pool.query('DELETE FROM hipass_tolls WHERE id = $1', [Number(req.params.id)])
     if (rows[0].actual_id) await retotalToll(rows[0].actual_id)
     res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 골라서 한꺼번에 지우기 (2026-09-04 지시).
+// 출퇴근·개인 용도 통행처럼 «회사와 무관한» 줄을 정산 전에 걷어내는 데 쓴다.
+//
+// 🔑 «실적에 붙은 것은 지우지 않는다.» 지우면 남의 정산 금액이 조용히 줄어든다.
+//    떼는 것은 그 실적의 주인이 실적 창에서 체크를 풀어 할 일이다.
+//    막힌 줄을 «조용히 건너뛰지 않고» 무엇이 왜 남았는지 돌려준다.
+// ⚠ 지운 통행은 «같은 파일을 다시 올리면 되살아난다» — 중복 판정이 파일의 번호가 아니라
+//   차량+거래일시+입구+출구+금액 이라, 지워진 자리는 비어 있는 것으로 보인다(지시대로).
+app.post('/api/hipass/bulk-delete', requireLogin, async (req, res) => {
+  const ids = Array.isArray(req.body?.ids)
+    ? req.body.ids.map(Number).filter(n => Number.isInteger(n) && n > 0) : []
+  if (!ids.length) return res.status(400).json({ error: '지울 통행을 골라 주세요.' })
+  try {
+    const { rows } = await pool.query(
+      `SELECT t.*, v.name AS vehicle_name, v.plate AS vehicle_plate,
+              v.kind AS vehicle_kind, v.owner_worker_id, v.assigned_worker_id,
+              w.name AS claimed_worker_name
+         FROM hipass_tolls t
+         LEFT JOIN schedule_vehicles v ON v.id = t.vehicle_id
+         LEFT JOIN schedule_actuals a  ON a.id = t.actual_id
+         LEFT JOIN workers w           ON w.id = a.worker_id
+        WHERE t.id = ANY($1::int[])`, [ids])
+
+    const removable = []
+    const blocked = []
+    // 차량마다 한 번만 판정한다 — 같은 차의 줄 서른 개에 권한 조회를 서른 번 하지 않는다.
+    const verdict = new Map()
+    for (const t of rows) {
+      if (!verdict.has(t.vehicle_id)) {
+        verdict.set(t.vehicle_id, await canDeleteTolls(
+          { kind: t.vehicle_kind, owner_worker_id: t.owner_worker_id,
+            assigned_worker_id: t.assigned_worker_id }, req.session))
+      }
+      const deny = verdict.get(t.vehicle_id)
+      if (deny) { blocked.push({ id: t.id, why: deny }); continue }
+      if (t.actual_id) {
+        blocked.push({ id: t.id,
+          why: `${t.claimed_worker_name || '누군가'} 님의 실적에 붙어 있습니다 — 먼저 떼어 주십시오.` })
+        continue
+      }
+      removable.push(t.id)
+    }
+    if (removable.length) {
+      await pool.query('DELETE FROM hipass_tolls WHERE id = ANY($1::int[])', [removable])
+    }
+    res.json({ ok: true, removed: removable.length, blocked })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
