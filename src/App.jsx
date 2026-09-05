@@ -1702,6 +1702,7 @@ function Dashboard({me,onLoggedOut}){
           defaultKind={planDialog.kind}
           workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
           places={places} vehicles={vehicles} showToast={showToast}
+          restDays={restDays} holidayMap={holidayMap}
           me={me} canEditOthers={canEditOthers}
           onClose={()=>setPlanDialog(null)}
           onCopy={p=>{ setClipboard(p); showToast('복사했습니다 — 달력에서 붙일 칸을 골라 주세요',4000) }}
@@ -5166,6 +5167,8 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
 // 새 계획은 날짜를 «여러 개» 고를 수 있다 — 같은 일정을 여러 날 넣는 일이 잦다.
 function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId,defaultVehicleId,
                      defaultTransport,defaultKind,workers,places,vehicles,
+                     // 기간으로 넣을 때 «쉬는 날» 을 빼려면 공휴일을 알아야 한다 (2026-09-05)
+                     restDays=new Set(),holidayMap=new Map(),
                      me,canEditOthers=false,
                      onClose,onSaved,onCopy,onOpenActual,showToast}){
   const isNew=!editing
@@ -5184,6 +5187,13 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   const [date,setDate]=useState(editing?.plan_date||defaultDate||today())
   // 새 계획에서 고른 날짜들. 수정 모드에서는 쓰지 않는다.
   const [dates,setDates]=useState(isNew?(defaultDate?[defaultDate]:[today()]):[])
+  // 기간으로 한꺼번에 넣기 (2026-09-05). 기본은 «주말·공휴일을 뺀다» —
+  // 출장·현장 일정이 대부분이라 그쪽이 훨씬 흔하다.
+  const [rangeOpen,setRangeOpen]=useState(false)
+  const [rangeFrom,setRangeFrom]=useState(defaultDate||today())
+  const [rangeTo,setRangeTo]=useState(defaultDate||today())
+  const [skipWeekend,setSkipWeekend]=useState(true)
+  const [skipHoliday,setSkipHoliday]=useState(true)
   const [slot,setSlot]=useState(src?.slot||'allday')
   const [useType,setUseType]=useState(src?.use_type||'business')
   // 유형 — 무엇을 등록하는가. 이것이 최상위이고 뒤 칸은 여기에 따라 달라진다.
@@ -5438,6 +5448,32 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
     setDates(prev=>[...new Set([...prev,...week])].sort())
   }
 
+  // 기간으로 한꺼번에 넣기 (2026-09-05 지시).
+  // ════════════════════════════════════════════════════════════
+  // 🔑 태그를 하나씩 누르는 방식만으로는 «2주 출장» 을 넣을 수 없다 — 열네 번 눌러야 한다.
+  // 🔑 주말·공휴일을 «뺄지 말지» 는 고르게 둔다. 주말 근무·휴일 근무가 실제로 있으므로
+  //    빼는 것을 강제하면 그 사람이 자기 일정을 넣지 못한다.
+  // ⚠ 쉬는 날 판정은 restDays 를 그대로 쓴다 — 달력이 회색으로 칠하는 기준과 «같아야»
+  //   한 화면에서 어긋나지 않는다(「그날 근무」로 돌린 날은 공휴일에서 빠진다).
+  function addRange(){
+    if(!rangeFrom||!rangeTo){ showToast('시작일과 종료일을 넣어 주세요'); return }
+    if(rangeFrom>rangeTo){ showToast('종료일이 시작일보다 빠릅니다'); return }
+    const out=[]
+    let skippedWeekend=0, skippedHoliday=0
+    // 상한을 둔다 — 손이 미끄러져 2030년을 넣으면 천 건이 만들어진다
+    for(let d=rangeFrom;d<=rangeTo&&out.length<200;d=addDays(d,1)){
+      const dow=new Date(d).getDay()
+      if(skipWeekend&&(dow===0||dow===6)){ skippedWeekend++; continue }
+      if(skipHoliday&&restDays.has(d)&&dow!==0&&dow!==6){ skippedHoliday++; continue }
+      out.push(d)
+    }
+    if(out.length===0){ showToast('넣을 날이 없습니다 — 뺀 조건을 확인해 주세요'); return }
+    setDates(prev=>[...new Set([...prev,...out])].sort())
+    const skipped=[skippedWeekend?`주말 ${skippedWeekend}일`:'',
+                   skippedHoliday?`공휴일 ${skippedHoliday}일`:''].filter(Boolean).join(' · ')
+    showToast(`${out.length}일을 넣었습니다${skipped?` (뺀 것 — ${skipped})`:''}`)
+  }
+
   async function handleDelete(){
     // 휴가를 지우는 것은 «신청을 물린다» 는 뜻이라 대표이사에게 취소 메일이 간다.
     // 지우기 전에 그 사실을 알려 준다 — 지운 뒤에 알려 봐야 늦다.
@@ -5586,23 +5622,75 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
               <button onClick={addWeekdays}
                 style={{padding:'4px 10px',borderRadius:6,border:'1px solid #1a56db',background:'#eff6ff',
                   color:'#1a56db',cursor:'pointer',fontSize:11,fontWeight:600}}>그 주 평일(월~금)</button>
+              {/* 🔑 며칠짜리 출장은 태그를 하나씩 누를 일이 아니다 (2026-09-05 지시) */}
+              <button onClick={()=>setRangeOpen(v=>!v)}
+                style={{padding:'4px 10px',borderRadius:6,
+                  border:'1px solid '+(rangeOpen?'#1a56db':'#93c5fd'),
+                  background:rangeOpen?'#1a56db':'#eff6ff',
+                  color:rangeOpen?'#fff':'#1a56db',cursor:'pointer',fontSize:11,fontWeight:600}}>
+                📅 기간으로 넣기
+              </button>
               {dates.length>0&&(
                 <button onClick={()=>setDates([])}
                   style={{padding:'4px 10px',borderRadius:6,border:'1px solid #e5e7eb',background:'#fff',
                     color:'#6b7280',cursor:'pointer',fontSize:11}}>모두 지우기</button>
               )}
             </div>
+            {/* 기간 넣기 — 시작~끝을 정하고 뺄 것을 고른다 */}
+            {rangeOpen&&(
+              <div style={{marginBottom:8,padding:'8px 10px',background:'#fff',
+                border:'1px solid #bfdbfe',borderRadius:7}}>
+                <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+                  <input type="date" value={rangeFrom} onChange={e=>setRangeFrom(e.target.value)}
+                    style={{padding:'5px 7px',border:'1px solid #e5e7eb',borderRadius:6,fontSize:12}}/>
+                  <span style={{fontSize:12,color:'#6b7280'}}>~</span>
+                  <input type="date" value={rangeTo} onChange={e=>setRangeTo(e.target.value)}
+                    style={{padding:'5px 7px',border:'1px solid #e5e7eb',borderRadius:6,fontSize:12}}/>
+                  <label style={{display:'flex',alignItems:'center',gap:4,fontSize:11,
+                    color:'#374151',cursor:'pointer'}}>
+                    <input type="checkbox" checked={skipWeekend}
+                      onChange={e=>setSkipWeekend(e.target.checked)} style={{cursor:'pointer'}}/>
+                    주말 빼기
+                  </label>
+                  <label style={{display:'flex',alignItems:'center',gap:4,fontSize:11,
+                    color:'#374151',cursor:'pointer'}}>
+                    <input type="checkbox" checked={skipHoliday}
+                      onChange={e=>setSkipHoliday(e.target.checked)} style={{cursor:'pointer'}}/>
+                    공휴일 빼기
+                  </label>
+                  <button onClick={addRange}
+                    style={{padding:'5px 12px',borderRadius:6,border:'none',background:'#1a56db',
+                      color:'#fff',cursor:'pointer',fontSize:11,fontWeight:700}}>넣기</button>
+                </div>
+                <div style={{marginTop:5,fontSize:10,color:'#6b7280'}}>
+                  넣은 뒤에도 아래 태그를 눌러 <strong>하루씩 뺄 수 있습니다.</strong>
+                  {' '}주말·휴일에 일하시는 날이면 체크를 풀고 넣으십시오.
+                </div>
+              </div>
+            )}
             {dates.length===0
               ?<div style={{fontSize:11,color:'#92400e'}}>날짜를 하나 이상 골라 주세요.</div>
               :<div style={{display:'flex',gap:5,flexWrap:'wrap'}}>
-                {dates.map(d=>(
-                  <span key={d} onClick={()=>removeDate(d)} title="누르면 제외됩니다"
-                    style={{display:'inline-flex',alignItems:'center',gap:4,cursor:'pointer',
-                      background:'#1a56db',color:'#fff',borderRadius:5,padding:'3px 8px',fontSize:11,fontWeight:600}}>
-                    {mdLabel(d)} ({dayName(d)}) <span style={{opacity:.8}}>×</span>
-                  </span>
-                ))}
+                {dates.map(d=>{
+                  // 쉬는 날이 섞여 있으면 «눈에 보이게» 한다 — 빼려던 것을 넣었을 수 있다
+                  const dow=new Date(d).getDay()
+                  const rest=dow===0||dow===6||restDays.has(d)
+                  return(
+                    <span key={d} onClick={()=>removeDate(d)}
+                      title={(holidayMap.get(d)?holidayMap.get(d)+' · ':'')+'누르면 제외됩니다'}
+                      style={{display:'inline-flex',alignItems:'center',gap:4,cursor:'pointer',
+                        background:rest?'#b45309':'#1a56db',color:'#fff',borderRadius:5,
+                        padding:'3px 8px',fontSize:11,fontWeight:600}}>
+                      {mdLabel(d)} ({dayName(d)}) <span style={{opacity:.8}}>×</span>
+                    </span>
+                  )
+                })}
               </div>}
+            {dates.some(d=>{const w=new Date(d).getDay();return w===0||w===6||restDays.has(d)})&&(
+              <div style={{marginTop:5,fontSize:10,color:'#b45309'}}>
+                🟠 주황은 <strong>주말·공휴일</strong>입니다. 그날 일하시는 것이 맞으면 그대로 두십시오.
+              </div>
+            )}
           </div>
         )}
 
