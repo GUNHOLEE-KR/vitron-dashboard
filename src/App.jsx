@@ -3034,6 +3034,26 @@ function VehicleRates({canApprove,showToast}){
     finally{ setBusy(false) }
   }
 
+  // 하이패스를 «주 사용자 개인 카드» 로 내는 차 (2026-09-05 지시).
+  // 🔑 켜는 순간 그 차의 통행료가 그 사람에게 지급되므로 단가·연비와 같은 자리에 둔다 —
+  //    설정 탭이 아니라 여기가 맞다(돈을 정하는 값은 대표이사 몫).
+  async function toggleCard(v,on){
+    if(on&&!v.assigned_worker_id){
+      showToast('주 사용자를 먼저 정해 주십시오 — [설정] 탭 차량 관리에서 고릅니다',5000); return
+    }
+    if(on&&!confirm(`「${v.plate||v.name}」의 하이패스를 «${v.assigned_worker_name||'주 사용자'}» 님 개인 카드로 두시겠습니까?\n\n`
+      +'· 이 차의 통행료를 회사가 그분에게 지급합니다\n'
+      +'· 본인이 다녀온 것뿐 아니라 «다른 분이 그 차로 다녀온 통행» 도 포함됩니다\n'
+      +'· 그 차를 개인 사용한 분에게는 그것대로 청구됩니다'))return
+    try{
+      setBusy(true)
+      await updateVehicle(v.id,{hipass_personal_card:on})   // ⚠ 이 칸만 보낸다
+      showToast(on?'하이패스 개인카드로 두었습니다':'하이패스 개인카드를 껐습니다')
+      await load()
+    }catch(e){ showToast('실패: '+e.message,5000) }
+    finally{ setBusy(false) }
+  }
+
   if(!rows) return null
   const company=rows.filter(v=>v.kind==='company'&&v.active)
   const own=rows.filter(v=>v.kind==='own'&&v.active)
@@ -3074,6 +3094,7 @@ function VehicleRates({canApprove,showToast}){
         <thead><tr>
           <th style={{...thS,textAlign:'left'}}>차량</th>
           <th style={{...thS,width:190}}>개인 사용 단가</th>
+          <th style={{...thS,width:150}}>하이패스 개인카드</th>
         </tr></thead>
         <tbody>
           {company.map(v=>(
@@ -3083,12 +3104,34 @@ function VehicleRates({canApprove,showToast}){
                 <div style={{fontSize:10,color:'#6b7280'}}>{v.plate}</div>
               </td>
               <td style={tdS}>{cell(v,'rate_per_km','원/km','예: 100')}</td>
+              <td style={tdS}>
+                {canApprove
+                  ?<label style={{display:'inline-flex',alignItems:'center',gap:5,
+                      fontSize:11,color:'#374151',
+                      cursor:v.assigned_worker_id?'pointer':'not-allowed'}}
+                      title={v.assigned_worker_id?'':'주 사용자가 없어 켤 수 없습니다'}>
+                      <input type="checkbox" disabled={busy||!v.assigned_worker_id}
+                        checked={!!v.hipass_personal_card}
+                        onChange={e=>toggleCard(v,e.target.checked)}
+                        style={{cursor:v.assigned_worker_id?'pointer':'not-allowed'}}/>
+                      {v.assigned_worker_name||<span style={{color:'#9ca3af'}}>주 사용자 없음</span>}
+                    </label>
+                  :<span style={{fontSize:11}}>
+                      {v.hipass_personal_card
+                        ?<strong style={{color:'#047857'}}>{v.assigned_worker_name||'주 사용자'} 개인카드</strong>
+                        :<span style={{color:'#9ca3af'}}>-</span>}
+                    </span>}
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
       <div style={{fontSize:11,color:'#6b7280',marginBottom:16,lineHeight:1.7}}>
-        💡 <strong>입금액</strong> = 개인 사용 거리 × 이 단가 + 하이패스
+        💡 <strong>입금액</strong> = 개인 사용 거리 × 이 단가 + 하이패스<br/>
+        💡 <strong>하이패스 개인카드</strong>를 켜면 그 차의 통행료를 회사가 <strong>주 사용자에게 지급</strong>합니다
+        (그분 카드로 나갔기 때문입니다). <strong>다른 분이 그 차로 다녀온 통행도 포함</strong>되고,
+        개인 사용한 분에게는 그것대로 청구됩니다.<br/>
+        ⚠ 주 사용자가 <strong>평소 출퇴근·개인 용도</strong>로 지난 통행은 실적에 붙지 않으므로 지급되지 않습니다.
       </div>
 
       <div style={{fontSize:12,fontWeight:700,color:'#374151',marginBottom:6}}>
@@ -4206,7 +4249,7 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
   // 확정 뒤에 단가·연비·실적이 바뀌면 «박제된 금액»과 지금 계산이 어긋난다.
   // 숨기지 않고 «둘 다» 보여 준다 — 어느 쪽으로 정리할지는 대표이사가 판단할 일이다.
   const SNAP=['personal_km','personal_amount','toll_amount',
-              'own_car_km','own_car_liter','own_toll_amount','transit_amount']
+              'own_car_km','own_car_liter','own_toll_amount','card_toll_amount','transit_amount']
   const diffOf=(w,s)=>s?SNAP.filter(k=>Number(s[k]||0)!==Number(w[k]||0)):[]
   const changed=(data?.workers||[]).filter(w=>diffOf(w,savedOf(w.worker_id)).length>0)
 
@@ -4289,14 +4332,15 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
     const s=savedOf(w.worker_id)
     return s
       ?{charge:chargeOf(s),liter:Number(s.own_car_liter||0),transit:Number(s.transit_amount||0),
-        ownToll:Number(s.own_toll_amount||0)}
+        ownToll:Number(s.own_toll_amount||0),cardToll:Number(s.card_toll_amount||0)}
       :{charge:w.charge_total,liter:w.own_car_liter,transit:w.transit_amount,
-        ownToll:Number(w.own_toll_amount||0)}
+        ownToll:Number(w.own_toll_amount||0),cardToll:Number(w.card_toll_amount||0)}
   }
   const chargeTotal=(data?.workers||[]).reduce((t,w)=>t+effective(w).charge,0)
   const literTotal=(data?.workers||[]).reduce((t,w)=>t+effective(w).liter,0)
   const transitTotal=(data?.workers||[]).reduce((t,w)=>t+effective(w).transit,0)
   const ownTollTotal=(data?.workers||[]).reduce((t,w)=>t+effective(w).ownToll,0)
+  const cardTollTotal=(data?.workers||[]).reduce((t,w)=>t+effective(w).cardToll,0)
 
   // 확정된 줄은 «확정 금액» 을 크게, 지금 계산이 다르면 그 아래에 주황으로 함께 보인다.
   const cell=(w,s,key,fmt)=>{
@@ -4427,6 +4471,7 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
             {label:'회사에 입금 (개인 사용)',value:won(chargeTotal),unit:'원',color:'#b45309'},
             {label:'주유 환급',value:Math.round(literTotal*100)/100,unit:'L',color:'#047857'},
             {label:'자차 하이패스 환급',value:won(ownTollTotal),unit:'원',color:'#047857'},
+            {label:'하이패스 대납 지급',value:won(cardTollTotal),unit:'원',color:'#047857'},
             {label:'대중교통 실비',value:won(transitTotal),unit:'원'},
             {label:'실적',value:data.actual_count,unit:'건'},
           ]}/>
@@ -4443,6 +4488,8 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
                   <th style={thS}>자차 업무</th>
                   <th style={thS}>환급</th>
                   <th style={thS}>자차 하이패스</th>
+                  {/* 주 사용자가 개인 카드로 대신 낸 통행료 (2026-09-05) */}
+                  <th style={thS}>하이패스 대납</th>
                   <th style={thS}>대중교통</th>
                   <th style={{...thS,width:110}}>정산</th>
                 </tr></thead>
@@ -4483,6 +4530,11 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
                       {/* 자차 업무 하이패스 — 회사가 전액 돌려주는 쪽이다 */}
                       <td style={{...tdS,fontWeight:700,color:w.own_toll_amount?'#047857':'#9ca3af'}}>
                         {cell(w,s,'own_toll_amount',money)}
+                      </td>
+                      {/* 하이패스 대납 — 배정 차량의 통행료를 개인 카드로 낸 몫.
+                          🔑 본인이 다녀온 것뿐 아니라 «남이 그 차로 다녀온 것» 도 들어간다 */}
+                      <td style={{...tdS,fontWeight:700,color:w.card_toll_amount?'#047857':'#9ca3af'}}>
+                        {cell(w,s,'card_toll_amount',money)}
                       </td>
                       <td style={tdS}>{cell(w,s,'transit_amount',money)}</td>
                       <td style={{...tdS,whiteSpace:'nowrap'}}>
@@ -4535,6 +4587,10 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
               💡 <strong>환급</strong> = 자차 업무 거리 ÷ 그 차의 연비 — 금액이 아니라 <strong>주유 한도(리터)</strong>로 지급합니다.<br/>
               💡 <strong>자차 하이패스</strong> = 자차로 <strong>업무</strong> 다녀오며 낸 통행료 — 회사가 <strong>전액</strong> 돌려드립니다.
               (법인차량을 <strong>개인 사용</strong>한 통행료는 반대로 회사에 입금하시는 쪽이라 「하이패스」 열에 있습니다.)<br/>
+              💡 <strong>하이패스 대납</strong> = 배정 차량의 하이패스를 <strong>주 사용자 개인 카드</strong>로 낸 몫 —
+              회사가 그분에게 지급합니다. 본인이 다녀온 것뿐 아니라 <strong>다른 분이 그 차로 다녀온 통행</strong>도
+              들어갑니다(그 차 통행료는 어차피 그분 주머니에서 나갔기 때문입니다).
+              그 차를 <strong>개인 사용</strong>한 분에게는 그것대로 「하이패스」로 청구됩니다.<br/>
               💡 확정한 줄은 <strong>확정 당시 금액</strong>을 보여 줍니다. 그 뒤 단가·연비·실적이 바뀌어
               값이 달라졌으면 아래에 <span style={{color:'#c2410c',fontWeight:700}}>→ 현재</span> 로 함께 적습니다.
               위 합계도 <strong>확정된 분은 확정 금액</strong> 기준입니다.
@@ -6078,6 +6134,12 @@ function HipassTable({ym,me,showToast,onChanged,refresh}){
                           `${a.worker_name||'?'}${a.use_type==='personal'?'(개인)':''}`
                           +(a.place?` · ${a.place}`:'')).join(' / ')}
                       </span>
+                    )}
+                    {/* 이 차는 통행료가 주 사용자 카드에서 나간다 — 실적에 붙이면 그분에게 지급된다 */}
+                    {r.hipass_personal_card&&(r.day_actuals||[]).length>0&&(
+                      <div style={{fontSize:10,color:'#047857',fontWeight:700}}>
+                        ↩ {r.card_owner_name||'주 사용자'} 님께 대납 지급
+                      </div>
                     )}
                   </td>
                   <td style={{...tdS,textAlign:'left',fontSize:10,color:'#6b7280'}}>

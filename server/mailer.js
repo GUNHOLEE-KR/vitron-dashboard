@@ -419,8 +419,10 @@ function buildSettlement({ ym, row, actorName, actorEmail, sender }) {
   // 제목이 «무엇을 해야 하는지» 를 먼저 말한다 — 입금할 것이 있으면 그것부터.
   const head = charge > 0 ? `입금 ${won(charge)}원`
     : liter > 0 ? `주유 환급 ${liter}L`
-      : transit > 0 ? `대중교통 ${won(transit)}원`
-        : '정산 내역 없음'
+      : Number(row.card_toll_amount || 0) > 0
+        ? `하이패스 대납 ${won(row.card_toll_amount)}원`
+        : transit > 0 ? `대중교통 ${won(transit)}원`
+          : '정산 내역 없음'
   const subject = `[정산] ${label} · ${row.worker_name} · ${head}`
 
   const body = [`${row.worker_name} 님, ${label} 정산 내역입니다.`, '']
@@ -440,10 +442,18 @@ function buildSettlement({ ym, row, actorName, actorEmail, sender }) {
     body.push('■ 자차 업무 하이패스 (회사 → 본인)',
       `    ${won(ownToll)}원 — 업무로 다녀오신 통행료는 회사가 전액 부담합니다.`, '')
   }
+  // 주 사용자가 자기 카드로 대신 낸 통행료 (2026-09-05). 남이 그 차로 다녀온 것도
+  // 여기 들어간다 — 어차피 카드 주인 주머니에서 나갔다.
+  const cardToll = Number(row.card_toll_amount || 0)
+  if (cardToll > 0) {
+    body.push('■ 하이패스 대납 (회사 → 본인)',
+      `    ${won(cardToll)}원 — 배정 차량의 하이패스를 개인 카드로 내신 몫입니다.`,
+      '    본인이 다녀온 것뿐 아니라 다른 분이 그 차로 다녀온 통행도 포함됩니다.', '')
+  }
   if (transit > 0) {
     body.push('■ 대중교통 실비 (회사 → 본인)', `    ${won(transit)}원`, '')
   }
-  if (charge === 0 && liter === 0 && transit === 0 && ownToll === 0) {
+  if (charge === 0 && liter === 0 && transit === 0 && ownToll === 0 && cardToll === 0) {
     body.push('이달에는 청구하거나 환급할 금액이 없습니다.', '')
   }
 
@@ -481,6 +491,7 @@ function notifySettlement({ ym, rows, actor, sender, onSenderFail }) {
         && Number(row.toll_amount || 0) === 0
         && Number(row.own_car_liter || 0) === 0
         && Number(row.own_toll_amount || 0) === 0
+        && Number(row.card_toll_amount || 0) === 0
         && Number(row.transit_amount || 0) === 0
       if (nothing) continue
       // 받을 주소가 없으면 조용히 건너뛴다 — 공용 주소로 보내면 남의 금액이 섞인다

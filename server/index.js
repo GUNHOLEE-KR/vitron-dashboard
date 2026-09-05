@@ -894,19 +894,44 @@ app.post('/api/schedule/vehicles', async (req, res) => {
 //       같은 이유이고, 칸이 늘어날수록 사고가 커지므로 여기서 아예 막는다.
 //    ⚠ null 을 «명시해서» 보내면 지운다 — 「안 보냄」과 「비우기」는 다른 뜻이다.
 const VEHICLE_PATCH_COLS = ['name', 'plate', 'fuel_type', 'rate_per_km',
-                            'km_per_liter', 'memo', 'active', 'assigned_worker_id', 'color']
+                            'km_per_liter', 'memo', 'active', 'assigned_worker_id', 'color',
+                            'hipass_personal_card']
 
 // 🔑 돈이 되는 두 칸은 «승인 권한자만» 고친다 (2026-08-25 신설).
 //    rate_per_km  개인 사용 청구액 = 거리 × 이 값
 //    km_per_liter 자차 환급 리터   = 거리 ÷ 이 값  (낮출수록 환급이 늘어난다)
 //    그전에는 화면 자체가 없어 DB 로만 바꿀 수 있었는데, 설정 탭과 매뉴얼은
 //    「정산 화면에서 대표이사만 고칠 수 있습니다」 라고 «없는 기능»을 안내하고 있었다.
-const VEHICLE_MONEY_COLS = ['rate_per_km', 'km_per_liter']
+//    hipass_personal_card 켜는 순간 그 차의 통행료가 «주 사용자에게 지급» 된다 (2026-09-05)
+const VEHICLE_MONEY_COLS = ['rate_per_km', 'km_per_liter', 'hipass_personal_card']
 
 app.patch('/api/schedule/vehicles/:id', async (req, res) => {
   const touchesMoney = VEHICLE_MONEY_COLS.some(c => c in req.body)
   if (touchesMoney && !await canApprove(req.session.uid)) {
-    return res.status(403).json({ error: '단가·연비는 대표이사만 고칠 수 있습니다.' })
+    return res.status(403).json({ error: '단가·연비·하이패스 개인카드는 대표이사만 고칠 수 있습니다.' })
+  }
+  // 🔑 줄 사람이 없는데 「지급」을 켤 수는 없다. DB 에도 빗장이 있지만, 그쪽 문구는
+  //    사람이 읽을 것이 못 되므로 여기서 먼저 잡는다.
+  if (req.body.hipass_personal_card) {
+    const { rows: cur } = await pool.query(
+      'SELECT assigned_worker_id FROM schedule_vehicles WHERE id = $1', [req.params.id])
+    const owner = 'assigned_worker_id' in req.body
+      ? req.body.assigned_worker_id : cur[0]?.assigned_worker_id
+    if (!owner) {
+      return res.status(400).json({
+        error: '주 사용자를 먼저 정해 주십시오 — 통행료를 지급할 사람이 없습니다.' })
+    }
+  }
+  // 반대 방향 — 주 사용자를 «비우는데» 개인카드가 켜져 있으면 지급 대상이 사라진다.
+  // 조용히 끄지 않고 막는다: 어느 쪽을 원하는지는 사람이 정할 일이다.
+  if ('assigned_worker_id' in req.body && !req.body.assigned_worker_id
+      && !('hipass_personal_card' in req.body)) {
+    const { rows: cur } = await pool.query(
+      'SELECT hipass_personal_card FROM schedule_vehicles WHERE id = $1', [req.params.id])
+    if (cur[0]?.hipass_personal_card) {
+      return res.status(400).json({
+        error: '「하이패스 개인카드」가 켜져 있어 주 사용자를 비울 수 없습니다. 먼저 꺼 주십시오.' })
+    }
   }
   const sets = [], vals = []
   for (const col of VEHICLE_PATCH_COLS) {
@@ -921,7 +946,7 @@ app.patch('/api/schedule/vehicles/:id', async (req, res) => {
         return res.status(400).json({ error: '색은 #rrggbb 형식이어야 합니다.' })
       }
       v = v || null                                   // 비우면 기본색으로 되돌아간다
-    } else if (col === 'active') {
+    } else if (col === 'active' || col === 'hipass_personal_card') {
       v = !!v
     } else if (v === '' || v === undefined) {
       v = null                                        // 빈 칸은 «비우기» 로 읽는다
@@ -2232,7 +2257,9 @@ async function buildSettlement(ym) {
   const { rows } = await pool.query(
     `SELECT a.*, w.name AS worker_name, w.team AS worker_team, w.email AS worker_email,
             v.kind AS vehicle_kind, v.name AS vehicle_name, v.plate AS vehicle_plate,
-            v.rate_per_km, v.km_per_liter
+            v.rate_per_km, v.km_per_liter,
+            -- 주 사용자가 «개인 카드» 로 통행료를 내는 차 (2026-09-05 지시)
+            v.hipass_personal_card, v.assigned_worker_id
        FROM schedule_actuals a
        LEFT JOIN workers w           ON w.id = a.worker_id
        LEFT JOIN schedule_vehicles v ON v.id = a.vehicle_id
@@ -2241,6 +2268,12 @@ async function buildSettlement(ym) {
 
   const byWorker = new Map()
   const byVehicle = new Map()
+  // 🔑 주 사용자가 개인 카드로 대신 낸 통행료 (2026-09-05 지시).
+  //    돈이 «두 갈래» 로 흐른다 — 회사는 카드 주인에게 지급하고, 개인 사용분은
+  //    그것대로 쓴 직원에게 청구한다. 그래서 여기서 따로 모았다가 나중에 얹는다.
+  //    ⚠ 카드 주인이 그달에 자기 실적이 하나도 없을 수 있다 (남만 그 차를 쓴 달).
+  //      그러면 byWorker 에 자리가 없으므로, 뒤에서 «없으면 만들어» 준다.
+  const cardOwed = new Map()
 
   for (const r of rows) {
     const km = Number(r.distance_km || 0)
@@ -2256,10 +2289,20 @@ async function buildSettlement(ym) {
         //    직원이 자기 돈으로 낸 통행료를 돌려받을 길이 없었다 (2026-09-04 확인).
         //    사용자 결정: 전액 회사 부담이므로 대중교통 실비와 같은 자리에 둔다.
         own_toll_amount: 0,
+        // 주 사용자가 개인 카드로 대신 낸 하이패스 — 회사가 그 사람에게 지급한다
+        card_toll_amount: 0,
         transit_amount: 0, business_km: 0, fuel_amount: 0, rows: [],
       })
     }
     const w = byWorker.get(r.worker_id)
+
+    // 이 차의 통행료는 «주 사용자 주머니» 에서 나갔다 — 업무든, 남이 개인 사용한
+    // 것이든 상관없이 회사가 그 사람에게 돌려준다 (사용자 결정).
+    // 🔑 아래 use_type 갈래에 넣지 않고 «바깥» 에 둔다 — 두 갈래 모두에 해당한다.
+    if (r.hipass_personal_card && r.assigned_worker_id && Number(r.toll_fee || 0) > 0) {
+      cardOwed.set(Number(r.assigned_worker_id),
+        (cardOwed.get(Number(r.assigned_worker_id)) || 0) + Number(r.toll_fee))
+    }
     if (r.use_type === 'personal') {
       w.personal_km += km
       // 단가가 없으면 청구액을 0 으로 두고 «단가 없음» 을 화면에서 알린다
@@ -2299,6 +2342,29 @@ async function buildSettlement(ym) {
       else v.business_km += km
       v.toll_amount += Number(r.toll_fee || 0)
       v.fuel_amount += Number(r.fuel_fee || 0)
+    }
+  }
+
+  // 대납 지급을 사람에게 얹는다. 그달에 자기 실적이 하나도 없는 카드 주인은
+  // 자리가 없으므로 여기서 만들어 준다 — 없으면 지급이 조용히 사라진다.
+  if (cardOwed.size > 0) {
+    const missing = [...cardOwed.keys()].filter(id => !byWorker.has(id))
+    if (missing.length > 0) {
+      const { rows: ws } = await pool.query(
+        'SELECT id, name, team, email FROM workers WHERE id = ANY($1::int[])', [missing])
+      for (const x of ws) {
+        byWorker.set(x.id, {
+          worker_id: x.id, worker_name: x.name, team: x.team, worker_email: x.email,
+          personal_km: 0, personal_amount: 0, toll_amount: 0,
+          own_car_km: 0, own_car_liter: 0, own_car_missing_efficiency: false,
+          own_toll_amount: 0, card_toll_amount: 0,
+          transit_amount: 0, business_km: 0, fuel_amount: 0, rows: [],
+        })
+      }
+    }
+    for (const [id, amount] of cardOwed) {
+      const w = byWorker.get(id)
+      if (w) w.card_toll_amount += amount
     }
   }
 
@@ -2434,21 +2500,23 @@ app.post(['/api/schedule/settlement/:ym/notify',
       await client.query(
         `INSERT INTO schedule_settlements
            (ym, worker_id, personal_km, personal_amount, toll_amount,
-            own_car_km, own_car_liter, own_toll_amount, transit_amount,
+            own_car_km, own_car_liter, own_toll_amount, card_toll_amount, transit_amount,
             status, notified_by, notified_at, settled_by, settled_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$13,$8,$9,$10,now(),$11,$12)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$13,$14,$8,$9,$10,now(),$11,$12)
          ON CONFLICT (ym, worker_id) DO UPDATE
          SET personal_km=EXCLUDED.personal_km, personal_amount=EXCLUDED.personal_amount,
              toll_amount=EXCLUDED.toll_amount, own_car_km=EXCLUDED.own_car_km,
              own_car_liter=EXCLUDED.own_car_liter, transit_amount=EXCLUDED.transit_amount,
              own_toll_amount=EXCLUDED.own_toll_amount,
+             card_toll_amount=EXCLUDED.card_toll_amount,
              status=EXCLUDED.status,
              notified_by=EXCLUDED.notified_by, notified_at=now(),
              settled_by=EXCLUDED.settled_by, settled_at=EXCLUDED.settled_at,
              updated_at=now()`,
         [ym, w.worker_id, w.personal_km, w.personal_amount, w.toll_amount,
          w.own_car_km, w.own_car_liter, w.transit_amount,
-         status, req.session.uid, settledBy, settledAt, w.own_toll_amount])
+         status, req.session.uid, settledBy, settledAt,
+         w.own_toll_amount, w.card_toll_amount])
     }
     // 안내한 사람의 실적만 잠근다 — 알린 금액과 근거가 어긋나지 않게 한다.
     // ⚠ 여기에 worker_id 를 걸지 않으면 한 사람을 확정해도 그달 전원의 실적이
@@ -2710,10 +2778,13 @@ app.get('/api/hipass', requireLogin, async (req, res) => {
     const { rows } = await pool.query(
       `SELECT t.*, ${HIPASS_DATE} AS used_date,
               v.name AS vehicle_name, v.plate AS vehicle_plate, v.kind AS vehicle_kind,
+              -- 주 사용자 개인 카드로 내는 차인지 (2026-09-05) — 붙이면 그 사람에게 지급된다
+              v.hipass_personal_card, av.name AS card_owner_name,
               a.worker_id AS claimed_worker_id, w.name AS claimed_worker_name,
               coalesce(m.j, '[]'::json) AS day_actuals
          FROM hipass_tolls t
          LEFT JOIN schedule_vehicles v ON v.id = t.vehicle_id
+         LEFT JOIN workers av          ON av.id = v.assigned_worker_id
          LEFT JOIN schedule_actuals  a ON a.id = t.actual_id
          LEFT JOIN workers w           ON w.id = a.worker_id
          -- 그날 그 차를 쓴 실적 — 통행을 어느 실적에 붙이면 되는지 알려 준다.
