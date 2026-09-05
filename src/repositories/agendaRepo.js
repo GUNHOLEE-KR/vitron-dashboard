@@ -21,11 +21,14 @@ async function request(method, path, body) {
   return data
 }
 
-export function getAgenda({ status, ownerId, parentKey } = {}) {
+// meetingId 는 «회의로 좁히기» 다. 'none' 을 주면 «회의에 안 걸린 것만» —
+// 빈 값(안 보냄)과 뜻이 다르므로 서버도 둘을 갈라 읽는다.
+export function getAgenda({ status, ownerId, parentKey, meetingId } = {}) {
   const q = new URLSearchParams()
   if (status) q.set('status', status)
   if (ownerId) q.set('owner_id', ownerId)
   if (parentKey) q.set('parent_key', parentKey)
+  if (meetingId) q.set('meeting_id', meetingId)
   const s = q.toString()
   return request('GET', s ? `?${s}` : '')
 }

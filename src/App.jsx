@@ -20,6 +20,8 @@ import { getPurchases, addPurchase, setPurchaseStatus,
          removePurchase } from './repositories/purchaseRepo'
 import { getAgenda, addAgenda, updateAgenda, removeAgenda,
          confirmAgenda, agendaToJira } from './repositories/agendaRepo'
+import { getMeetings, addMeeting, updateMeeting,
+         removeMeeting } from './repositories/meetingRepo'
 // ⚠ 낱건 지우기는 «골라서 한꺼번에»(bulkRemoveHipass) 만 화면에 둔다.
 //   한 건짜리 removeHipass 는 서버·호출기에만 있고 화면에서는 부르지 않는다.
 import { getHipass, uploadHipass, claimHipass, addManualHipass,
@@ -112,8 +114,10 @@ function parseHash(){
 // ⚠ 기본 보기(주간)는 붙이지 않는다. #schedule 이 가장 짧고 흔한 주소여야 한다.
 const hashFor=(tab,view)=>
   '#'+tab+(tab==='schedule'&&view&&view!=='week'?'/'+view:'')
+// ⚠ 탭 «키» 는 agenda 그대로 둔다 — 주소(#agenda)를 사내 포털 타일이 가리키고 있다.
+//   표기만 「회의록」으로 바꾼다 (2026-09-05 지시 — 안건을 회의 아래로 묶었다).
 const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'월간',yearly:'연간',
-  schedule:'스케줄',agenda:'안건',purchase:'구매',settings:'설정'}
+  schedule:'스케줄',agenda:'회의록',purchase:'구매',settings:'설정'}
 
 // 안건 상태 — 완료는 «두 단계» 다 (2026-09-04 지시).
 //   done      담당자가 「했다」 고 표시
@@ -3235,14 +3239,71 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
   const [showDone,setShowDone]=useState(false)
   const [editing,setEditing]=useState(null)
 
+  // ── 회의록 (2026-09-05 신설) ────────────────────────────────
+  // 🔑 회의 내용을 적고, 할 일이 된 것만 안건으로 떼어 단다.
+  //    기존 안건은 «그대로 둔다»(지시) — 회의가 걸리지 않은 것은 「회의 없는 안건」이다.
+  const [meetings,setMeetings]=useState([])
+  const [selMeeting,setSelMeeting]=useState('')   // '' 전체 / 'none' 회의 없는 것 / 숫자
+  const [mForm,setMForm]=useState(null)           // 작성·수정 중인 회의록
+  const [mBusy,setMBusy]=useState(false)
+
+  const reloadMeetings=async()=>{ try{ setMeetings(await getMeetings()) }catch{ /* 목록만 비운다 */ } }
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(()=>{ reloadMeetings() },[tick])
+
   useEffect(()=>{
     let alive=true
-    getAgenda({status:fStatus||undefined,ownerId:fMine?(me?.worker_id||undefined):undefined})
+    getAgenda({status:fStatus||undefined,ownerId:fMine?(me?.worker_id||undefined):undefined,
+               meetingId:selMeeting||undefined})
       .then(d=>{ if(alive){ setRows(d); setErr('') } })
       .catch(e=>{ if(alive) setErr(e.message) })
     return ()=>{ alive=false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[tick,fStatus,fMine])
+  },[tick,fStatus,fMine,selMeeting])
+
+  // 지금 열어 둔 회의록. 새 안건은 여기에 붙는다.
+  const openMeeting=meetings.find(m=>String(m.id)===String(selMeeting))||null
+  const nameOfWorker=id=>{const w=workers.find(x=>Number(x.id)===Number(id));return w?workerLabel(w,dupNames):`#${id}`}
+
+  function newMeetingForm(){
+    setMForm({id:null,title:'',met_on:today(),place:'',attendee_ids:[],attendee_text:'',body:''})
+  }
+  function editMeetingForm(m){
+    setMForm({id:m.id,title:m.title,met_on:String(m.met_on).slice(0,10),place:m.place||'',
+      attendee_ids:[...(m.attendee_ids||[])],attendee_text:m.attendee_text||'',body:m.body||''})
+  }
+  async function saveMeeting(){
+    if(!mForm.title.trim()){ showToast('회의 제목을 적어 주세요'); return }
+    if(!mForm.met_on){ showToast('회의 날짜를 골라 주세요'); return }
+    try{
+      setMBusy(true)
+      const body={title:mForm.title.trim(),met_on:mForm.met_on,place:mForm.place||null,
+        attendee_ids:mForm.attendee_ids,attendee_text:mForm.attendee_text||null,body:mForm.body||null}
+      const isEdit=!!mForm.id
+      const saved=isEdit?await updateMeeting(mForm.id,body):await addMeeting(body)
+      setMForm(null); await reloadMeetings()
+      // 새로 만든 회의록은 «바로 열어» 준다 — 이어서 안건을 적는 흐름이기 때문이다
+      if(!isEdit) setSelMeeting(String(saved.id))
+      showToast(isEdit?'회의록을 고쳤습니다':'회의록을 만들었습니다 — 이어서 안건을 적으십시오')
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setMBusy(false) }
+  }
+  async function deleteMeeting(m){
+    // 🔴 안건은 함께 지워지지 «않는다». 그 사실을 지우기 전에 말해 준다.
+    if(!confirm(`회의록 「${m.title}」을 지울까요?\n\n`
+      +(m.agenda_count>0
+        ?`⚠ 이 회의의 안건 ${m.agenda_count}건은 «지워지지 않고» 「회의 없는 안건」으로 남습니다.\n`
+         +'  (기한·담당·Jira 가 걸려 있어 함께 지우지 않습니다)\n\n':'')
+      +'회의 내용(본문)은 되살릴 수 없습니다.'))return
+    try{
+      setMBusy(true)
+      const r=await removeMeeting(m.id)
+      if(String(selMeeting)===String(m.id)) setSelMeeting('')
+      await reloadMeetings(); reload()
+      showToast(`지웠습니다${r.kept_agenda?` · 안건 ${r.kept_agenda}건은 남겼습니다`:''}`)
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setMBusy(false) }
+  }
 
   // 상위업무 목록 — 종료한 것은 기본으로 감추고 「완료 포함」으로 꺼낸다(업무 입력과 같은 규칙).
   // 🔑 이미 골라 둔 값은 완료여도 목록에 남긴다. 빼면 지난 안건을 열었을 때 빈칸이 된다.
@@ -3267,7 +3328,9 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
         owner_worker_id:ownerId?Number(ownerId):null, due_date:due||null,
         parent_key:parentPick?jiraKeyOf(parentPick):null,
         parent_text:parentPick||parentText||null,
-        source:source||null})
+        source:source||null,
+        // 🔑 회의록을 열어 둔 채 적으면 «그 회의의 안건» 이 된다. 이것이 기본 흐름이다.
+        meeting_id:openMeeting?openMeeting.id:null})
       setTitle(''); setDetail(''); setDue(''); setSource('')
       setParentText(''); setParentPick('')
       setOpenForm(false); reload()
@@ -3338,8 +3401,8 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
     finally{ setBusy(0) }
   }
 
-  if(err) return <Card title="안건"><div style={{fontSize:12,color:'#b91c1c'}}>{err}</div></Card>
-  if(!rows) return <Card title="안건"><div style={{fontSize:12,color:'#6b7280'}}>불러오는 중…</div></Card>
+  if(err) return <Card title="회의록"><div style={{fontSize:12,color:'#b91c1c'}}>{err}</div></Card>
+  if(!rows) return <Card title="회의록"><div style={{fontSize:12,color:'#6b7280'}}>불러오는 중…</div></Card>
 
   // 기한이 지났거나 오늘까지인 것 — 해야 할 일을 놓치지 않게 세어 둔다
   const overdue=rows.filter(a=>a.due_date&&a.status!=='confirmed'&&a.status!=='hold'
@@ -3349,7 +3412,169 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
 
   return(
     <div>
-      <Card title="안건 등록">
+      {/* ── 회의록 (2026-09-05 신설) ─────────────────────────── */}
+      <Card title={`회의록 ${meetings.length}건`}>
+        {!mForm&&(
+          <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',marginBottom:10}}>
+            <button onClick={newMeetingForm}
+              style={{padding:'9px 18px',borderRadius:8,border:'1px solid #1a56db',background:'#eff6ff',
+                color:'#1a56db',cursor:'pointer',fontSize:13,fontWeight:700}}>+ 회의록 작성</button>
+            {/* 🔑 「회의 없는 안건」을 따로 볼 수 있어야 한다 — 어제까지 적힌 것이 전부 여기다 */}
+            <button onClick={()=>setSelMeeting(selMeeting==='none'?'':'none')}
+              style={{padding:'7px 14px',borderRadius:8,fontSize:12,fontWeight:700,cursor:'pointer',
+                border:'1px solid '+(selMeeting==='none'?'#1a56db':'#e5e7eb'),
+                background:selMeeting==='none'?'#1a56db':'#fff',
+                color:selMeeting==='none'?'#fff':'#6b7280'}}>회의 없는 안건</button>
+            {selMeeting&&(
+              <button onClick={()=>setSelMeeting('')}
+                style={{padding:'7px 14px',borderRadius:8,fontSize:12,cursor:'pointer',
+                  border:'1px solid #e5e7eb',background:'#fff',color:'#6b7280'}}>전체 보기</button>
+            )}
+          </div>
+        )}
+
+        {/* 작성·수정 폼 */}
+        {mForm&&(
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12,
+            padding:'12px 14px',background:'#f8fbff',border:'1px dashed #93c5fd',borderRadius:8}}>
+            <div>
+              <label style={labelS}>회의 제목 *</label>
+              <input value={mForm.title} onChange={e=>setMForm({...mForm,title:e.target.value})}
+                placeholder="예: 9월 1주 주간회의" style={inputS}/>
+            </div>
+            <div>
+              <label style={labelS}>날짜 *</label>
+              <input type="date" value={mForm.met_on}
+                onChange={e=>setMForm({...mForm,met_on:e.target.value})} style={inputS}/>
+            </div>
+            <div style={{gridColumn:'1 / -1'}}>
+              <label style={labelS}>장소 (선택)</label>
+              <input value={mForm.place} onChange={e=>setMForm({...mForm,place:e.target.value})}
+                placeholder="예: 본사 회의실 / 화상" style={inputS}/>
+            </div>
+            <div style={{gridColumn:'1 / -1'}}>
+              <label style={labelS}>참석자</label>
+              <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+                {workers.map(w=>{
+                  const on=mForm.attendee_ids.includes(w.id)
+                  return(
+                    <button key={w.id}
+                      onClick={()=>setMForm({...mForm,attendee_ids:on
+                        ?mForm.attendee_ids.filter(x=>x!==w.id)
+                        :[...mForm.attendee_ids,w.id]})}
+                      style={{padding:'5px 12px',borderRadius:20,fontSize:12,cursor:'pointer',
+                        fontWeight:on?700:500,
+                        border:'1px solid '+(on?'#1a56db':'#e5e7eb'),
+                        background:on?'#1a56db':'#fff',color:on?'#fff':'#6b7280'}}>
+                      {workerLabel(w,dupNames)}
+                    </button>
+                  )
+                })}
+              </div>
+              <input value={mForm.attendee_text}
+                onChange={e=>setMForm({...mForm,attendee_text:e.target.value})}
+                placeholder="명단에 없는 분 (사외 참석자 등) — 직접 적으십시오"
+                style={{...inputS,marginTop:6}}/>
+            </div>
+            <div style={{gridColumn:'1 / -1'}}>
+              <label style={labelS}>회의 내용</label>
+              <textarea value={mForm.body} onChange={e=>setMForm({...mForm,body:e.target.value})}
+                rows={8} placeholder={'논의한 것·결정된 것을 적으십시오.\n\n할 일이 된 것은 아래에서 «안건» 으로 따로 달면 기한·담당을 붙일 수 있습니다.'}
+                style={{...inputS,resize:'vertical',lineHeight:1.7}}/>
+            </div>
+            <div style={{gridColumn:'1 / -1',display:'flex',gap:8}}>
+              <button onClick={saveMeeting} disabled={mBusy}
+                style={{padding:'9px 20px',borderRadius:8,border:'none',background:'#1a56db',
+                  color:'#fff',cursor:'pointer',fontSize:13,fontWeight:700}}>
+                {mBusy?'저장 중…':(mForm.id?'저장':'만들기')}
+              </button>
+              <button onClick={()=>setMForm(null)}
+                style={{padding:'9px 16px',borderRadius:8,border:'1px solid #e5e7eb',background:'#fff',
+                  color:'#6b7280',cursor:'pointer',fontSize:13}}>취소</button>
+            </div>
+          </div>
+        )}
+
+        {meetings.length===0&&!mForm
+          ?<div style={{fontSize:12,color:'#6b7280'}}>
+            아직 회의록이 없습니다. <strong>[+ 회의록 작성]</strong> 으로 시작하십시오.
+          </div>
+          :<div style={{display:'flex',flexDirection:'column',gap:8}}>
+            {meetings.map(m=>{
+              const on=String(m.id)===String(selMeeting)
+              const canDel=canEditOthers||Number(m.created_by)===Number(me?.uid)
+              return(
+                <div key={m.id}
+                  style={{border:'1px solid '+(on?'#1a56db':'#e5e7eb'),borderRadius:8,
+                    background:on?'#f8fbff':'#fff',padding:'10px 12px'}}>
+                  <div onClick={()=>setSelMeeting(on?'':String(m.id))}
+                    style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',cursor:'pointer'}}>
+                    <span style={{fontSize:11,fontWeight:700,color:'#1a56db',background:'#eff6ff',
+                      border:'1px solid #bfdbfe',borderRadius:5,padding:'2px 8px'}}>
+                      {String(m.met_on).slice(0,10)} ({dayName(String(m.met_on).slice(0,10))})
+                    </span>
+                    <strong style={{fontSize:13}}>{m.title}</strong>
+                    {m.place&&<span style={{fontSize:11,color:'#6b7280'}}>· {m.place}</span>}
+                    <div style={{flex:1}}/>
+                    {/* 🔑 «아직 안 끝난 안건» 수가 이 회의가 살아 있는지를 말한다 */}
+                    <span style={{fontSize:11,fontWeight:700,
+                      color:m.agenda_open?'#b45309':'#9ca3af'}}>
+                      안건 {m.agenda_count}건{m.agenda_open?` · 진행 ${m.agenda_open}`:''}
+                    </span>
+                    <span style={{fontSize:11,color:'#1a56db',fontWeight:700}}>{on?'▲ 접기':'▼ 열기'}</span>
+                  </div>
+                  {on&&(
+                    <div style={{marginTop:8,paddingTop:8,borderTop:'1px solid #e5e7eb'}}>
+                      <div style={{fontSize:11,color:'#6b7280',marginBottom:6,lineHeight:1.7}}>
+                        참석 {(m.attendee_ids||[]).length>0
+                          ?<strong style={{color:'#374151'}}>
+                            {(m.attendee_ids||[]).map(nameOfWorker).join(' · ')}
+                          </strong>
+                          :<span>미기재</span>}
+                        {m.attendee_text&&<> · {m.attendee_text}</>}
+                        {m.created_by_name&&<> · 작성 {m.created_by_name}</>}
+                      </div>
+                      {m.body
+                        ?<div style={{fontSize:12.5,color:'#374151',whiteSpace:'pre-wrap',
+                          lineHeight:1.8,background:'#fff',border:'1px solid #e5e7eb',
+                          borderRadius:7,padding:'10px 12px'}}>{m.body}</div>
+                        :<div style={{fontSize:11,color:'#9ca3af'}}>회의 내용이 비어 있습니다.</div>}
+                      <div style={{display:'flex',gap:6,marginTop:8,flexWrap:'wrap'}}>
+                        <button onClick={()=>editMeetingForm(m)} disabled={mBusy}
+                          style={{...rowBtnS,border:'1px solid #e5e7eb',background:'#fff',color:'#374151'}}>
+                          내용 수정
+                        </button>
+                        {canDel&&(
+                          <button onClick={()=>deleteMeeting(m)} disabled={mBusy}
+                            style={{...rowBtnS,border:'1px solid #fca5a5',background:'#fff',color:'#dc2626'}}>
+                            삭제
+                          </button>
+                        )}
+                        <div style={{flex:1}}/>
+                        <span style={{fontSize:11,color:'#6b7280',alignSelf:'center'}}>
+                          아래에서 <strong>이 회의의 안건</strong>을 적고 보실 수 있습니다 ↓
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>}
+        <div style={{marginTop:12,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
+          💡 회의록을 <strong>열어 둔 채</strong> 안건을 적으면 <strong>그 회의의 안건</strong>이 됩니다.<br/>
+          💡 회의록을 지워도 <strong>안건은 남습니다</strong> — 기한·담당·Jira 가 걸려 있어 함께 지우지 않습니다.<br/>
+          💡 회의 없이 생긴 것은 <strong>[회의 없는 안건]</strong> 에서 보실 수 있습니다.
+        </div>
+      </Card>
+
+      <Card title={openMeeting?`안건 등록 — ${openMeeting.title}`:'안건 등록'}>
+        {openMeeting&&(
+          <div style={{fontSize:11,color:'#1a56db',background:'#eff6ff',border:'1px solid #bfdbfe',
+            borderRadius:7,padding:'7px 10px',marginBottom:10}}>
+            여기서 적는 안건은 <strong>「{openMeeting.title}」({String(openMeeting.met_on).slice(0,10)})</strong> 에 달립니다.
+          </div>
+        )}
         {!openForm
           ?<button onClick={()=>setOpenForm(true)}
             style={{padding:'9px 18px',borderRadius:8,border:'1px solid #1a56db',background:'#eff6ff',
@@ -3428,7 +3653,9 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
           </div>}
       </Card>
 
-      <Card title={`안건 ${rows.length}건`}>
+      <Card title={openMeeting?`「${openMeeting.title}」의 안건 ${rows.length}건`
+        :selMeeting==='none'?`회의 없는 안건 ${rows.length}건`
+        :`안건 ${rows.length}건 (전체)`}>
         <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',marginBottom:12,
           paddingBottom:12,borderBottom:'1px solid #f3f4f6'}}>
           <button onClick={()=>setFStatus('')}
@@ -3506,6 +3733,10 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
                     {a.owner_name?<>담당 <strong style={{color:'#374151'}}>{a.owner_name}</strong></>:'담당 미지정'}
                     {(a.parent_summary||a.parent_text)&&
                       <> · 프로젝트 <strong style={{color:'#374151'}}>{a.parent_summary||a.parent_text}</strong></>}
+                    {/* 전체를 볼 때는 «어느 회의에서 나왔는지» 가 붙어야 뜻이 산다 */}
+                    {!openMeeting&&a.meeting_title&&
+                      <> · 회의 <strong style={{color:'#1a56db'}}>{a.meeting_title}</strong>
+                        {a.meeting_date?` (${String(a.meeting_date).slice(5,10)})`:''}</>}
                     {a.source&&<> · {a.source}</>}
                     {a.confirmed_by_name&&<> · 확인 {a.confirmed_by_name}</>}
                   </div>

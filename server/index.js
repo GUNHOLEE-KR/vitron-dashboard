@@ -3069,6 +3069,107 @@ app.post('/api/hipass/bulk-delete', requireLogin, async (req, res) => {
   }
 })
 
+// ─── 회의록 (2026-09-05 신설) ────────────────────────────────
+// 회의 내용을 적고, 할 일이 된 것만 «안건» 으로 떼어 기한·담당을 붙인다.
+// 키울 것은 거기서 다시 Jira 로 올린다 — 어제 만든 길을 그대로 쓴다.
+//
+// 🔑 안건을 지우지 않는다. 회의록을 지워도 안건은 「회의 없는 안건」으로 남는다
+//    (ON DELETE SET NULL) — 안건에는 기한·담당·Jira 가 걸려 있다.
+
+// 참석자는 «번호» 로 온다. 숫자가 아닌 것·중복은 걸러 넣는다.
+function attendeeIds(v) {
+  if (!Array.isArray(v)) return []
+  return [...new Set(v.map(Number).filter(n => Number.isInteger(n) && n > 0))]
+}
+
+const MEETING_SELECT = `
+  SELECT m.*, u.display_name AS created_by_name,
+         (SELECT count(*)::int FROM agenda_items a WHERE a.meeting_id = m.id) AS agenda_count,
+         -- 🔑 «아직 안 끝난 것» 을 따로 센다. 회의록 목록에서 이 숫자만 보면
+         --    어느 회의가 아직 살아 있는지 알 수 있다.
+         (SELECT count(*)::int FROM agenda_items a
+           WHERE a.meeting_id = m.id AND a.status NOT IN ('confirmed','hold')) AS agenda_open
+    FROM meetings m
+    LEFT JOIN kpi_users u ON u.id = m.created_by`
+
+app.get('/api/meetings', requireLogin, async (req, res) => {
+  try {
+    const { from, to } = req.query
+    const { rows } = await pool.query(
+      `${MEETING_SELECT}
+        WHERE ($1::date IS NULL OR m.met_on >= $1::date)
+          AND ($2::date IS NULL OR m.met_on <= $2::date)
+        ORDER BY m.met_on DESC, m.id DESC`, [from || null, to || null])
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/meetings', requireLogin, async (req, res) => {
+  const b = req.body || {}
+  const title = String(b.title || '').trim()
+  if (!title) return res.status(400).json({ error: '회의 제목을 적어 주세요.' })
+  if (!b.met_on) return res.status(400).json({ error: '회의 날짜를 골라 주세요.' })
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO meetings (title, met_on, place, attendee_ids, attendee_text, body, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+      [title.slice(0, 200), b.met_on, String(b.place || '').slice(0, 200) || null,
+       attendeeIds(b.attendee_ids), String(b.attendee_text || '').slice(0, 300) || null,
+       b.body || null, req.session.uid])
+    const { rows: full } = await pool.query(`${MEETING_SELECT} WHERE m.id = $1`, [rows[0].id])
+    res.json(full[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.patch('/api/meetings/:id', requireLogin, async (req, res) => {
+  const b = req.body || {}
+  try {
+    const { rows: cur } = await pool.query('SELECT * FROM meetings WHERE id = $1', [Number(req.params.id)])
+    if (!cur.length) return res.status(404).json({ error: '해당 회의록을 찾을 수 없습니다.' })
+    // 🔑 회의록은 «여럿이 함께 보는 것» 이라 적은 사람만 고칠 수 있게 하면 쓸모가 없다.
+    //    회의에서 빠진 내용을 참석자가 채워 넣는 것이 정상이다. 지우기만 좁게 막는다.
+    await pool.query(
+      `UPDATE meetings
+          SET title = COALESCE($1, title), met_on = COALESCE($2, met_on),
+              place = $3, attendee_ids = $4, attendee_text = $5, body = $6,
+              updated_at = now()
+        WHERE id = $7`,
+      [b.title ? String(b.title).trim().slice(0, 200) : null,
+       b.met_on || null,
+       b.place === undefined ? cur[0].place : (String(b.place || '').slice(0, 200) || null),
+       b.attendee_ids === undefined ? cur[0].attendee_ids : attendeeIds(b.attendee_ids),
+       b.attendee_text === undefined ? cur[0].attendee_text
+         : (String(b.attendee_text || '').slice(0, 300) || null),
+       b.body === undefined ? cur[0].body : (b.body || null),
+       Number(req.params.id)])
+    const { rows: full } = await pool.query(`${MEETING_SELECT} WHERE m.id = $1`, [Number(req.params.id)])
+    res.json(full[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.delete('/api/meetings/:id', requireLogin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM meetings WHERE id = $1', [Number(req.params.id)])
+    if (!rows.length) return res.status(404).json({ error: '해당 회의록을 찾을 수 없습니다.' })
+    const isAdmin = req.session?.role === 'admin'
+    const isAuthor = Number(rows[0].created_by) === Number(req.session?.uid)
+    if (!isAdmin && !isAuthor) return res.status(403).json({ error: '작성자와 관리자만 지울 수 있습니다.' })
+    // 🔴 안건은 지우지 않는다. meeting_id 만 떨어져 「회의 없는 안건」이 된다(ON DELETE SET NULL).
+    const { rows: kept } = await pool.query(
+      'SELECT count(*)::int AS n FROM agenda_items WHERE meeting_id = $1', [Number(req.params.id)])
+    await pool.query('DELETE FROM meetings WHERE id = $1', [Number(req.params.id)])
+    res.json({ ok: true, kept_agenda: kept[0].n })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 // ─── 안건 (2026-09-04 신설) ──────────────────────────────────
 // 회의에서 나온 것·확인할 것을 기한과 함께 관리하고, 키울 것만 Jira 로 올린다.
 //
@@ -3081,13 +3182,15 @@ const AGENDA_SELECT = `
          j.summary AS parent_summary,
          c.display_name AS created_by_name,
          d.display_name AS done_by_name,
-         f.display_name AS confirmed_by_name
+         f.display_name AS confirmed_by_name,
+         mt.title AS meeting_title, mt.met_on AS meeting_date
     FROM agenda_items a
     LEFT JOIN workers w      ON w.id = a.owner_worker_id
     LEFT JOIN jira_issues j  ON j.jira_key = a.parent_key
     LEFT JOIN kpi_users c    ON c.id = a.created_by
     LEFT JOIN kpi_users d    ON d.id = a.done_by
-    LEFT JOIN kpi_users f    ON f.id = a.confirmed_by`
+    LEFT JOIN kpi_users f    ON f.id = a.confirmed_by
+    LEFT JOIN meetings mt    ON mt.id = a.meeting_id`
 
 // Jira 자격증명. 없으면 «올리기» 만 막고 나머지 기능은 그대로 돈다.
 function jiraAuth() {
@@ -3100,17 +3203,23 @@ function jiraAuth() {
 
 app.get('/api/agenda', requireLogin, async (req, res) => {
   try {
-    const { status, owner_id, parent_key } = req.query
+    const { status, owner_id, parent_key, meeting_id } = req.query
+    // 🔑 meeting_id=none 은 «회의에 안 걸린 것만» 이다. 빈 값(안 보냄)과 구분해야 한다 —
+    //    「회의 없는 안건」을 따로 보는 것이 회의록을 도입한 뒤의 기본 쓰임이다.
+    const noMeeting = String(meeting_id) === 'none'
+    const mid = noMeeting ? null : (meeting_id ? Number(meeting_id) : null)
     const { rows } = await pool.query(
       `${AGENDA_SELECT}
         WHERE ($1::text IS NULL OR a.status = $1::text)
           AND ($2::int  IS NULL OR a.owner_worker_id = $2::int)
           AND ($3::text IS NULL OR a.parent_key = $3::text)
+          AND ($4::int  IS NULL OR a.meeting_id = $4::int)
+          AND ($5::boolean IS FALSE OR a.meeting_id IS NULL)
         -- 🔑 «해야 할 것» 이 위로 온다 — 끝난 것(confirmed·hold)은 맨 아래.
         --    기한이 빠른 것부터, 기한 없는 것은 그 뒤에.
         ORDER BY (a.status IN ('confirmed','hold')) ASC,
                  (a.due_date IS NULL) ASC, a.due_date ASC, a.created_at DESC`,
-      [status || null, owner_id || null, parent_key || null])
+      [status || null, owner_id || null, parent_key || null, mid, noMeeting])
     res.json(rows)
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -3125,8 +3234,8 @@ app.post('/api/agenda', requireLogin, async (req, res) => {
     const { rows } = await pool.query(
       `INSERT INTO agenda_items
          (title, detail, owner_worker_id, due_date, status,
-          parent_key, parent_text, source, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+          parent_key, parent_text, source, meeting_id, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
       [title.slice(0, 200), b.detail || null,
        b.owner_worker_id ? Number(b.owner_worker_id) : null,
        b.due_date || null,
@@ -3134,6 +3243,7 @@ app.post('/api/agenda', requireLogin, async (req, res) => {
        String(b.parent_key || '').slice(0, 40) || null,
        String(b.parent_text || '').slice(0, 200) || null,
        String(b.source || '').slice(0, 200) || null,
+       b.meeting_id ? Number(b.meeting_id) : null,
        req.session.uid])
     const { rows: full } = await pool.query(`${AGENDA_SELECT} WHERE a.id = $1`, [rows[0].id])
     res.json(full[0])
@@ -3168,6 +3278,7 @@ app.patch('/api/agenda/:id', requireLogin, async (req, res) => {
           SET title = COALESCE($1, title), detail = $2,
               owner_worker_id = $3, due_date = $4, status = $5,
               parent_key = $6, parent_text = $7, source = $8,
+              meeting_id = $12,
               done_at = CASE WHEN $9 THEN now() ELSE done_at END,
               done_by = CASE WHEN $9 THEN $10::int ELSE done_by END,
               updated_at = now()
@@ -3181,7 +3292,10 @@ app.patch('/api/agenda/:id', requireLogin, async (req, res) => {
        b.parent_key === undefined ? cur[0].parent_key : (String(b.parent_key || '').slice(0, 40) || null),
        b.parent_text === undefined ? cur[0].parent_text : (String(b.parent_text || '').slice(0, 200) || null),
        b.source === undefined ? cur[0].source : (String(b.source || '').slice(0, 200) || null),
-       toDone, req.session.uid, Number(req.params.id)])
+       toDone, req.session.uid, Number(req.params.id),
+       // ⚠ 「안 보냄」과 「비우기」는 다른 뜻이다 — 안 보내면 지금 걸린 회의를 그대로 둔다
+       b.meeting_id === undefined ? cur[0].meeting_id
+         : (b.meeting_id ? Number(b.meeting_id) : null)])
     const { rows: full } = await pool.query(`${AGENDA_SELECT} WHERE a.id = $1`, [Number(req.params.id)])
     res.json(full[0])
   } catch (e) {
