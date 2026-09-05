@@ -156,15 +156,42 @@ const ONE_WAY_DIRS=[
   {value:'이동',icon:'📍→📍',hint:'현장에서 다른 현장으로 (사무실 안 거침)'},
 ]
 
-// 구글 지도 길찾기 링크 — 좌표 없이 «이름만» 으로 열린다.
-// 🔑 네이버 새 지도는 좌표를 요구해 이름만으로는 안정적으로 안 열린다. 그래서 구글이다.
+// 지도 길찾기 — 네이버로 연다 (2026-09-06 지시).
+// 🔴 구글은 «한국 국내 자동차 길찾기를 아예 제공하지 않는다» (지도 데이터 반출 제한).
+//    그래서 종전의 travelmode=driving 링크는 국내 구간에서 한 번도 열린 적이 없고
+//    「현재 제공 중인 운전 경로 검색 서비스 범위를 벗어난 검색입니다」 만 떴다.
+// ⚠ 이름만으로 출발지·도착지가 «채워지는» 링크는 지금 어디에도 없다 —
+//   카카오는 sName·eName 을 통째로 버리고(실측), 네이버는 좌표를 요구한다.
+//   그래서 «길찾기 화면까지» 열어 주고 이름은 복사 단추로 집어 준다.
+const NAVER_DIR_URL='https://map.naver.com/p/directions/-/-/-/car'
 // 🔑 주소가 등록돼 있으면 주소를 쓴다 — 이름만으로는 동명 지점으로 튈 수 있다.
 const mapQuery=(place)=>place?.address?.trim()||place?.name||''
-const googleDirUrl=(from,to)=>
-  'https://www.google.com/maps/dir/?api=1'
-  +`&origin=${encodeURIComponent(mapQuery(from))}`
-  +`&destination=${encodeURIComponent(mapQuery(to))}`
-  +'&travelmode=driving'
+// ⚠ 사내는 http 라 navigator.clipboard 가 «없다»(보안 컨텍스트가 아니다).
+//   옛 방식을 뒤에 두지 않으면 복사가 조용히 안 되고, 안 된 줄도 모른다.
+// 🔑 «절대 던지지 않는다» — 되었는지를 boolean 으로만 답한다.
+//    처음에는 clipboard 의 promise 를 그대로 돌려줬는데, 그것이 거부되면
+//    부르는 쪽의 await 가 튕겨 «복사도 안 되고 알림도 안 뜨는» 상태가 됐다(실측).
+// 🔑 clipboard 가 «있어도 거부될 수 있다» — 창이 포커스를 잃으면 그렇다.
+//    그래서 없을 때만이 아니라 «실패했을 때도» 옛 방식으로 이어서 시도한다.
+async function copyText(s){
+  if(!s) return false
+  try{
+    if(window.isSecureContext&&navigator.clipboard){
+      await navigator.clipboard.writeText(s)
+      return true
+    }
+  }catch{ /* 거부됐다 — 아래 옛 방식으로 이어 간다 */ }
+  // ⚠ 임시 칸에 초점을 뺏으므로 원래 자리로 돌려놓는다. 안 그러면 고르던 칸이 풀린다.
+  const prev=document.activeElement
+  const ta=document.createElement('textarea')
+  ta.value=s; ta.style.position='fixed'; ta.style.top='-1000px'; ta.style.opacity='0'
+  document.body.appendChild(ta); ta.focus(); ta.select()
+  let ok
+  try{ ok=document.execCommand('copy') }
+  catch{ ok=false }
+  finally{ document.body.removeChild(ta); try{ prev?.focus?.() }catch{ /* 없어졌으면 그만 */ } }
+  return ok
+}
 
 // 일정 유형 — 무엇을 등록하는가. 이것을 먼저 고르면 그 뒤에 «필요한 것만» 나온다.
 // (예전에는 「업무/개인 사용」이 차량과 무관한 자리에 먼저 나와 순서가 어긋났다)
@@ -6375,12 +6402,29 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
                         <strong> 다음부터 저절로 채워집니다.</strong>
                       </span>}
                     <div style={{display:'flex',gap:6,marginTop:6,flexWrap:'wrap',alignItems:'center'}}>
-                      <a href={googleDirUrl(places.find(p=>String(p.id)===String(fromPlaceId)),
-                                            places.find(p=>String(p.id)===String(placeId)))}
-                        target="_blank" rel="noreferrer"
-                        style={{padding:'6px 12px',borderRadius:7,border:'1px solid #1a56db',
-                          background:'#eff6ff',color:'#1a56db',fontSize:12,fontWeight:700,
-                          textDecoration:'none'}}>📍 구글 지도에서 거리 보기</a>
+                      <a href={NAVER_DIR_URL} target="_blank" rel="noreferrer"
+                        style={{padding:'6px 12px',borderRadius:7,border:'1px solid #03c75a',
+                          background:'#f0fdf4',color:'#047857',fontSize:12,fontWeight:700,
+                          textDecoration:'none'}}>📍 네이버 지도 길찾기</a>
+                      {/* 이름을 링크에 실을 수 없다(위 NAVER_DIR_URL 주석) —
+                          눌러 복사해 지도의 출발지·도착지 칸에 붙여 넣는다. */}
+                      {[['출발',fromPlaceId],['도착',placeId]].map(([label,pid])=>{
+                        const q=mapQuery(places.find(p=>String(p.id)===String(pid)))
+                        return(
+                          <button key={label} type="button" title={q}
+                            // 🔑 어느 쪽이든 «반드시» 알린다. 조용히 끝나면 붙여 넣을 때가 돼서야 안다.
+                            onClick={async()=>{
+                              const ok=await copyText(q)
+                              // ⚠ 장소 이름이 매번 달라 «을/를» 을 고정할 수 없다 — 조사를 쓰지 않는 문장으로 둔다
+                              showToast(ok?`${label} 「${q}」 복사했습니다`
+                                          :`복사하지 못했습니다 — 직접 적어 주십시오 「${q}」`)
+                            }}
+                            style={{padding:'6px 10px',borderRadius:7,border:'1px solid #e5e7eb',
+                              background:'#fff',color:'#374151',fontSize:11,cursor:'pointer'}}>
+                            📋 {label} 복사
+                          </button>
+                        )
+                      })}
                       <input type="number" value={pairKmInput} onChange={e=>setPairKmInput(e.target.value)}
                         placeholder="km" disabled={!canEdit} style={{...inputS,width:90}}/>
                       <input type="number" value={pairMinInput} onChange={e=>setPairMinInput(e.target.value)}
@@ -6389,11 +6433,12 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
                         style={{padding:'6px 14px',borderRadius:7,border:'none',background:'#059669',
                           color:'#fff',cursor:'pointer',fontSize:12,fontWeight:700}}>거리 저장</button>
                     </div>
-                    {!places.find(p=>String(p.id)===String(fromPlaceId))?.address&&(
-                      <div style={{fontSize:11,color:'#6b7280',marginTop:4}}>
-                        💡 장소에 <strong>주소</strong>를 넣어 두면 지도가 정확한 곳을 찾습니다.
-                      </div>
-                    )}
+                    <div style={{fontSize:11,color:'#6b7280',marginTop:4,lineHeight:1.7}}>
+                      💡 네이버 지도는 <strong>이름을 링크로 받지 않습니다</strong> — 길찾기 창이 열리면
+                      위 <strong>[복사]</strong>로 집어 출발지·도착지 칸에 붙여 넣으십시오.
+                      {!places.find(p=>String(p.id)===String(fromPlaceId))?.address&&
+                        <> 장소에 <strong>주소</strong>를 넣어 두면 더 정확하게 찾습니다.</>}
+                    </div>
                   </div>
                 )}
               </div>
