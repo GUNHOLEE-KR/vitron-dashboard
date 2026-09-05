@@ -182,6 +182,86 @@ const SHOTS = [
   // 공용 메일 계정 단추가 들어간 알림 카드 (2026-08-29)
   // ⚠ clipCard 로 자르려 했으나 상자를 못 찾아 설정 화면을 통째로 찍는다.
   { file: '79_설정_메일계정.png', js: `__click('설정')`, wait: 2800 },
+
+  // ── 2026-09-05 신설 ────────────────────────────────────────
+  // ⚠ 창(모달)은 clipCard 로 자를 수 없다 — 카드 모서리(10px)가 아니다.
+  //   가운데 뜬 창은 화면을 통째로 찍어도 충분히 크게 보인다.
+
+  // 계획 등록 창의 «날짜 달력». 흩어진 날을 고른 모습이라야 뜻이 전해진다 —
+  // 한 날만 켜 두면 예전 방식과 그림이 구별되지 않는다.
+  { file: '53_일정_여러날짜.png', wait: 5200,
+    js: `(()=>{__click('스케줄');
+      setTimeout(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.trim()==='+ 계획 추가'); if(b)b.click()
+        setTimeout(()=>{
+          // 달력 격자 = 7열 grid. 앞 7칸은 요일 머리글이라 떼고,
+          // 흐리게 그린 «다른 달» 칸도 뺀 뒤 그 달의 1일부터 센다.
+          const g=[...document.querySelectorAll('div')].filter(n=>{
+            const s=getComputedStyle(n)
+            return s.display==='grid' && s.gridTemplateColumns.split(' ').length===7
+          }).pop()
+          if(!g)return
+          const cells=[...g.children].slice(7)
+            .filter(c=>getComputedStyle(c).opacity==='1')
+          // ⚠ 다섯 칸을 «한 박자에» 누르면 화면이 따라오지 못한다. 누른 것을
+          //   손 떼는 순간에 반영하므로, 그 사이에 그릴 틈을 줘야 한다.
+          ;[7,9,14,15,16].forEach((i,k)=>setTimeout(()=>{
+            const c=cells[i]; if(!c)return
+            c.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))
+            setTimeout(()=>window.dispatchEvent(
+              new PointerEvent('pointerup',{bubbles:true})),80)
+          }, k*280))
+        },1200)},600)})()` },
+
+  // 하이패스 «불러온 내역» 표 — 대조 칸이 함께 보여야 한다.
+  // ⚠ scrollIntoView 는 머리글이 화면 맨 위에 붙어 표 머리가 잘렸다. 자리를 직접 셈한다.
+  // ⚠ 탭을 너무 일찍 누르면 화면이 아직 없어 그대로 「오늘 업무」가 찍힌다(실제로 겪음).
+  //   그래서 첫 걸음에 넉넉히 틈을 둔다.
+  { file: '80_정산_하이패스_내역.png', wait: 9000,
+    js: `(()=>{setTimeout(()=>{__click('스케줄')
+      setTimeout(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>/정산/.test(x.textContent)); if(b)b.click()
+        setTimeout(()=>{const s=document.querySelector('select')
+          if(s){const set=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set
+            set.call(s,'2026-08'); s.dispatchEvent(new Event('change',{bubbles:true}))}
+          setTimeout(()=>{const h=[...document.querySelectorAll('strong')]
+            .find(x=>x.textContent.includes('불러온 내역'))
+            if(h)window.scrollTo(0,h.getBoundingClientRect().top+scrollY-120)},2200)
+        },900)},1000)},1400)})()` },
+
+  // 대조 뜻풀이 — 색만 보고는 무슨 뜻인지 알 수 없어 표 아래에 붙여 둔 줄
+  { file: '81_정산_하이패스_뜻풀이.png', wait: 9000,
+    js: `(()=>{setTimeout(()=>{__click('스케줄')
+      setTimeout(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>/정산/.test(x.textContent)); if(b)b.click()
+        setTimeout(()=>{const s=document.querySelector('select')
+          if(s){const set=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set
+            set.call(s,'2026-08'); s.dispatchEvent(new Event('change',{bubbles:true}))}
+          setTimeout(()=>{const h=[...document.querySelectorAll('strong')]
+            .find(x=>x.textContent.includes('대조는 참고일'))
+            if(h)window.scrollTo(0,h.getBoundingClientRect().top+scrollY-300)},2200)
+        },900)},1000)},1400)})()` },
+
+  // 회의록 작성 폼 — 참석자 「전체」 를 눌러 둔 모습
+  // ⚠ «만들지는» 않는다. 찍자고 시험 자료를 남길 일이 아니다.
+  { file: '82_회의록_작성.png', wait: 4200,
+    js: `(()=>{const t=[...document.querySelectorAll('button')]
+      .find(x=>x.textContent.trim()==='회의록'); if(t)t.click()
+      setTimeout(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.trim()==='+ 회의록 작성'); if(b)b.click()
+        setTimeout(()=>{const a=[...document.querySelectorAll('button')]
+          .find(x=>x.textContent.startsWith('전체 (')); if(a)a.click()},900)},900)})()` },
+
+  // 구매 이력의 다단 정렬 — ①②③ 이 붙은 모습이라야 «차례» 가 보인다.
+  // 대표이사가 빠진 직원 거르개도 같은 카드에 함께 찍힌다.
+  { file: '83_구매_정렬.png', wait: 5000,
+    js: `(()=>{const t=[...document.querySelectorAll('button')]
+      .find(x=>x.textContent.trim()==='구매'); if(t)t.click()
+      setTimeout(()=>{const pick=n=>[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.trim().replace(/[0-9▼▲\\s]/g,'')===n)
+        const a=pick('금액'); if(a)a.click()
+        setTimeout(()=>{const b=pick('상태'); if(b)b.click()},400)},1600)})()`,
+    clipCard: '구매 이력' },
 ]
 
 // --only 로 일부만 찍는다. 파일명에 그 글자가 들어간 것만 고른다.
