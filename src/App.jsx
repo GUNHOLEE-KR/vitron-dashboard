@@ -3246,6 +3246,11 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
   const [selMeeting,setSelMeeting]=useState('')   // '' 전체 / 'none' 회의 없는 것 / 숫자
   const [mForm,setMForm]=useState(null)           // 작성·수정 중인 회의록
   const [mBusy,setMBusy]=useState(false)
+  // 🔑 «적는 자리» 와 «찾아보는 자리» 를 가른다 (2026-09-05 지시).
+  //    회의 중에는 지난 회의록 목록이 화면을 밀어내고, 나중에 찾아볼 때는
+  //    작성 폼이 방해가 된다. 하는 일이 다르므로 화면도 나눈다.
+  const [wmode,setWmode]=useState('write')        // write 작성 / browse 조회
+  const [mq,setMq]=useState('')                   // 조회 — 제목·본문 찾기
 
   const reloadMeetings=async()=>{ try{ setMeetings(await getMeetings()) }catch{ /* 목록만 비운다 */ } }
   // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -3263,6 +3268,14 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
 
   // 지금 열어 둔 회의록. 새 안건은 여기에 붙는다.
   const openMeeting=meetings.find(m=>String(m.id)===String(selMeeting))||null
+  // 조회에서 찾기 — 제목·장소·본문을 한꺼번에 훑는다(회의는 「무슨 얘기였더라」로 찾는다)
+  const shownMeetings=(()=>{
+    const q=mq.trim().toLowerCase()
+    if(!q) return meetings
+    return meetings.filter(m=>
+      [m.title,m.place,m.body,String(m.met_on).slice(0,10)]
+        .some(v=>String(v||'').toLowerCase().includes(q)))
+  })()
   const nameOfWorker=id=>{const w=workers.find(x=>Number(x.id)===Number(id));return w?workerLabel(w,dupNames):`#${id}`}
 
   function newMeetingForm(){
@@ -3412,13 +3425,44 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
 
   return(
     <div>
+      {/* ── 작성 / 조회 — 하는 일이 달라 화면을 가른다 (2026-09-05 지시) ── */}
+      <div style={{display:'flex',gap:6,marginBottom:12}}>
+        {[{v:'write',label:'✍ 회의록 작성'},{v:'browse',label:'📚 지난 회의록 조회'}].map(t=>(
+          <button key={t.v} onClick={()=>{ setWmode(t.v); if(t.v==='browse') setMForm(null) }}
+            style={{padding:'9px 18px',borderRadius:8,fontSize:13,fontWeight:700,cursor:'pointer',
+              border:'1px solid '+(wmode===t.v?'#1a56db':'#e5e7eb'),
+              background:wmode===t.v?'#1a56db':'#fff',color:wmode===t.v?'#fff':'#6b7280'}}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
       {/* ── 회의록 (2026-09-05 신설) ─────────────────────────── */}
-      <Card title={`회의록 ${meetings.length}건`}>
-        {!mForm&&(
+      <Card title={wmode==='write'
+        ?(openMeeting?`작성 중 — ${openMeeting.title}`:'회의록 작성')
+        :`지난 회의록 ${shownMeetings.length}건${mq?` (전체 ${meetings.length})`:''}`}>
+        {wmode==='write'&&!mForm&&(
           <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',marginBottom:10}}>
             <button onClick={newMeetingForm}
               style={{padding:'9px 18px',borderRadius:8,border:'1px solid #1a56db',background:'#eff6ff',
                 color:'#1a56db',cursor:'pointer',fontSize:13,fontWeight:700}}>+ 회의록 작성</button>
+            {openMeeting&&(
+              <button onClick={()=>setSelMeeting('')}
+                style={{padding:'7px 14px',borderRadius:8,fontSize:12,cursor:'pointer',
+                  border:'1px solid #e5e7eb',background:'#fff',color:'#6b7280'}}>닫기</button>
+            )}
+          </div>
+        )}
+        {wmode==='browse'&&(
+          <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',marginBottom:10}}>
+            <input value={mq} onChange={e=>setMq(e.target.value)}
+              placeholder="제목·장소·내용·날짜로 찾기"
+              style={{...inputS,width:'auto',minWidth:220,flex:'1 1 220px'}}/>
+            {mq&&(
+              <button onClick={()=>setMq('')}
+                style={{padding:'7px 14px',borderRadius:8,fontSize:12,cursor:'pointer',
+                  border:'1px solid #e5e7eb',background:'#fff',color:'#6b7280'}}>지우기</button>
+            )}
             {/* 🔑 「회의 없는 안건」을 따로 볼 수 있어야 한다 — 어제까지 적힌 것이 전부 여기다 */}
             <button onClick={()=>setSelMeeting(selMeeting==='none'?'':'none')}
               style={{padding:'7px 14px',borderRadius:8,fontSize:12,fontWeight:700,cursor:'pointer',
@@ -3453,7 +3497,24 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
                 placeholder="예: 본사 회의실 / 화상" style={inputS}/>
             </div>
             <div style={{gridColumn:'1 / -1'}}>
-              <label style={labelS}>참석자</label>
+              <label style={labelS}>
+                참석자
+                <span style={{fontWeight:500,color:'#9ca3af',marginLeft:6}}>
+                  {mForm.attendee_ids.length}명 골랐습니다
+                </span>
+              </label>
+              {/* 🔑 주간회의는 «전원 참석» 이 보통이다 — 여덟 번 누르지 않게 한다 (2026-09-05 지시).
+                  ⚠ 「전체」는 «재직 중인 인원» 뿐이다. 이 workers 는 이미 재직자만 들어온다. */}
+              <div style={{display:'flex',gap:6,marginBottom:6}}>
+                <button onClick={()=>setMForm({...mForm,attendee_ids:workers.map(w=>w.id)})}
+                  style={{padding:'4px 12px',borderRadius:6,fontSize:11,fontWeight:700,cursor:'pointer',
+                    border:'1px solid #1a56db',background:'#eff6ff',color:'#1a56db'}}>
+                  전체 ({workers.length}명)
+                </button>
+                <button onClick={()=>setMForm({...mForm,attendee_ids:[]})}
+                  style={{padding:'4px 12px',borderRadius:6,fontSize:11,cursor:'pointer',
+                    border:'1px solid #e5e7eb',background:'#fff',color:'#6b7280'}}>모두 해제</button>
+              </div>
               <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
                 {workers.map(w=>{
                   const on=mForm.attendee_ids.includes(w.id)
@@ -3495,12 +3556,28 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
           </div>
         )}
 
-        {meetings.length===0&&!mForm
-          ?<div style={{fontSize:12,color:'#6b7280'}}>
-            아직 회의록이 없습니다. <strong>[+ 회의록 작성]</strong> 으로 시작하십시오.
-          </div>
-          :<div style={{display:'flex',flexDirection:'column',gap:8}}>
-            {meetings.map(m=>{
+        {/* 🔑 작성 화면에는 «지금 쓰는 것 하나» 만 둔다 — 지난 목록이 화면을 밀어낸다.
+            조회 화면에는 찾은 것 전부를 둔다. */}
+        {(()=>{
+          const list=wmode==='write'?(openMeeting?[openMeeting]:[]):shownMeetings
+          if(list.length===0&&!mForm){
+            return(
+              <div style={{fontSize:12,color:'#6b7280',lineHeight:1.8}}>
+                {wmode==='write'
+                  ?(meetings.length===0
+                    ?<>아직 회의록이 없습니다. <strong>[+ 회의록 작성]</strong> 으로 시작하십시오.</>
+                    :<>지금 쓰고 있는 회의록이 없습니다.{' '}
+                      <strong>[+ 회의록 작성]</strong> 으로 새로 쓰시거나,{' '}
+                      <strong>[📚 지난 회의록 조회]</strong> 에서 이어 쓸 것을 고르십시오.</>)
+                  :(meetings.length===0
+                    ?<>아직 회의록이 없습니다.</>
+                    :<>찾으시는 회의록이 없습니다. 다른 낱말로 찾아보십시오.</>)}
+              </div>
+            )
+          }
+          return(
+          <div style={{display:'flex',flexDirection:'column',gap:8}}>
+            {list.map(m=>{
               const on=String(m.id)===String(selMeeting)
               const canDel=canEditOthers||Number(m.created_by)===Number(me?.uid)
               return(
@@ -3550,9 +3627,16 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
                             삭제
                           </button>
                         )}
+                        {/* 조회에서 「여기에 안건을 더 달자」 가 되면 작성으로 넘겨 준다 */}
+                        {wmode==='browse'&&(
+                          <button onClick={()=>{ setSelMeeting(String(m.id)); setWmode('write') }}
+                            style={{...rowBtnS,border:'1px solid #bfdbfe',background:'#eff6ff',color:'#1a56db'}}>
+                            ✍ 이 회의에 안건 달기
+                          </button>
+                        )}
                         <div style={{flex:1}}/>
                         <span style={{fontSize:11,color:'#6b7280',alignSelf:'center'}}>
-                          아래에서 <strong>이 회의의 안건</strong>을 적고 보실 수 있습니다 ↓
+                          아래에서 <strong>이 회의의 안건</strong>을 보실 수 있습니다 ↓
                         </span>
                       </div>
                     </div>
@@ -3560,14 +3644,17 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
                 </div>
               )
             })}
-          </div>}
+          </div>
+          )
+        })()}
         <div style={{marginTop:12,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
           💡 회의록을 <strong>열어 둔 채</strong> 안건을 적으면 <strong>그 회의의 안건</strong>이 됩니다.<br/>
           💡 회의록을 지워도 <strong>안건은 남습니다</strong> — 기한·담당·Jira 가 걸려 있어 함께 지우지 않습니다.<br/>
-          💡 회의 없이 생긴 것은 <strong>[회의 없는 안건]</strong> 에서 보실 수 있습니다.
+          💡 회의 없이 생긴 것은 <strong>[📚 지난 회의록 조회]</strong> 의 <strong>[회의 없는 안건]</strong> 에서 보실 수 있습니다.
         </div>
       </Card>
 
+      {wmode==='write'&&
       <Card title={openMeeting?`안건 등록 — ${openMeeting.title}`:'안건 등록'}>
         {openMeeting&&(
           <div style={{fontSize:11,color:'#1a56db',background:'#eff6ff',border:'1px solid #bfdbfe',
@@ -3580,32 +3667,13 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
             style={{padding:'9px 18px',borderRadius:8,border:'1px solid #1a56db',background:'#eff6ff',
               color:'#1a56db',cursor:'pointer',fontSize:13,fontWeight:700}}>+ 안건 추가</button>
           :<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-            <div style={{gridColumn:'1 / -1'}}>
-              <label style={labelS}>안건 *</label>
-              <input value={title} onChange={e=>setTitle(e.target.value)}
-                placeholder="예: 히타치 천안공장 계측기 사양 확정" style={inputS}/>
-            </div>
-            <div style={{gridColumn:'1 / -1'}}>
-              <label style={labelS}>내용 (선택)</label>
-              <textarea value={detail} onChange={e=>setDetail(e.target.value)} rows={3}
-                placeholder="확인해야 할 것, 결정된 것 등" style={{...inputS,resize:'vertical'}}/>
-            </div>
-            <div>
-              <label style={labelS}>담당자</label>
-              <select value={ownerId} onChange={e=>setOwnerId(e.target.value)} style={inputS}>
-                <option value="">지정 안 함</option>
-                {workers.map(w=><option key={w.id} value={w.id}>{workerLabel(w,dupNames)}</option>)}
-              </select>
-            </div>
-            <div>
-              <label style={labelS}>기한</label>
-              <input type="date" value={due} onChange={e=>setDue(e.target.value)} style={inputS}/>
-            </div>
-            {/* 🔑 프로젝트는 업무 입력과 «같은 목록» 에서 고른다. 그래야 나중에 묶어 보고,
+            {/* 🔑 프로젝트를 «맨 먼저» 고른다 (2026-09-05 지시). 어느 일인지 정하고 나서
+                안건을 적는 것이 실제 순서이고, 업무 입력 화면과도 같은 차례다.
+                프로젝트는 업무 입력과 «같은 목록» 에서 고른다 — 그래야 나중에 묶어 보고,
                 Jira 로 올릴 때 상위(에픽)로 그대로 쓸 수 있다. */}
             <div style={{gridColumn:'1 / -1'}}>
               <label style={labelS}>
-                관련 프로젝트 (선택)
+                ① 관련 프로젝트 (선택)
                 {doneCount>0&&(
                   <label style={{marginLeft:8,fontWeight:500,color:'#6b7280',cursor:'pointer'}}>
                     <input type="checkbox" checked={showDone} onChange={e=>setShowDone(e.target.checked)}
@@ -3636,6 +3704,27 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
               )}
             </div>
             <div style={{gridColumn:'1 / -1'}}>
+              <label style={labelS}>② 안건 *</label>
+              <input value={title} onChange={e=>setTitle(e.target.value)}
+                placeholder="예: 히타치 천안공장 계측기 사양 확정" style={inputS}/>
+            </div>
+            <div style={{gridColumn:'1 / -1'}}>
+              <label style={labelS}>내용 (선택)</label>
+              <textarea value={detail} onChange={e=>setDetail(e.target.value)} rows={3}
+                placeholder="확인해야 할 것, 결정된 것 등" style={{...inputS,resize:'vertical'}}/>
+            </div>
+            <div>
+              <label style={labelS}>담당자</label>
+              <select value={ownerId} onChange={e=>setOwnerId(e.target.value)} style={inputS}>
+                <option value="">지정 안 함</option>
+                {workers.map(w=><option key={w.id} value={w.id}>{workerLabel(w,dupNames)}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={labelS}>기한</label>
+              <input type="date" value={due} onChange={e=>setDue(e.target.value)} style={inputS}/>
+            </div>
+            <div style={{gridColumn:'1 / -1'}}>
               <label style={labelS}>출처 (선택)</label>
               <input value={source} onChange={e=>setSource(e.target.value)}
                 placeholder="예: 9/4 주간회의" style={inputS}/>
@@ -3651,7 +3740,7 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
                   color:'#6b7280',cursor:'pointer',fontSize:13}}>취소</button>
             </div>
           </div>}
-      </Card>
+      </Card>}
 
       <Card title={openMeeting?`「${openMeeting.title}」의 안건 ${rows.length}건`
         :selMeeting==='none'?`회의 없는 안건 ${rows.length}건`
