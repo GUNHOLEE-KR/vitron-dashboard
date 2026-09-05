@@ -3565,10 +3565,12 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
               <div style={{fontSize:12,color:'#6b7280',lineHeight:1.8}}>
                 {wmode==='write'
                   ?(meetings.length===0
-                    ?<>아직 회의록이 없습니다. <strong>[+ 회의록 작성]</strong> 으로 시작하십시오.</>
+                    ?<>아직 회의록이 없습니다. <strong>[+ 회의록 작성]</strong> 으로 시작하십시오.<br/>
+                      📝 <strong>안건은 회의록을 시작한 뒤에 적습니다.</strong></>
                     :<>지금 쓰고 있는 회의록이 없습니다.{' '}
                       <strong>[+ 회의록 작성]</strong> 으로 새로 쓰시거나,{' '}
-                      <strong>[📚 지난 회의록 조회]</strong> 에서 이어 쓸 것을 고르십시오.</>)
+                      <strong>[📚 지난 회의록 조회]</strong> 에서 이어 쓸 것을 고르십시오.<br/>
+                      📝 <strong>안건은 회의록을 시작한 뒤에 적습니다.</strong></>)
                   :(meetings.length===0
                     ?<>아직 회의록이 없습니다.</>
                     :<>찾으시는 회의록이 없습니다. 다른 낱말로 찾아보십시오.</>)}
@@ -3654,14 +3656,17 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
         </div>
       </Card>
 
-      {wmode==='write'&&
-      <Card title={openMeeting?`안건 등록 — ${openMeeting.title}`:'안건 등록'}>
-        {openMeeting&&(
-          <div style={{fontSize:11,color:'#1a56db',background:'#eff6ff',border:'1px solid #bfdbfe',
-            borderRadius:7,padding:'7px 10px',marginBottom:10}}>
-            여기서 적는 안건은 <strong>「{openMeeting.title}」({String(openMeeting.met_on).slice(0,10)})</strong> 에 달립니다.
-          </div>
-        )}
+      {/* 🔑 «회의록을 시작한 뒤에» 안건을 적는다 (2026-09-05 지시).
+          회의록도 없는데 안건 칸이 먼저 보이면 차례가 뒤집힌 것이고,
+          그렇게 적힌 안건은 어느 회의 것인지 알 수 없어 나중에 찾지 못한다.
+          ⚠ 이제 회의 없이 안건을 «새로 만드는» 길은 없다. 「회의 없는 안건」은
+            예전에 그렇게 생긴 것과 회의록이 지워진 것을 «보는» 자리로만 남는다. */}
+      {wmode==='write'&&openMeeting&&
+      <Card title={`안건 등록 — ${openMeeting.title}`}>
+        <div style={{fontSize:11,color:'#1a56db',background:'#eff6ff',border:'1px solid #bfdbfe',
+          borderRadius:7,padding:'7px 10px',marginBottom:10}}>
+          여기서 적는 안건은 <strong>「{openMeeting.title}」({String(openMeeting.met_on).slice(0,10)})</strong> 에 달립니다.
+        </div>
         {!openForm
           ?<button onClick={()=>setOpenForm(true)}
             style={{padding:'9px 18px',borderRadius:8,border:'1px solid #1a56db',background:'#eff6ff',
@@ -3954,7 +3959,15 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
 // 안건 카드 안의 작은 단추 — 여러 곳에서 같은 모양을 쓴다
 const rowBtnS={padding:'5px 12px',borderRadius:6,fontSize:12,fontWeight:700,cursor:'pointer'}
 
-function TabPurchase({workers,me,canEditOthers,showToast}){
+function TabPurchase({workers:allWorkers,me,canEditOthers,showToast}){
+  // 🔑 구매는 대표이사가 «결재하는» 일이지 «요청하는» 일이 아니다 (2026-09-05 지시).
+  //    요청자 고르개·이력 거르개 어디에도 세우지 않는다.
+  // ⚠ 표에서 «지우지는» 않는다 — 예전에 등록된 건이 있으면 화면의 줄과
+  //   위쪽 누적 금액(서버가 낸다)이 어긋나 조용히 틀린 숫자가 된다.
+  const workers=allWorkers.filter(w=>!isBoss(w))
+  // 대표이사로 로그인했으면 「요청자」를 비워 둔다. 목록에 없는 값을 담고 있으면
+  // 고르개가 빈칸으로 보이면서도 그 사람 이름으로 등록된다.
+  const meIsBoss=allWorkers.some(w=>isBoss(w)&&Number(w.id)===Number(me?.worker_id))
   const [data,setData]=useState(null)
   const [err,setErr]=useState('')
   const [tick,setTick]=useState(0)
@@ -3982,14 +3995,31 @@ function TabPurchase({workers,me,canEditOthers,showToast}){
     setFWorkers(prev=>prev.includes(id)?prev.filter(x=>x!==id):[...prev,id])
   }
 
-  // 정렬 — 날짜·금액·상태. 화면에서 세운다(서버 합계는 정렬과 무관하다).
+  // 정렬 — 요청일·금액·상태를 «여러 겹» 으로 세운다 (2026-09-05 지시 — 엑셀의 다단 정렬).
+  // 화면에서 세운다(서버 합계는 정렬과 무관하다).
   // 🔑 상태는 글자순(ㄱㄴㄷ)이 아니라 «할 일 순» 으로 세운다 — 대기가 맨 위라야 쓸모 있다.
-  const [sortKey,setSortKey]=useState('date')
-  const [sortDesc,setSortDesc]=useState(true)
+  // 🔑 기준마다 «처음 누를 때의 방향» 이 다르다. 요청일은 최신부터·금액은 큰 것부터가
+  //    보고 싶은 것이고, 상태는 대기(할 일)부터라야 쓸모 있다.
   const STATUS_ORDER={pending:0,approved:1,rejected:2}
+  const SORT_KEYS=[{k:'date',label:'요청일',desc:true},
+                   {k:'amount',label:'금액',desc:true},
+                   {k:'status',label:'상태',desc:false}]
+  // [{k,desc}, …] — 앞이 1차 기준. 비면 요청일 최신순(서버가 주는 차례)이다.
+  const [sorts,setSorts]=useState([{k:'date',desc:true}])
+  // 🔑 누를 때마다 «기본 방향 → 반대 방향 → 해제» 로 돈다.
+  //    따로 지우는 단추를 두지 않아도 뺄 수 있어 단추가 늘지 않는다.
+  function cycleSort(k){
+    const base=SORT_KEYS.find(s=>s.k===k).desc
+    setSorts(prev=>{
+      const i=prev.findIndex(s=>s.k===k)
+      if(i<0) return [...prev,{k,desc:base}]              // 맨 뒤 차례로 붙는다
+      if(prev[i].desc===base) return prev.map((s,j)=>j===i?{...s,desc:!base}:s)
+      return prev.filter((_,j)=>j!==i)                    // 세 번째 누르면 뺀다
+    })
+  }
 
   // 입력 칸 — 물품명 · 수량 · 단가 · 구매 링크 · 사용처 · 기타
-  const [workerId,setWorkerId]=useState(me?.worker_id??'')
+  const [workerId,setWorkerId]=useState(meIsBoss?'':(me?.worker_id??''))
   const [itemName,setItemName]=useState('')
   const [qty,setQty]=useState('1')
   const [unitPrice,setUnitPrice]=useState('')
@@ -4070,12 +4100,17 @@ function TabPurchase({workers,me,canEditOthers,showToast}){
 
   // 서버는 늘 «요청일 최신순» 으로 준다. 화면에서 다시 세운다.
   // ⚠ 원본 배열을 뒤집지 않는다 — sort 는 제자리에서 바꾸므로 사본을 만든다.
+  const cmpBy=(k,a,b)=>k==='amount'?Number(a.amount||0)-Number(b.amount||0)
+    :k==='status'?(STATUS_ORDER[a.status]??9)-(STATUS_ORDER[b.status]??9)
+    :String(a.created_at||'').localeCompare(String(b.created_at||''))
   const items=[...(data.items||[])].sort((a,b)=>{
-    const d=sortKey==='amount'?Number(a.amount||0)-Number(b.amount||0)
-      :sortKey==='status'?(STATUS_ORDER[a.status]??9)-(STATUS_ORDER[b.status]??9)
-      :String(a.created_at||'').localeCompare(String(b.created_at||''))
-    // 같은 값이면 늘 요청일로 갈라 준다 — 순서가 새로고침마다 흔들리지 않게 한다
-    return (sortDesc?-d:d)||String(b.created_at||'').localeCompare(String(a.created_at||''))
+    // 1차에서 갈리면 거기서 끝, 같으면 2차·3차로 넘어간다 (엑셀의 다단 정렬)
+    for(const s of sorts){
+      const d=cmpBy(s.k,a,b)
+      if(d) return s.desc?-d:d
+    }
+    // 끝까지 같으면 늘 요청일로 갈라 준다 — 순서가 새로고침마다 흔들리지 않게 한다
+    return String(b.created_at||'').localeCompare(String(a.created_at||''))
   })
   // 🔑 승인 대기는 서버가 «거르개와 무관하게» 따로 내려준다.
   //    기간을 지난달로 잡았다고 결재할 것이 사라지면 안 된다.
@@ -4236,21 +4271,42 @@ function TabPurchase({workers,me,canEditOthers,showToast}){
             <option value="approved">승인</option>
             <option value="rejected">반려</option>
           </select>
-          {/* 정렬 — 무엇으로 세울지와 방향을 따로 고른다 */}
-          <div style={{display:'flex',gap:4,alignItems:'center',marginLeft:'auto'}}>
+          {/* 정렬 — 누른 «차례» 가 곧 1차·2차·3차 기준이다 (2026-09-05 지시).
+              공용 「내림차순」 단추 하나로는 «요청일은 최신부터, 금액은 작은 것부터» 같은
+              조합을 만들 수 없었다. 이제 기준마다 제 방향을 지닌다. */}
+          <div style={{display:'flex',gap:4,alignItems:'center',marginLeft:'auto',flexWrap:'wrap',
+            justifyContent:'flex-end'}}>
             <span style={{fontSize:11,color:'#6b7280',fontWeight:700}}>정렬</span>
-            {[['date','요청일'],['amount','금액'],['status','상태']].map(([k,label])=>(
-              <button key={k} onClick={()=>setSortKey(k)}
-                style={{padding:'6px 10px',borderRadius:7,fontSize:12,fontWeight:700,cursor:'pointer',
-                  border:'1px solid '+(sortKey===k?'#1a56db':'#e5e7eb'),
-                  background:sortKey===k?'#eff6ff':'#fff',
-                  color:sortKey===k?'#1a56db':'#6b7280'}}>{label}</button>
-            ))}
-            <button onClick={()=>setSortDesc(v=>!v)} title={sortDesc?'내림차순':'오름차순'}
-              style={{padding:'6px 10px',borderRadius:7,fontSize:12,fontWeight:700,cursor:'pointer',
-                border:'1px solid #e5e7eb',background:'#fff',color:'#374151'}}>
-              {sortDesc?'▼ 내림차순':'▲ 오름차순'}
-            </button>
+            {SORT_KEYS.map(({k,label})=>{
+              const i=sorts.findIndex(s=>s.k===k)
+              const on=i>=0
+              const base=SORT_KEYS.find(s=>s.k===k).desc
+              return(
+                <button key={k} onClick={()=>cycleSort(k)}
+                  title={on
+                    ?`${i+1}차 기준 (${sorts[i].desc?'내림차순':'오름차순'}) — 누르면 `
+                      +(sorts[i].desc===base?'방향이 뒤집힙니다':'정렬에서 빠집니다')
+                    :'누르면 정렬 기준으로 더합니다'}
+                  style={{display:'inline-flex',alignItems:'center',gap:5,
+                    padding:'6px 10px',borderRadius:7,fontSize:12,fontWeight:700,cursor:'pointer',
+                    border:'1px solid '+(on?'#1a56db':'#e5e7eb'),
+                    background:on?'#eff6ff':'#fff',
+                    color:on?'#1a56db':'#6b7280'}}>
+                  {/* 몇 차 기준인지 — 다단 정렬은 «차례» 가 보이지 않으면 뜻을 알 수 없다 */}
+                  {on&&(
+                    <span style={{display:'inline-flex',alignItems:'center',justifyContent:'center',
+                      width:15,height:15,borderRadius:8,background:'#1a56db',color:'#fff',
+                      fontSize:10,fontWeight:800}}>{i+1}</span>
+                  )}
+                  {label}{on?(sorts[i].desc?' ▼':' ▲'):''}
+                </button>
+              )
+            })}
+            <span style={{flexBasis:'100%',textAlign:'right',fontSize:10,color:'#9ca3af'}}>
+              {sorts.length===0
+                ?'정렬 없음 — 요청일 최신순으로 보입니다'
+                :'누를수록 ▼ → ▲ → 해제. 앞의 숫자가 몇 차 기준인지입니다'}
+            </span>
           </div>
         </div>
 
