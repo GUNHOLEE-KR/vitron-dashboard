@@ -1711,6 +1711,8 @@ function Dashboard({me,onLoggedOut}){
         {tab==='yearly'  &&<TabYearly  history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} holidayMap={holidayMap} plans={plans} viewYear={viewYear} setViewYear={setViewYear} jiraTree={jiraTree}/>}
         {tab==='schedule'&&<TabSchedule workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
           places={places} vehicles={vehicles} plans={plans} loading={schedLoading}
+          // 🔴 여태 이 줄이 없어 스케줄 달력에 공휴일이 아예 안 보였다 (2026-09-06)
+          restDays={restDays} holidayMap={holidayMap}
           showToast={showToast} focusDate={schedFocus}
           onOpenNew={()=>setPlanDialog({editing:null,date:today()})}
           onOpenPlan={p=>setPlanDialog({editing:p})}
@@ -2542,7 +2544,9 @@ function TabYearly({history,workers,absences=[],restDays,plans=[],viewYear,setVi
 
 function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan,
                       onOpenCell,onOpenActual,showToast,focusDate,clipboard,onPaste,onCancelCopy,
-                      me,mayEdit=()=>true,onLogout,view='week',setView=()=>{}}){
+                      me,mayEdit=()=>true,onLogout,view='week',setView=()=>{},
+                      // 공휴일 — 세 달력이 모두 쓴다 (2026-09-06)
+                      restDays,holidayMap}){
   // 빈 칸을 눌러 계획을 만들 때, 그 칸이 «남의 줄» 이면 막는다.
   // (주 뷰의 사람 기준 보기에서만 칸에 주인이 있다)
   const openCell=d=>{
@@ -2795,14 +2799,16 @@ function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan
       {view==='month'&&<ScheduleMonth ym={ym} byDate={byDate} workers={workers} todayStr={todayStr}
         onOpenPlan={onOpenPlan} onPickDate={d=>{setAnchor(d);setView('day')}}
         onOpenCell={openCell} pasting={pasting} isPicked={isPicked} togglePick={togglePick}
-        groupBy={groupBy}/>}
+        groupBy={groupBy} restDays={restDays} holidayMap={holidayMap}/>}
       {view==='week'&&<ScheduleWeek anchor={anchor} shown={shown} workers={workers} todayStr={todayStr}
         onOpenPlan={onOpenPlan} onOpenCell={openCell}
         pasting={pasting} isPicked={isPicked} togglePick={togglePick}
-        rows={groupRows} groupBy={groupBy} sortByGroup={sortByGroup}/>}
+        rows={groupRows} groupBy={groupBy} sortByGroup={sortByGroup}
+        restDays={restDays} holidayMap={holidayMap}/>}
       {view==='day'&&<ScheduleDay date={anchor} byDate={byDate} workers={workers} vehicles={vehicles}
         todayStr={todayStr} onOpenPlan={onOpenPlan} onOpenCell={openCell} onOpenActual={onOpenActual}
-        rows={groupRows} groupBy={groupBy} sortByGroup={sortByGroup} Card={Card}/>}
+        rows={groupRows} groupBy={groupBy} sortByGroup={sortByGroup} Card={Card}
+        restDays={restDays} holidayMap={holidayMap}/>}
       {view==='year'&&<ScheduleYear year={year} plans={shown}
         onPickMonth={m=>{setYm(m);setView('month')}}/>}
       {view==='settle'&&<ScheduleSettlement me={me} onLogout={onLogout}

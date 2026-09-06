@@ -112,9 +112,25 @@ function badgeGroups(list, groupBy) {
   return groupBy === 'place' ? groupByPlace(list) : list.map(p => [p])
 }
 
+// ── 공휴일 (2026-09-06 지시) ────────────────────────────────
+// 🔴 스케줄 달력은 공휴일을 «아예 받지 못하고» 있었다. 값은 이미 있는데
+//    (업무 달력이 같은 restDays·holidayMap 으로 주황을 칠한다) 줄이 끊겨 있었다.
+//
+// 🔑 판정 기준을 업무 달력과 «같게» 둔다 — restDays 는 「그날 근무」로 되돌린 날을
+//    이미 걸러 낸 집합이다. 여기서 따로 세면 두 화면이 언젠가 어긋난다.
+// ⚠ 이 조각은 사내 포털도 쓴다. 포털은 공휴일을 넘기지 않으므로 «기본값을 비워»
+//    두어 지금과 똑같이 아무것도 칠하지 않게 한다.
+const HOLIDAY_RED = '#dc2626'
+function holidayOf(d, restDays, holidayMap) {
+  if (!restDays || !restDays.has(d)) return null
+  // 이름이 없어도 «쉬는 날» 이라는 사실은 보여야 한다
+  return (holidayMap && holidayMap.get(d)) || '공휴일'
+}
+
 // ── 월 ──────────────────────────────────────────────────────
 export function ScheduleMonth({ ym, byDate, workers, todayStr, onOpenPlan, onPickDate, onOpenCell,
-                                pasting, isPicked, togglePick, readOnly = false, groupBy = 'worker' }) {
+                                pasting, isPicked, togglePick, readOnly = false, groupBy = 'worker',
+                                restDays, holidayMap }) {
   const days = monthGridDays(ym)
   return (
     <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 10, overflow: 'hidden' }}>
@@ -137,6 +153,7 @@ export function ScheduleMonth({ ym, byDate, workers, todayStr, onOpenPlan, onPic
           const restCount = groups.slice(4).reduce((n, g) => n + g.length, 0)
           const out = !isSameMonth(d, ym)
           const isToday = d === todayStr
+          const holiday = holidayOf(d, restDays, holidayMap)
           const chosen = pasting && isPicked && isPicked(d, null)
           return (
             <div key={d}
@@ -155,11 +172,23 @@ export function ScheduleMonth({ ym, byDate, workers, todayStr, onOpenPlan, onPic
                 boxShadow: chosen ? 'inset 0 0 0 2px #1a56db' : 'none',
                 opacity: out ? .5 : 1, overflow: 'hidden',
               }}>
+              {/* 🔑 공휴일이면 «날짜 줄을 칸 폭에 꽉 차게» 붉게 칠한다 (2026-09-06 지시).
+                  칸 여백(4px 5px)을 음수 margin 으로 거슬러야 진짜 «띠» 가 된다. */}
               <div style={{
-                fontSize: 11, fontWeight: isToday ? 700 : 500, marginBottom: 3,
-                color: isToday ? '#1a56db' : '#6b7280',
+                fontSize: 11, fontWeight: (holiday || isToday) ? 700 : 500,
+                display: 'flex', gap: 5, alignItems: 'baseline', overflow: 'hidden',
+                margin: holiday ? '-4px -5px 3px' : '0 0 3px',
+                padding: holiday ? '3px 5px' : 0,
+                background: holiday ? HOLIDAY_RED : 'transparent',
+                color: holiday ? '#fff' : isToday ? '#1a56db' : '#6b7280',
               }}>
-                {Number(d.slice(8, 10))}
+                <span>{Number(d.slice(8, 10))}</span>
+                {holiday && (
+                  <span style={{
+                    fontSize: 9.5, fontWeight: 700, whiteSpace: 'nowrap',
+                    overflow: 'hidden', textOverflow: 'ellipsis',
+                  }}>{holiday}</span>
+                )}
               </div>
               {shownGroups.map(g => (
                 <PlanGroupBadge key={g[0].id} plans={g} workers={workers} todayStr={todayStr}
@@ -187,7 +216,7 @@ export function ScheduleMonth({ ym, byDate, workers, todayStr, onOpenPlan, onPic
 // 칸을 누르면 «그 줄의 값 + 그 날짜» 가 계획 창에 미리 채워진다.
 export function ScheduleWeek({ anchor, shown, workers, todayStr, onOpenPlan, onOpenCell,
                                pasting, isPicked, togglePick, rows, groupBy, sortByGroup,
-                               readOnly = false }) {
+                               readOnly = false, restDays, holidayMap }) {
   const days = calWeekDays(anchor)
   return (
     <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 10, overflowX: 'auto' }}>
@@ -197,13 +226,27 @@ export function ScheduleWeek({ anchor, shown, workers, todayStr, onOpenPlan, onO
             <th style={{ ...thS, width: 130, position: 'sticky', left: 0, zIndex: 2 }}>
               {GROUP_BYS.find(g => g.v === groupBy)?.label}
             </th>
-            {days.map((d, i) => (
-              <th key={d} style={{ ...thS, background: d === todayStr ? '#1a56db' : '#1e3a5f' }}>
-                <div style={{ color: i === 5 ? '#93c5fd' : i === 6 ? '#fca5a5' : '#fff' }}>
-                  {mdLabel(d)} ({dayName(d)})
-                </div>
-              </th>
-            ))}
+            {days.map((d, i) => {
+              // 머리글 자체를 붉게 — 이 칸이 곧 「날짜가 있는 부분」 이다 (2026-09-06 지시)
+              const holiday = holidayOf(d, restDays, holidayMap)
+              return (
+                <th key={d} style={{
+                  ...thS,
+                  background: holiday ? HOLIDAY_RED : d === todayStr ? '#1a56db' : '#1e3a5f',
+                }}>
+                  <div style={{
+                    color: holiday ? '#fff' : i === 5 ? '#93c5fd' : i === 6 ? '#fca5a5' : '#fff',
+                  }}>
+                    {mdLabel(d)} ({dayName(d)})
+                  </div>
+                  {holiday && (
+                    <div style={{ fontSize: 10, fontWeight: 700, color: '#fff', opacity: .95 }}>
+                      {holiday}
+                    </div>
+                  )}
+                </th>
+              )
+            })}
           </tr>
         </thead>
         <tbody>
@@ -273,8 +316,10 @@ export function ScheduleWeek({ anchor, shown, workers, todayStr, onOpenPlan, onO
 // ⚠ Card 는 대시보드의 공통 껍데기다. 포털은 자기 껍데기를 넣어 준다 —
 //   여기서 만들면 두 화면의 카드 모양이 갈린다.
 export function ScheduleDay({ date, byDate, workers, vehicles, todayStr, onOpenPlan, onOpenCell,
-                              onOpenActual, rows, groupBy, sortByGroup, Card, readOnly = false }) {
+                              onOpenActual, rows, groupBy, sortByGroup, Card, readOnly = false,
+                              restDays, holidayMap }) {
   const list = byDate(date)
+  const holiday = holidayOf(date, restDays, holidayMap)
   const noPlan = workers.filter(w => !list.some(p => p.worker_id === w.id))
   const carRows = vehicles.filter(v => v.kind === 'company').map(v => ({
     v, users: list.filter(p => p.vehicle_id === v.id && p.status !== 'canceled'),
@@ -286,6 +331,16 @@ export function ScheduleDay({ date, byDate, workers, vehicles, todayStr, onOpenP
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.4fr) minmax(0,1fr)', gap: 16 }}>
       <Card title={`${date} (${dayName(date)}) 일정 ${list.length}건 · ${GROUP_BYS.find(g => g.v === groupBy)?.label}별`}>
+        {/* 일 보기의 「날짜가 있는 부분」 은 카드 제목이라 칠할 수가 없다.
+            그 바로 아래에 «가로로 꽉 찬» 붉은 띠를 둔다 (2026-09-06 지시) */}
+        {holiday && (
+          <div style={{
+            margin: '0 0 10px', padding: '6px 10px', borderRadius: 6,
+            background: HOLIDAY_RED, color: '#fff', fontSize: 12, fontWeight: 700,
+          }}>
+            {holiday} — 쉬는 날입니다
+          </div>
+        )}
         {!readOnly && (
           <div style={{ marginBottom: 10 }}>
             <button onClick={() => onOpenCell && onOpenCell({ date })}
