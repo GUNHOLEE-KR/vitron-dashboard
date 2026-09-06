@@ -45,6 +45,9 @@ const UID = Number(opt('uid', '1'))
 const LOGIN = opt('login', 'gunholee@vi-tron.com')
 const NAME = opt('name', '이건호')
 const ROLE = opt('role', 'admin')
+// 🔑 「내 하이패스」 처럼 «본인» 을 보는 화면은 workerId 가 없으면 통째로 안 그려진다
+//    (2026-09-06). 기본은 이건호(7) — 촬영 계정과 같은 사람이다.
+const WORKER_ID = Number(opt('worker', '7'))
 
 // server/index.js 의 makeToken 과 같은 형식
 function sessionToken() {
@@ -54,7 +57,7 @@ function sessionToken() {
   const secret = line.slice('SESSION_SECRET='.length).trim()
   const payload = {
     uid: UID, login: LOGIN, name: NAME, role: ROLE,
-    workerId: null, mustChange: false, exp: Date.now() + 3600 * 1000,
+    workerId: WORKER_ID || null, mustChange: false, exp: Date.now() + 3600 * 1000,
   }
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url')
   const sig = crypto.createHmac('sha256', secret).update(body).digest('base64url')
@@ -310,9 +313,100 @@ const SHOTS = [
           const o=[...s.options].find(o=>o.textContent.trim()==='SKIPC')
           if(o){set.call(s,o.value); s.dispatchEvent(new Event('change',{bubbles:true}))}}},7900)
       // ⚠ 창이 길어 방향 칸이 화면 밖에 있다. 그 자리로 굴려 놓아야 찍힌다.
+      // ⚠ 창이 길어 방향·지도 줄이 화면 밖에 있다. 「어디로」 를 말해 주는 자리이므로
+      //   네이버 지도 줄까지 보이게 굴린다 (2026-09-06 — 구글에서 네이버로 바뀌었다).
+      S(()=>{const a=[...document.querySelectorAll('a')]
+        .find(x=>x.textContent.includes('네이버'))
+        const l=[...document.querySelectorAll('label')]
+          .find(x=>x.textContent.trim()==='왕복')
+        ;(a||l)?.scrollIntoView({block:'center'})},8800)
+    })()` },
+
+  // ── 2026-09-06 재촬영 ──────────────────────────────────────
+  // ⚠ 50·52·58 은 2026-08-15 원본이라 그 뒤 들어간 것(편도 방향·이동·달력 끌기·
+  //   주 사용자 알림 면제)이 하나도 없었다. 셋 다 다시 찍는다.
+  // ⚠ 창(모달)은 clipCard 로 못 자른다 — 카드 모서리(10px)가 아니다. 통째로 찍는다.
+  { file: '50_일정_유형선택.png', wait: 6500,
+    js: `(()=>{const S=(f,t)=>setTimeout(f,t)
+      S(()=>__click('스케줄'),1200)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.trim()==='+ 계획 추가'); if(b)b.click()},2400)
       S(()=>{const l=[...document.querySelectorAll('label')]
-        .find(x=>x.textContent.trim()==='왕복')
-        if(l)l.scrollIntoView({block:'center'})},8800)
+        .find(x=>x.textContent.trim()==='유형')
+        if(l)l.scrollIntoView({block:'center'})},4600)
+    })()` },
+
+  // 업무 등록 — 장소를 고르고 이동 수단까지 나온 모습
+  { file: '52_일정_업무등록.png', wait: 9500,
+    js: `(()=>{const S=(f,t)=>setTimeout(f,t)
+      S(()=>__click('스케줄'),1200)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.trim()==='+ 계획 추가'); if(b)b.click()},2400)
+      S(()=>{const p=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.trim()==='장소 선택'); if(p)p.click()},3500)
+      S(()=>{const i=[...document.querySelectorAll('input')]
+        .find(x=>(x.placeholder||'').includes('장소 이름'))
+        if(i){const set=Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,'value').set
+          set.call(i,'파주'); i.dispatchEvent(new Event('input',{bubbles:true}))}},4300)
+      S(()=>{const hits=[...document.querySelectorAll('*')]
+        .filter(n=>(n.textContent||'').includes('파주 LGD'))
+        const el=hits[hits.length-1]; if(el)el.click()},5300)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.includes('법인차량')); if(b)b.click()},6400)
+      S(()=>{const l=[...document.querySelectorAll('label')]
+        .find(x=>x.textContent.trim()==='장소')
+        if(l)l.scrollIntoView({block:'center'})},8000)
+    })()` },
+
+  // 차량 예약 — 유형에서 「차량 예약」 을 고른 모습
+  { file: '58_일정_차량예약.png', wait: 7500,
+    js: `(()=>{const S=(f,t)=>setTimeout(f,t)
+      S(()=>__click('스케줄'),1200)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.trim()==='+ 계획 추가'); if(b)b.click()},2400)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.includes('차량 예약')); if(b)b.click()},3800)
+      S(()=>{const l=[...document.querySelectorAll('label')]
+        .find(x=>x.textContent.trim()==='유형')
+        if(l)l.scrollIntoView({block:'center'})},5600)
+    })()` },
+
+  // 하이패스 «정리» — 자동 배정 뒤 남은 것을 사람이 고치는 자리 (2026-09-06 신설).
+  // 「미배정」 탭을 열어 둔다 — 「어디로」·「당일 스케줄」·새 단추가 한 화면에 들어온다.
+  { file: '86_정산_하이패스_정리.png', wait: 11000,
+    js: `(()=>{const S=(f,t)=>setTimeout(f,t)
+      S(()=>__click('스케줄'),1400)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>/정산/.test(x.textContent)); if(b)b.click()},2600)
+      S(()=>{const s=document.querySelector('select')
+        if(s){const set=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set
+          set.call(s,'2026-08'); s.dispatchEvent(new Event('change',{bubbles:true}))}},3600)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.startsWith('미배정')); if(b)b.click()},6400)
+      S(()=>{const h=[...document.querySelectorAll('*')]
+        .find(x=>x.children.length===0&&x.textContent.startsWith('🛣 하이패스 정리'))
+        // ⚠ 머리글(배너+제목+탭)이 «떠 있어» 150px 을 가린다. 그 아래로 내려 잡지 않으면
+        //   카드 제목과 탭 줄이 통째로 가려진 채 찍힌다 (2026-09-06 실측).
+        if(h)window.scrollTo(0,h.getBoundingClientRect().top+scrollY-190)},8200)
+    })()` },
+
+  // 「내 하이패스」 — 직원이 자기 청구·입금 예정을 확인하고 답하는 자리.
+  // ⚠ 자기 통행이 «붙어 있어야» 카드가 뜬다. 찍기 전에 시험 자료를 만들고 뒤에 지운다
+  //   (--only 87 로 따로 돌릴 것 — 아래 주석의 차례대로).
+  { file: '87_정산_내하이패스.png', wait: 11000,
+    js: `(()=>{const S=(f,t)=>setTimeout(f,t)
+      S(()=>__click('스케줄'),1400)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>/정산/.test(x.textContent)); if(b)b.click()},2600)
+      S(()=>{const s=document.querySelector('select')
+        if(s){const set=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set
+          set.call(s,'2026-09'); s.dispatchEvent(new Event('change',{bubbles:true}))}},3600)
+      S(()=>{const h=[...document.querySelectorAll('*')]
+        .find(x=>x.children.length===0&&x.textContent.startsWith('🛣 내 하이패스'))
+        // ⚠ 머리글(배너+제목+탭)이 «떠 있어» 150px 을 가린다. 그 아래로 내려 잡지 않으면
+        //   카드 제목과 탭 줄이 통째로 가려진 채 찍힌다 (2026-09-06 실측).
+        if(h)window.scrollTo(0,h.getBoundingClientRect().top+scrollY-190)},8200)
     })()` },
 ]
 
