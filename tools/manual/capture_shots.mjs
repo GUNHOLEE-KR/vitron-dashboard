@@ -408,6 +408,33 @@ const SHOTS = [
         //   카드 제목과 탭 줄이 통째로 가려진 채 찍힌다 (2026-09-06 실측).
         if(h)window.scrollTo(0,h.getBoundingClientRect().top+scrollY-190)},8200)
     })()` },
+
+  // 회의록 «달력으로 찾기» (2026-09-06 신설) — 회의가 있는 날에 제목이 놓이고,
+  // 그 제목을 누르면 «아래에» 본문이 펼쳐진다. 그 차례가 한 장에 보이게 찍는다.
+  { file: '88_회의록_달력.png', wait: 8000,
+    js: `(()=>{const S=(f,t)=>setTimeout(f,t)
+      S(()=>{const t=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.trim()==='회의록'); if(t)t.click()},1200)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.includes('지난 회의록 조회')); if(b)b.click()},2600)
+      // 달력 칸의 «제목 배지» 를 누른다 — 목록이 아니라 달력에서 여는 길이다
+      S(()=>{const g=[...document.querySelectorAll('div')]
+        .filter(n=>{const s=getComputedStyle(n)
+          return s.display==='grid' && s.gridTemplateColumns.split(' ').length===7}).pop()
+        if(!g)return
+        const badge=[...g.querySelectorAll('div')]
+          .find(n=>getComputedStyle(n).cursor==='pointer')
+        if(badge)badge.click()},4400)
+      // 달력이 길어 본문이 아래로 밀린다. 펼쳐진 자리로 굴려 둔다.
+      S(()=>{const h=[...document.querySelectorAll('span')]
+        .find(x=>x.textContent.trim()==='▲ 접기')
+        if(h)window.scrollTo(0,h.getBoundingClientRect().top+scrollY-260)},6400)
+    })()` },
+
+  // ⚠ 「검색 → 결과를 누르면 달력이 그 달로 간다」 도 찍어 두려 했으나, 그러려면
+  //   «다른 달» 회의록이 있어야 한다. 시험용으로 넣었다가 지웠으므로 촬영 정의를
+  //   남기면 다음에 돌릴 때 엉뚱한 것을 찍는다 — 재현되지 않는 정의는 두지 않는다.
+  //   회의록이 여러 달에 쌓이면 그때 더할 것 (2026-09-06).
 ]
 
 // --only 로 일부만 찍는다. 파일명에 그 글자가 들어간 것만 고른다.

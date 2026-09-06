@@ -3283,6 +3283,10 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
   //    작성 폼이 방해가 된다. 하는 일이 다르므로 화면도 나눈다.
   const [wmode,setWmode]=useState('write')        // write 작성 / browse 조회
   const [mq,setMq]=useState('')                   // 조회 — 제목·본문 찾기
+  // 🔑 조회는 «달력» 으로 본다 (2026-09-06 지시). 회의는 「언제 했더라」 로 되짚는 일이
+  //    잦은데, 목록만으로는 달을 짚을 수가 없다.
+  //    ⚠ 월 단위 하나만 둔다 — 주·일 보기는 회의록에 쓸 일이 없다(지시).
+  const [mMonth,setMMonth]=useState(()=>today().slice(0,7))
 
   const reloadMeetings=async()=>{ try{ setMeetings(await getMeetings()) }catch{ /* 목록만 비운다 */ } }
   // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -3308,6 +3312,26 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
       [m.title,m.place,m.body,String(m.met_on).slice(0,10)]
         .some(v=>String(v||'').toLowerCase().includes(q)))
   })()
+  // ── 달력에 놓기 (2026-09-06 신설) ───────────────────────────
+  // 날짜 → 그날 회의록들. 달력 칸에 «제목» 을 놓기 위한 것이다.
+  const meetingsByDate=(()=>{
+    const map=new Map()
+    for(const m of meetings){
+      const d=String(m.met_on).slice(0,10)
+      if(!map.has(d)) map.set(d,[])
+      map.get(d).push(m)
+    }
+    return map
+  })()
+  // 검색에 걸린 회의록 — 달력에서 «어느 달에 있나» 를 색으로 알려 준다
+  const hitIds=new Set(mq.trim()?shownMeetings.map(m=>m.id):[])
+  const monthCount=meetings.filter(m=>String(m.met_on).slice(0,7)===mMonth).length
+  // 🔑 회의록을 열 때는 «달력도 함께» 옮긴다 — 목록에서 눌러도 달력이 따라가야
+  //    「그게 몇 월이었나」 가 보인다 (지시).
+  const openMeetingAt=m=>{
+    setSelMeeting(String(m.id))
+    setMMonth(String(m.met_on).slice(0,7))
+  }
   const nameOfWorker=id=>{const w=workers.find(x=>Number(x.id)===Number(id));return w?workerLabel(w,dupNames):`#${id}`}
 
   function newMeetingForm(){
@@ -3509,6 +3533,76 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
           </div>
         )}
 
+        {/* ── 달력으로 찾기 (2026-09-06 지시) ─────────────────────
+            🔑 회의는 「언제 했더라」 로 되짚는 일이 잦다. 목록만으로는 달을 짚을 수 없다.
+            🔑 스케줄과 «같은 조각»(monthGridDays·shiftMonth·isSameMonth)을 쓴다 —
+               달력을 새로 그리면 언젠가 한쪽만 고쳐 두 화면이 어긋난다. */}
+        {wmode==='browse'&&selMeeting!=='none'&&(
+          <div style={{border:'1px solid #e5e7eb',borderRadius:8,padding:'10px 12px',
+            marginBottom:12,background:'#fbfdff'}}>
+            <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:8,flexWrap:'wrap'}}>
+              <button onClick={()=>setMMonth(m=>shiftMonth(m,-1))} style={mNavS}>‹</button>
+              <strong style={{fontSize:13,minWidth:104,textAlign:'center'}}>
+                {mMonth.slice(0,4)}년 {Number(mMonth.slice(5,7))}월
+              </strong>
+              <button onClick={()=>setMMonth(m=>shiftMonth(m,1))} style={mNavS}>›</button>
+              <button onClick={()=>setMMonth(today().slice(0,7))}
+                style={{...mNavS,width:'auto',padding:'3px 10px'}}>오늘</button>
+              <div style={{flex:1}}/>
+              <span style={{fontSize:11,color:'#6b7280'}}>
+                이 달 회의 <strong style={{color:'#1a56db'}}>{monthCount}건</strong>
+                {' '}— 제목을 누르면 아래에 펼쳐집니다
+              </span>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:3}}>
+              {['월','화','수','목','금','토','일'].map((w,i)=>(
+                <div key={w} style={{textAlign:'center',fontSize:11,fontWeight:700,padding:'2px 0',
+                  color:i===5?'#1a56db':i===6?'#dc2626':'#6b7280'}}>{w}</div>
+              ))}
+              {monthGridDays(mMonth).map(d=>{
+                const cur=isSameMonth(d,mMonth)
+                const day=meetingsByDate.get(d)||[]
+                const isToday=d===today()
+                const dow=new Date(d.slice(0,4),Number(d.slice(5,7))-1,Number(d.slice(8,10))).getDay()
+                return(
+                  <div key={d} style={{minHeight:62,borderRadius:6,padding:'3px 4px',
+                    border:'1px solid '+(isToday?'#1a56db':'#eef2f7'),
+                    background:cur?'#fff':'#f9fafb',opacity:cur?1:.45}}>
+                    <div style={{fontSize:10,fontWeight:700,marginBottom:2,
+                      color:dow===0?'#dc2626':dow===6?'#1a56db':'#6b7280'}}>
+                      {Number(d.slice(8,10))}
+                    </div>
+                    {day.map(m=>{
+                      const on=String(m.id)===String(selMeeting)
+                      const hit=hitIds.has(m.id)
+                      return(
+                        <div key={m.id} onClick={()=>openMeetingAt(m)} title={m.title}
+                          style={{fontSize:10,lineHeight:1.35,marginBottom:2,padding:'2px 4px',
+                            borderRadius:4,cursor:'pointer',overflow:'hidden',
+                            textOverflow:'ellipsis',whiteSpace:'nowrap',
+                            fontWeight:on||hit?700:500,
+                            // 고른 것은 진하게, 검색에 걸린 것은 «다른 색» 으로 —
+                            // 어느 달에 있는지가 한눈에 보여야 한다
+                            color:on?'#fff':hit?'#9a3412':'#1a56db',
+                            background:on?'#1a56db':hit?'#fff7ed':'#eff6ff',
+                            border:'1px solid '+(on?'#1a56db':hit?'#fdba74':'#bfdbfe')}}>
+                          {m.title}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )
+              })}
+            </div>
+            {mq.trim()&&(
+              <div style={{marginTop:8,fontSize:11,color:'#9a3412'}}>
+                🔎 <strong>주황</strong>이 찾으신 낱말에 걸린 회의록입니다.
+                다른 달에 있으면 <strong>‹ ›</strong> 로 넘겨 보십시오.
+              </div>
+            )}
+          </div>
+        )}
+
         {/* 작성·수정 폼 */}
         {mForm&&(
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12,
@@ -3591,7 +3685,13 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
         {/* 🔑 작성 화면에는 «지금 쓰는 것 하나» 만 둔다 — 지난 목록이 화면을 밀어낸다.
             조회 화면에는 찾은 것 전부를 둔다. */}
         {(()=>{
-          const list=wmode==='write'?(openMeeting?[openMeeting]:[]):shownMeetings
+          // 🔑 조회는 «달력» 이 주인이다 (2026-09-06 지시).
+          //    검색 중일 때만 «찾은 목록» 을 내고, 그렇지 않으면 달력에서 고른 «하나» 만
+          //    펼쳐 보인다. 전부를 목록으로 깔면 달력이 밀려나 쓸모가 없어진다.
+          const searching=wmode==='browse'&&!!mq.trim()
+          const list=wmode==='write'
+            ?(openMeeting?[openMeeting]:[])
+            :(searching?shownMeetings:(openMeeting?[openMeeting]:[]))
           if(list.length===0&&!mForm){
             return(
               <div style={{fontSize:12,color:'#6b7280',lineHeight:1.8}}>
@@ -3605,12 +3705,21 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
                       📝 <strong>안건은 회의록을 시작한 뒤에 적습니다.</strong></>)
                   :(meetings.length===0
                     ?<>아직 회의록이 없습니다.</>
-                    :<>찾으시는 회의록이 없습니다. 다른 낱말로 찾아보십시오.</>)}
+                    :searching
+                      ?<>찾으시는 회의록이 없습니다. 다른 낱말로 찾아보십시오.</>
+                      :<>위 <strong>달력에서 회의 제목</strong>을 누르면 그 회의록이 여기에 펼쳐집니다.{' '}
+                        찾으실 것이 있으면 <strong>검색창</strong>에 적어 보십시오.</>)}
               </div>
             )
           }
           return(
           <div style={{display:'flex',flexDirection:'column',gap:8}}>
+            {searching&&(
+              <div style={{fontSize:11,color:'#6b7280'}}>
+                🔎 찾은 회의록 <strong style={{color:'#1a56db'}}>{shownMeetings.length}건</strong>
+                {' '}— 누르시면 <strong>달력이 그 달로</strong> 갑니다
+              </div>
+            )}
             {list.map(m=>{
               const on=String(m.id)===String(selMeeting)
               const canDel=canEditOthers||Number(m.created_by)===Number(me?.uid)
@@ -3618,7 +3727,9 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
                 <div key={m.id}
                   style={{border:'1px solid '+(on?'#1a56db':'#e5e7eb'),borderRadius:8,
                     background:on?'#f8fbff':'#fff',padding:'10px 12px'}}>
-                  <div onClick={()=>setSelMeeting(on?'':String(m.id))}
+                  {/* 🔑 열 때 «달력도 함께» 옮긴다 — 검색 결과를 눌렀을 때
+                      그 회의가 몇 월 것인지 달력에서 보여야 한다 (2026-09-06 지시) */}
+                  <div onClick={()=>{ if(on) setSelMeeting(''); else openMeetingAt(m) }}
                     style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',cursor:'pointer'}}>
                     <span style={{fontSize:11,fontWeight:700,color:'#1a56db',background:'#eff6ff',
                       border:'1px solid #bfdbfe',borderRadius:5,padding:'2px 8px'}}>
@@ -3990,6 +4101,9 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
 
 // 안건 카드 안의 작은 단추 — 여러 곳에서 같은 모양을 쓴다
 const rowBtnS={padding:'5px 12px',borderRadius:6,fontSize:12,fontWeight:700,cursor:'pointer'}
+// 회의록 달력의 «달 넘기기» 단추 (2026-09-06)
+const mNavS={width:26,height:26,borderRadius:6,border:'1px solid #e5e7eb',background:'#fff',
+  color:'#374151',cursor:'pointer',fontSize:13,fontWeight:700,lineHeight:1}
 
 function TabPurchase({workers:allWorkers,me,canEditOthers,showToast}){
   // 🔑 구매는 대표이사가 «결재하는» 일이지 «요청하는» 일이 아니다 (2026-09-05 지시).
