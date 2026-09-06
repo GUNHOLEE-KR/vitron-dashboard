@@ -29,8 +29,10 @@ import { getHipass, uploadHipass, claimHipass, addManualHipass,
          removeHipassUpload, hipassFileUrl, tollsToCsv,
          bulkRemoveHipass,
          // 정산 흐름 (2026-09-06) — 정리 → 알림 → 직원 확인 → 확정
-         getHipassRoster, notifyHipassTolls, respondHipass,
-         finalizeHipass } from './repositories/hipassRepo'
+         getHipassRoster, notifyHipassTolls, respondHipass, finalizeHipass,
+         // 배정 (2026-09-06) — 자동이 기본, 손은 고치는 데만
+         autoAssignHipass, billHipass,
+         excludeHipass } from './repositories/hipassRepo'
 // 🔑 스케줄 달력은 «사내 포털과 함께 쓰는» 조각이라 여기 두지 않는다 (2026-08-26).
 //    각자 그리면 언젠가 한쪽만 고쳐 두 화면이 어긋난다.
 //    ⚠ CLAUDE.md 의 「App.jsx 단일 파일 유지」에 대한 예외 — 사용자 승인.
@@ -6619,6 +6621,50 @@ function Pill({s,title}){
   )
 }
 
+// ── 「어디로」 (2026-09-06 지시) ──────────────────────────────
+// 🔑 하이패스의 «구간»(발안 → 매송)은 «요금소» 이름이라, 업무상 어디로 간 것인지
+//    알 수 없다. 실적의 장소와 왕복·편도 방향을 함께 보여 줘야 알아볼 수 있다.
+// ⚠ 왕복·편도·출발지는 «계획» 에만 있는 값이다 — 계획 없이 만든 실적이면 딱지가 없다.
+const TRIP_MARKS={
+  왕복:{label:'왕복',        color:'#1a56db',bg:'#eff6ff',bd:'#bfdbfe',desc:'나갔다 돌아온 하루'},
+  출발:{label:'편도 출발',   color:'#b45309',bg:'#fffbeb',bd:'#fde68a',desc:'사무실에서 그 장소로'},
+  복귀:{label:'편도 복귀',   color:'#b45309',bg:'#fffbeb',bd:'#fde68a',desc:'그 장소에서 사무실로'},
+  이동:{label:'현장 간 이동',color:'#7c3aed',bg:'#faf5ff',bd:'#e9d5ff',desc:'사무실을 거치지 않고 현장에서 현장으로'},
+}
+const tripMark=x=>(x?.round_trip?TRIP_MARKS['왕복']:(TRIP_MARKS[x?.one_way_dir]||null))
+
+// 장소 + 방향을 한 덩어리로. 「이동」이면 «어디서 어디로» 를 함께 보여 준다.
+function WhereTo({place,from_place,round_trip,one_way_dir}){
+  if(!place) return <span style={{color:'#9ca3af',fontSize:10}}>-</span>
+  const mark=tripMark({round_trip,one_way_dir})
+  return(
+    <div style={{fontSize:11,lineHeight:1.5}}>
+      <div style={{fontWeight:600,color:'#374151'}}>
+        {one_way_dir==='이동'&&from_place?`${from_place} → ${place}`:place}
+      </div>
+      {mark&&<Pill s={mark}/>}
+    </div>
+  )
+}
+
+// 통행 한 줄의 「어디로」 — 배정됐으면 그 실적, 아직이면 «후보들» 을 흐리게 보여 준다.
+function WhereCell({t}){
+  if(t.claimed_place){
+    return <WhereTo place={t.claimed_place} from_place={t.claimed_from_place}
+      round_trip={t.claimed_round_trip} one_way_dir={t.claimed_one_way_dir}/>
+  }
+  const cands=(t.day_actuals||[]).filter(a=>a.place)
+  if(cands.length===0) return <span style={{color:'#9ca3af',fontSize:10}}>-</span>
+  return(
+    <div style={{opacity:.75}}>
+      {cands.map((a,i)=>(
+        <WhereTo key={i} place={a.place} from_place={a.from_place}
+          round_trip={a.round_trip} one_way_dir={a.one_way_dir}/>
+      ))}
+    </div>
+  )
+}
+
 // 「비고」 를 대신하는 «그날 그 사람의 일정» (2026-09-06 지시 4번).
 // 🔑 실적이 없는 날은 «계획» 이 오고, 그때는 「(계획)」 을 붙여 구분한다 —
 //    아직 안 적은 것과 실제로 한 것을 같은 글씨로 보이면 안 된다.
@@ -6635,9 +6681,12 @@ function DaySchedule({rows}){
             const txt=it.use_type==='vacation'?`🌴 ${it.vacation_type||'휴가'}`
               :it.use_type==='personal'?'개인 사용'
                 :[it.place,it.purpose].filter(Boolean).join(' · ')||'업무'
+            // 왕복인지 편도인지가 정산 감각을 좌우한다 — 글자로 짧게 붙인다
+            const mark=it.use_type==='business'?tripMark(it):null
             return(
               <span key={i} style={{color:it.source==='plan'?'#9a3412':'#6b7280'}}>
                 {i>0&&' / '}{txt}
+                {mark&&<span style={{color:mark.color,fontWeight:700}}> ({mark.label})</span>}
                 {it.source==='plan'&&<span style={{fontWeight:700}}> (계획)</span>}
               </span>
             )
@@ -6883,6 +6932,8 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
   const [open,setOpen]=useState(()=>new Set())     // 펼쳐 둔 직원·차량
   const [picked,setPicked]=useState(()=>new Set())
   const [busy,setBusy]=useState(false)
+  // 「다른 직원에게 넘기기」 가 쓸 명단. 이 카드는 정산 화면에 있어 직원 목록을 들고 있지 않다.
+  const [workers,setWorkers]=useState([])
 
   const load=async()=>{
     try{ setData(await getHipassRoster(ym)); setPicked(new Set()) }
@@ -6890,6 +6941,7 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
   }
   // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
   useEffect(()=>{ load() },[ym,refresh])
+  useEffect(()=>{ getWorkers().then(setWorkers).catch(()=>setWorkers([])) },[])
 
   if(!data) return null
   // 정리는 «관리자 또는 대표이사» 의 몫이다. 직원은 아래 「내 하이패스」 를 본다.
@@ -6899,6 +6951,15 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
   const won=n=>Number(n||0).toLocaleString()
   const toggleOpen=k=>setOpen(p=>{const n=new Set(p); n.has(k)?n.delete(k):n.add(k); return n})
   const toggle=id=>setPicked(p=>{const n=new Set(p); n.has(id)?n.delete(id):n.add(id); return n})
+  // 🔑 직원 한 명 · 차량 한 대를 «통째로» 고를 수 있어야 한다 — 한 달치가 수십 줄이라
+  //    낱건을 하나씩 누르게 두면 실제로 쓸 수가 없다.
+  const groupAllPicked=list=>list.length>0&&list.every(t=>picked.has(t.id))
+  const toggleGroup=list=>setPicked(p=>{
+    const n=new Set(p)
+    const all=list.length>0&&list.every(t=>n.has(t.id))
+    for(const t of list){ if(all) n.delete(t.id); else n.add(t.id) }
+    return n
+  })
   const allTolls=[...data.workers.flatMap(w=>w.days.flatMap(d=>d.tolls)),...data.unassigned]
   const pickedRows=allTolls.filter(t=>picked.has(t.id))
   const pickedSum=pickedRows.reduce((s,t)=>s+Number(t.amount||0),0)
@@ -6949,6 +7010,66 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
     finally{ setBusy(false) }
   }
 
+  // ② 자동 배정 다시 돌리기 — 실적이 «나중에» 들어온 경우에 쓴다
+  async function runAuto(){
+    try{
+      setBusy(true)
+      const r=await autoAssignHipass(ym)
+      const amb=r.ambiguous?.length
+      showToast(`자동 배정 ${r.assigned}건`
+        // 🔑 못 붙인 것을 조용히 넘기지 않는다 — 무엇을 사람이 정해야 하는지 말해 준다
+        +(amb?` · 둘 이상이 쓴 날 ${amb}건은 직접 정해 주십시오`:'')
+        +(r.no_actual?` · 실적 없는 통행 ${r.no_actual}건`:'')
+        +(r.locked?` · 잠긴 달 ${r.locked}건 건너뜀`:''))
+      if(onChanged) onChanged(); else await load()
+    }catch(e){ showToast('자동 배정 실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
+  // ③ 다른 직원에게 넘기기 — 실적이 없는 사람에게도 걸 수 있다
+  async function billTo(){
+    if(picked.size===0){ showToast('넘길 통행을 골라 주세요'); return }
+    const list=(workers||[]).filter(w=>w.active!==false)
+    const menu=list.map((w,i)=>`${i+1}. ${w.name}`).join('\n')
+    const pickNo=prompt(`고른 ${picked.size}건을 누구에게 청구·지급할까요?\n번호를 적어 주십시오.\n\n${menu}`)
+    if(!pickNo) return
+    const w=list[Number(pickNo)-1]
+    if(!w){ showToast('그런 번호가 없습니다'); return }
+    const kindNo=prompt(`${w.name} 님께 어느 쪽입니까?\n\n1. 입금 — 직원이 회사에 냅니다\n2. 환급 — 회사가 직원에게 줍니다`,'1')
+    if(!kindNo) return
+    const kind=String(kindNo).trim()==='2'?'refund':'deposit'
+    try{
+      setBusy(true)
+      let ok=0; const failed=[]
+      for(const id of picked){
+        try{ await billHipass(id,w.id,kind); ok++ }catch(e){ failed.push(e.message) }
+      }
+      showToast(`${w.name} 님께 ${kind==='deposit'?'청구':'지급'} ${ok}건`
+        +(failed.length?` · ${failed.length}건 실패 (${failed[0]})`:''))
+      if(onChanged) onChanged(); else await load()
+    }finally{ setBusy(false) }
+  }
+
+  // ④ 정산 제외 / 제외 풀기 — 🔑 지우는 것이 아니다. 기록은 남고 금액에서만 빠진다.
+  async function setExcluded(on){
+    if(picked.size===0){ showToast('처리할 통행을 골라 주세요'); return }
+    let reason=null
+    if(on){
+      reason=(prompt(`고른 ${picked.size}건을 «정산에서» 뺄까요?\n\n`
+        +'· 기록과 근거는 그대로 남습니다 (지우는 것이 아닙니다)\n'
+        +'· 금액 합산에서만 빠집니다\n\n까닭을 적어 주십시오 (선택)')??null)
+      if(reason===null) return
+    }else if(!confirm(`고른 ${picked.size}건의 «정산 제외» 를 풀까요?\n\n다시 금액에 잡힙니다.`))return
+    try{
+      setBusy(true)
+      const r=await excludeHipass([...picked],on,reason||'')
+      showToast(`${on?'정산 제외':'제외 풀기'} ${r.changed}건`
+        +(r.blocked?.length?` · ${r.blocked.length}건은 막혔습니다 (${r.blocked[0].why})`:''))
+      if(onChanged) onChanged(); else await load()
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
   const tabS=on=>({padding:'5px 12px',borderRadius:7,fontSize:12,fontWeight:700,
     cursor:'pointer',border:'1px solid '+(on?'#1a56db':'#e5e7eb'),
     background:on?'#eff6ff':'#fff',color:on?'#1a56db':'#374151'})
@@ -6963,7 +7084,9 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
       <th style={{...thS,width:34}}/>
       <th style={thS}>날짜</th>
       <th style={{...thS,textAlign:'left'}}>차량</th>
-      <th style={{...thS,textAlign:'left'}}>구간</th>
+      {/* 구간 = 요금소 이름. 「어디로」 = 업무상 목적지 — 둘은 다르다 */}
+      <th style={{...thS,textAlign:'left'}}>구간(요금소)</th>
+      <th style={{...thS,textAlign:'left'}}>어디로</th>
       <th style={thS}>금액</th>
       <th style={thS}>방향</th>
       <th style={{...thS,textAlign:'left'}}>당일 스케줄</th>
@@ -6972,10 +7095,12 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
   )
   const tollRow=t=>{
     // 아직 안 붙은 통행은 «후보» 를 보여 준다 — 누구에게 실적을 요청할지가 이것이다
-    const who=t.claimed_worker_name
+    const who=t.claimed_worker_name||t.billed_worker_name
       ||[...new Set((t.day_actuals||[]).map(a=>a.worker_name).filter(Boolean))].join(', ')
     return(
-      <tr key={t.id} style={{background:picked.has(t.id)?'#eff6ff':'#fff'}}>
+      // 제외한 줄은 «흐리게» 둔다 — 지운 것이 아니라 금액에서만 빠졌다는 뜻이다
+      <tr key={t.id} style={{background:picked.has(t.id)?'#eff6ff':'#fff',
+        opacity:t.excluded?.5:1}}>
         <td style={{...tdS,width:34}}>
           <input type="checkbox" checked={picked.has(t.id)} onChange={()=>toggle(t.id)}
             style={{cursor:'pointer'}}/>
@@ -6986,13 +7111,25 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
           {t.vehicle_kind==='own'&&<span style={{fontSize:10,color:'#7c3aed'}}> 자차</span>}
         </td>
         <td style={{...tdS,textAlign:'left'}}>{t.gate_in||'-'} → {t.gate_out||'-'}</td>
-        <td style={{...tdS,fontWeight:700}}>{won(t.amount)}원</td>
-        <td style={tdS}><Pill s={DIRECTIONS[t.direction]}/><TollMarks r={t}/></td>
+        <td style={{...tdS,textAlign:'left'}}><WhereCell t={t}/></td>
+        <td style={{...tdS,fontWeight:700,
+          textDecoration:t.excluded?'line-through':'none'}}>{won(t.amount)}원</td>
+        <td style={tdS}>
+          {t.excluded
+            ?<span style={{fontSize:10,fontWeight:700,color:'#6b7280'}}
+              title={t.exclude_reason||'정산에서 뺐습니다'}>정산 제외</span>
+            :<Pill s={DIRECTIONS[t.direction]}/>}
+          <TollMarks r={t}/>
+        </td>
         <td style={{...tdS,textAlign:'left'}}><DaySchedule rows={t.day_schedule}/></td>
         <td style={tdS}>
           <div style={{fontSize:11,fontWeight:700,
-            color:t.claimed_worker_name?'#065f46':'#9a3412'}}>{who||'-'}</div>
+            color:(t.claimed_worker_name||t.billed_worker_name)?'#065f46':'#9a3412'}}>{who||'-'}</div>
           <div style={{display:'flex',gap:3,justifyContent:'center',flexWrap:'wrap',marginTop:2}}>
+            {/* 자동으로 붙은 것인지 사람이 정한 것인지 — 「기본은 자동」 이 잘 돌고 있는지 보인다 */}
+            {t.auto_assigned&&<span style={{fontSize:10,color:'#6b7280'}} title="자동 배정">⚙</span>}
+            {t.billed_worker_id&&<span style={{fontSize:10,color:'#7c3aed',fontWeight:700}}
+              title="손으로 넘긴 건">손</span>}
             {t.notified_at&&<span style={{fontSize:10,color:'#047857',fontWeight:700}}>✉</span>}
             <Pill s={WORKER_STATES[t.worker_state]} title={t.worker_note||undefined}/>
             <Pill s={FINAL_STATES[t.final_state]}/>
@@ -7023,6 +7160,15 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
             고른 것 {picked.size}건 · {won(pickedSum)}원
           </span>
         )}
+        {/* 배정은 «자동이 기본» 이다. 이 단추는 실적이 나중에 들어왔을 때 쓴다 */}
+        <button onClick={runAuto} disabled={busy}
+          style={actS('#059669',!busy)}>⚙ 자동 배정</button>
+        <button onClick={billTo} disabled={busy||picked.size===0}
+          style={actS('#7c3aed',picked.size>0&&!busy)}>👤 다른 직원에게</button>
+        <button onClick={()=>setExcluded(true)} disabled={busy||picked.size===0}
+          style={actS('#b45309',picked.size>0&&!busy)}>🚫 정산 제외</button>
+        <button onClick={()=>setExcluded(false)} disabled={busy||picked.size===0}
+          style={actS('#6b7280',picked.size>0&&!busy)}>↩ 제외 풀기</button>
         <button onClick={sendMail} disabled={busy||picked.size===0}
           style={actS('#1a56db',picked.size>0&&!busy)}>✉ 메일 보내기</button>
         {data.can_approve&&<>
@@ -7040,6 +7186,7 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
         ?<div style={emptyS}>아직 실적에 붙은 통행이 없습니다. 「미배정」 탭을 보십시오.</div>
         :<table style={{width:'100%',borderCollapse:'collapse'}}>
           <thead><tr>
+            <th style={{...thS,width:34}}/>
             <th style={{...thS,textAlign:'left'}}>직원</th>
             <th style={thS}>건수</th><th style={thS}>합계</th>
             <th style={thS}>입금</th><th style={thS}>환급</th><th style={thS}>회사 부담</th>
@@ -7048,11 +7195,20 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
           <tbody>
             {data.workers.map(w=>{
               const k='w'+w.worker_id
+              const mine=w.days.flatMap(d=>d.tolls)
               return(
                 <Fragment key={k}>
                   <tr onClick={()=>toggleOpen(k)} style={{cursor:'pointer'}}>
+                    {/* ⚠ 체크는 «펼치기» 와 다른 동작이다 — 클릭이 위로 새지 않게 막는다 */}
+                    <td style={{...tdS,width:34}} onClick={e=>e.stopPropagation()}>
+                      <input type="checkbox" checked={groupAllPicked(mine)}
+                        onChange={()=>toggleGroup(mine)} style={{cursor:'pointer'}}
+                        title="이 분의 통행을 통째로 고릅니다"/>
+                    </td>
                     <td style={{...tdS,textAlign:'left',fontWeight:700}}>
                       {open.has(k)?'▾':'▸'} {w.worker_name}
+                      {w.excluded>0&&<span style={{fontSize:10,color:'#b45309',fontWeight:700}}>
+                        {' '}· 제외 {w.excluded}건</span>}
                     </td>
                     <td style={tdS}>{w.count}건</td>
                     <td style={{...tdS,fontWeight:700}}>{won(w.total)}원</td>
@@ -7069,10 +7225,10 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
                     <td style={tdS}>{w.confirmed}/{w.count}</td>
                   </tr>
                   {open.has(k)&&(
-                    <tr><td colSpan={9} style={{padding:0,background:'#f9fafb'}}>
+                    <tr><td colSpan={10} style={{padding:0,background:'#f9fafb'}}>
                       <table style={{width:'100%',borderCollapse:'collapse'}}>
                         {tollHead('상태')}
-                        <tbody>{w.days.flatMap(d=>d.tolls).map(tollRow)}</tbody>
+                        <tbody>{mine.map(tollRow)}</tbody>
                       </table>
                     </td></tr>
                   )}
@@ -7087,6 +7243,7 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
         ?<div style={emptyS}>이 달 통행 내역이 없습니다.</div>
         :<table style={{width:'100%',borderCollapse:'collapse'}}>
           <thead><tr>
+            <th style={{...thS,width:34}}/>
             <th style={{...thS,textAlign:'left'}}>차량</th>
             <th style={thS}>건수</th><th style={thS}>합계</th><th style={thS}>미배정</th>
           </tr></thead>
@@ -7096,6 +7253,11 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
               return(
                 <Fragment key={k}>
                   <tr onClick={()=>toggleOpen(k)} style={{cursor:'pointer'}}>
+                    <td style={{...tdS,width:34}} onClick={e=>e.stopPropagation()}>
+                      <input type="checkbox" checked={groupAllPicked(v.tolls||[])}
+                        onChange={()=>toggleGroup(v.tolls||[])} style={{cursor:'pointer'}}
+                        title="이 차의 통행을 통째로 고릅니다"/>
+                    </td>
                     <td style={{...tdS,textAlign:'left',fontWeight:700}}>
                       {open.has(k)?'▾':'▸'} {v.vehicle_name}
                       <span style={{fontSize:10,color:'#6b7280',fontWeight:500}}>
@@ -7118,27 +7280,13 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
                         :<span style={{color:'#9ca3af'}}>없음</span>}
                     </td>
                   </tr>
+                  {/* 🔑 일자 요약이 아니라 «낱건» 을 보인다 (2026-09-06 지시).
+                      요약만 두었더니 고르거나 고칠 자리가 없었다. */}
                   {open.has(k)&&(
-                    <tr><td colSpan={4} style={{padding:0,background:'#f9fafb'}}>
+                    <tr><td colSpan={5} style={{padding:0,background:'#f9fafb'}}>
                       <table style={{width:'100%',borderCollapse:'collapse'}}>
-                        <thead><tr>
-                          <th style={thS}>날짜</th><th style={thS}>건수</th>
-                          <th style={thS}>금액</th><th style={thS}>미배정</th>
-                        </tr></thead>
-                        <tbody>
-                          {v.days.map(d=>(
-                            <tr key={d.date}>
-                              <td style={tdS}>{String(d.date).slice(5)}</td>
-                              <td style={tdS}>{d.count}건</td>
-                              <td style={{...tdS,fontWeight:700}}>{won(d.amount)}원</td>
-                              <td style={tdS}>
-                                {d.unclaimed
-                                  ?<span style={{color:'#dc2626',fontWeight:700}}>{d.unclaimed}건</span>
-                                  :'-'}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
+                        {tollHead('누구 것')}
+                        <tbody>{(v.tolls||[]).map(tollRow)}</tbody>
                       </table>
                     </td></tr>
                   )}
@@ -7155,10 +7303,11 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
           <div style={{fontSize:11,color:'#9a3412',marginBottom:8,lineHeight:1.8}}>
             🔴 <strong>여기 남은 것은 정산에 잡히지 않습니다.</strong> 법인차량 개인 사용분이
             남아 있으면 청구가 조용히 빠집니다.<br/>
-            💡 <strong>관리자가 대신 붙이지 않습니다</strong> — 아래 「그날 이 차를 쓴 분」께
-            <strong> 실적 입력을 요청</strong>해 주십시오. 그분이 실적을 넣고 통행을 고르면
-            이 목록에서 사라집니다.<br/>
-            💡 출퇴근·개인 용도처럼 회사와 무관한 통행은 위 「불러온 내역」에서 골라 지우십시오.
+            💡 배정은 <strong>자동이 기본</strong>입니다. 여기 남은 것은 <strong>그날 실적이 아예 없거나</strong>,
+            <strong> 둘 이상이 그 차를 써서</strong> 시스템이 정할 수 없는 통행입니다.<br/>
+            💡 <strong>실적이 들어오면</strong> [⚙ 자동 배정]으로 붙습니다.
+            그럴 수 없는 건은 골라서 <strong>[👤 다른 직원에게]</strong>로 직접 거십시오.<br/>
+            💡 청구·정산할 것이 아니면 <strong>[🚫 정산 제외]</strong> — 기록은 남고 <strong>금액에서만</strong> 빠집니다.
           </div>
           <table style={{width:'100%',borderCollapse:'collapse'}}>
             {tollHead('그날 이 차를 쓴 분')}
@@ -7167,10 +7316,14 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
         </>)}
 
       <div style={{marginTop:10,fontSize:11,color:'#6b7280',lineHeight:1.8}}>
-        💡 <strong>차례</strong> — ① 명세 올리기 → ② 여기서 정리 → ③ 골라서 <strong>[✉ 메일 보내기]</strong>
-        → ④ 직원이 「내 하이패스」에서 <strong>정산 청구 / 정정 요청</strong>
-        → ⑤ 대표이사 <strong>[확정]</strong> → ⑥ 아래 <strong>월 정산 1차 안내</strong><br/>
-        🔴 <strong>[반려]</strong>는 실적에서도 떼어 냅니다 — 그만큼 정산 금액이 줄어듭니다.
+        💡 <strong>차례</strong> — ① 명세 올리기 → ② <strong>자동 배정</strong>(올릴 때 저절로 돕니다)
+        → ③ 여기서 <strong>고치기</strong> → ④ 골라서 <strong>[✉ 메일 보내기]</strong>
+        → ⑤ 직원이 「내 하이패스」에서 <strong>정산 청구 / 정정 요청</strong>
+        → ⑥ 대표이사 <strong>[확정]</strong> → ⑦ 아래 <strong>월 정산 1차 안내</strong><br/>
+        💡 <strong>자동 배정</strong>은 그날 그 차를 <strong>한 사람만</strong> 썼을 때 붙입니다.
+        둘 이상이면 사람이 정하도록 남깁니다. ⚙ 딱지가 자동으로 붙은 것입니다.<br/>
+        🔴 <strong>[반려]</strong>는 지우거나 떼지 않고 <strong>「정산 제외」</strong>로 둡니다 —
+        기록과 「누구 것이었나」는 남고 <strong>금액에서만</strong> 빠집니다.
       </div>
     </Card>
   )
@@ -7199,8 +7352,8 @@ function MyHipass({ym,me,showToast,onChanged,refresh}){
   const won=n=>Number(n||0).toLocaleString()
   const tolls=mine.days.flatMap(d=>d.tolls)
   const toggle=id=>setPicked(p=>{const n=new Set(p); n.has(id)?n.delete(id):n.add(id); return n})
-  // 확정된 건은 더 답할 것이 없다 — 고르지 못하게 한다
-  const answerable=tolls.filter(t=>t.final_state!=='confirmed')
+  // 확정된 건·정산에서 뺀 건은 더 답할 것이 없다 — 고르지 못하게 한다
+  const answerable=tolls.filter(t=>t.final_state!=='confirmed'&&!t.excluded)
   const allPicked=answerable.length>0&&answerable.every(t=>picked.has(t.id))
 
   async function respond(state){
@@ -7251,7 +7404,8 @@ function MyHipass({ym,me,showToast,onChanged,refresh}){
             </th>
             <th style={thS}>날짜</th>
             <th style={{...thS,textAlign:'left'}}>차량</th>
-            <th style={{...thS,textAlign:'left'}}>구간</th>
+            <th style={{...thS,textAlign:'left'}}>구간(요금소)</th>
+            <th style={{...thS,textAlign:'left'}}>어디로</th>
             <th style={thS}>금액</th>
             <th style={thS}>방향</th>
             <th style={{...thS,textAlign:'left'}}>그날 내 일정</th>
@@ -7259,9 +7413,10 @@ function MyHipass({ym,me,showToast,onChanged,refresh}){
           </tr></thead>
           <tbody>
             {tolls.map(t=>{
-              const done=t.final_state==='confirmed'
+              const done=t.final_state==='confirmed'||t.excluded
               return(
-                <tr key={t.id} style={{background:picked.has(t.id)?'#eff6ff':'#fff'}}>
+                <tr key={t.id} style={{background:picked.has(t.id)?'#eff6ff':'#fff',
+                  opacity:t.excluded?.5:1}}>
                   <td style={{...tdS,width:34}}>
                     <input type="checkbox" checked={picked.has(t.id)} disabled={done}
                       onChange={()=>toggle(t.id)}
@@ -7270,8 +7425,15 @@ function MyHipass({ym,me,showToast,onChanged,refresh}){
                   <td style={tdS}>{String(t.used_date).slice(5)}</td>
                   <td style={{...tdS,textAlign:'left'}}>{t.vehicle_name}</td>
                   <td style={{...tdS,textAlign:'left'}}>{t.gate_in||'-'} → {t.gate_out||'-'}</td>
-                  <td style={{...tdS,fontWeight:700}}>{won(t.amount)}원</td>
-                  <td style={tdS}><Pill s={DIRECTIONS[t.direction]}/></td>
+                  <td style={{...tdS,textAlign:'left'}}><WhereCell t={t}/></td>
+                  <td style={{...tdS,fontWeight:700,
+                    textDecoration:t.excluded?'line-through':'none'}}>{won(t.amount)}원</td>
+                  <td style={tdS}>
+                    {t.excluded
+                      ?<span style={{fontSize:10,fontWeight:700,color:'#6b7280'}}
+                        title={t.exclude_reason||'정산에서 뺐습니다'}>정산 제외</span>
+                      :<Pill s={DIRECTIONS[t.direction]}/>}
+                  </td>
                   <td style={{...tdS,textAlign:'left'}}><DaySchedule rows={t.day_schedule}/></td>
                   <td style={tdS}>
                     <div style={{display:'flex',gap:3,justifyContent:'center',flexWrap:'wrap'}}>

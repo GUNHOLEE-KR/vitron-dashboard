@@ -90,8 +90,21 @@ export const notifyHipassTolls = (ids) => request('POST', '/notify', { ids })
 export const respondHipass = (id, state, note) =>
   request('POST', `/${id}/respond`, { state, note })
 // 대표이사의 최종 판정 — 'confirmed' · 'rejected' · 'pending'(되돌리기).
-// ⚠ 'rejected' 는 실적에서도 떼어 낸다(금액이 함께 줄어든다).
+// ⚠ 'rejected' 는 «정산 제외» 로 만든다 — 지우거나 떼지 않고 금액에서만 뺀다.
 export const finalizeHipass = (ids, state) => request('POST', '/finalize', { ids, state })
+
+// ── 배정 (2026-09-06 신설) ──
+// 🔑 «기본은 자동» 이다. 엑셀 통행 + 직원이 넣은 실적을 맞대어 시스템이 붙인다.
+//    그날 그 차를 «한 사람만» 썼을 때만 붙이고, 둘 이상이면 사람에게 남긴다.
+//    올릴 때도 자동으로 한 번 도므로, 이것은 «실적이 나중에 들어왔을 때» 쓴다.
+export const autoAssignHipass = (ym) => request('POST', '/auto-assign', { ym })
+// 실적이 없는 사람에게 손으로 넘긴다. kind = 'deposit'(입금) | 'refund'(환급).
+// workerId 를 null 로 주면 뗀다. ⚠ 실적에 붙어 있으면 서버가 «먼저 떼고» 건다.
+export const billHipass = (id, workerId, kind) =>
+  request('POST', `/${id}/bill`, { worker_id: workerId, kind })
+// 정산 제외 / 제외 풀기. 🔑 지우는 것이 아니다 — 기록은 남고 «금액에서만» 빠진다.
+export const excludeHipass = (ids, excluded, reason) =>
+  request('POST', '/exclude', { ids, excluded, reason })
 
 // 인원별 근거를 CSV 로 만든다.
 // 🔴 맨 앞에 «BOM» 을 붙인다 — 없으면 엑셀이 UTF-8 을 못 알아채 한글이 통째로 깨진다.

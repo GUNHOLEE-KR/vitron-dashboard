@@ -2368,6 +2368,46 @@ async function buildSettlement(ym) {
     }
   }
 
+  // 손으로 «사람에게 건» 통행 (2026-09-06 지시).
+  // 🔑 위 반복문은 «실적» 을 훑는다. 손으로 건 것은 실적이 없는 사람에게도 걸 수 있어
+  //    거기에 잡히지 않는다 — 여기서 따로 더한다. 대납(cardOwed)과 같은 모양이다.
+  // ⚠ 자리가 없는 사람은 «만들어» 준다. 안 만들면 그 청구가 조용히 사라진다.
+  // ⚠ 「정산 제외」한 것은 빼고 센다.
+  const { rows: billed } = await pool.query(
+    `SELECT t.billed_worker_id AS worker_id, t.billed_kind,
+            coalesce(sum(t.amount), 0)::int AS amount
+       FROM hipass_tolls t
+      WHERE t.billed_worker_id IS NOT NULL AND NOT t.excluded
+        -- 🔴 방향이 없는 줄은 «세지 않는다». DB 빗장이 막지만, 막지 못했을 때
+        --    조용히 «입금» 으로 세어 버리는 것보다 아예 빠지는 편이 낫다.
+        AND t.billed_kind IN ('deposit', 'refund')
+        AND ${HIPASS_DATE} >= $1::date AND ${HIPASS_DATE} <= $2::date
+      GROUP BY 1, 2`, [from, to])
+  if (billed.length > 0) {
+    const missing = [...new Set(billed.map(b => Number(b.worker_id)))].filter(id => !byWorker.has(id))
+    if (missing.length > 0) {
+      const { rows: ws } = await pool.query(
+        'SELECT id, name, team, email FROM workers WHERE id = ANY($1::int[])', [missing])
+      for (const x of ws) {
+        byWorker.set(x.id, {
+          worker_id: x.id, worker_name: x.name, team: x.team, worker_email: x.email,
+          personal_km: 0, personal_amount: 0, toll_amount: 0,
+          own_car_km: 0, own_car_liter: 0, own_car_missing_efficiency: false,
+          own_toll_amount: 0, card_toll_amount: 0,
+          transit_amount: 0, business_km: 0, fuel_amount: 0, rows: [],
+        })
+      }
+    }
+    for (const b of billed) {
+      const w = byWorker.get(Number(b.worker_id))
+      if (!w) continue
+      // deposit 은 직원이 회사에 내는 쪽(개인 사용 하이패스와 같은 자리),
+      // refund 는 회사가 직원에게 주는 쪽(자차 업무 하이패스와 같은 자리)이다.
+      if (b.billed_kind === 'refund') w.own_toll_amount += b.amount
+      else w.toll_amount += b.amount
+    }
+  }
+
   const workers = [...byWorker.values()].map(w => ({
     ...w,
     personal_km: Math.round(w.personal_km * 10) / 10,
@@ -2732,9 +2772,32 @@ app.post('/api/hipass/upload', requireLogin, async (req, res) => {
       inserted += rowCount
     }
     await pool.query('UPDATE hipass_uploads SET rows_inserted = $1 WHERE id = $2', [inserted, uploadId])
+
+    // 🔑 «기본은 자동» 이다 (2026-09-06 지시) — 올리자마자 붙일 수 있는 것은 붙인다.
+    // ⚠ 한 파일이 여러 달에 걸친다(머리말이 「20260705 ~ 20260904」 처럼 온다).
+    //   그래서 이 파일이 실제로 담은 달을 뽑아 그 달마다 돌린다.
+    // ⚠ 자동 배정이 실패해도 «올린 것은 이미 남아 있다» — 업로드를 막지 않는다.
+    let auto = null
+    try {
+      const { rows: months } = await pool.query(
+        `SELECT DISTINCT to_char(used_at AT TIME ZONE 'Asia/Seoul', 'YYYY-MM') AS ym
+           FROM hipass_tolls WHERE upload_id = $1 ORDER BY 1`, [uploadId])
+      auto = { assigned: 0, ambiguous: [], no_actual: 0, locked: 0 }
+      for (const m of months) {
+        const r = await autoAssign(m.ym, req.session)
+        auto.assigned += r.assigned
+        auto.ambiguous.push(...r.ambiguous)
+        auto.no_actual += r.no_actual
+        auto.locked += r.locked
+      }
+    } catch (e) {
+      console.error(`[hipass] 자동 배정 실패 :: ${e.message}`)
+    }
+
     res.json({
       ok: true,
       upload_id: uploadId,
+      auto,
       vehicle: { id: vehicle.id, name: vehicle.name, plate: vehicle.plate, kind: vehicle.kind },
       period: parsed.period, sheet: parsed.sheet, card,
       parsed: parsed.rows.length,
@@ -2779,23 +2842,43 @@ const HIPASS_SELECT = `
          v.hipass_personal_card, av.name AS card_owner_name,
          a.worker_id AS claimed_worker_id, w.name AS claimed_worker_name,
          a.use_type  AS claimed_use_type, a.locked AS claimed_locked,
+         -- 「어디로」 (2026-09-06 지시) — 하이패스의 «구간» 은 요금소 이름이라
+         -- 업무상 어디로 간 것인지를 알 수 없다. 실적의 장소를 함께 싣는다.
+         coalesce(ap.name, a.place_text) AS claimed_place,
+         -- ⚠ 왕복·편도 방향·출발지는 «계획» 에만 있는 값이다(003·008·026).
+         --   실적에는 없어 plan_id 를 거쳐야 한다. 계획 없는 실적이면 NULL 이다.
+         apl.round_trip  AS claimed_round_trip,
+         apl.one_way_dir AS claimed_one_way_dir,
+         afp.name        AS claimed_from_place,
+         -- 손으로 사람에게 건 경우 (2026-09-06)
+         bw.name AS billed_worker_name,
          coalesce(m.j, '[]'::json) AS day_actuals
     FROM hipass_tolls t
     LEFT JOIN schedule_vehicles v ON v.id = t.vehicle_id
     LEFT JOIN workers av          ON av.id = v.assigned_worker_id
     LEFT JOIN schedule_actuals  a ON a.id = t.actual_id
     LEFT JOIN workers w           ON w.id = a.worker_id
-    -- 그날 그 차를 쓴 실적 — 통행을 어느 실적에 붙이면 되는지 알려 준다.
+    LEFT JOIN schedule_places ap  ON ap.id  = a.place_id
+    LEFT JOIN schedule_plans  apl ON apl.id = a.plan_id
+    LEFT JOIN schedule_places afp ON afp.id = apl.from_place_id
+    LEFT JOIN workers bw          ON bw.id  = t.billed_worker_id
+    -- 그날 그 차를 쓴 실적 — 자동 배정의 근거이자, 사람이 고를 때의 후보다.
     -- ⚠ 실적이 없어도 통행은 보여야 하므로 LEFT JOIN LATERAL 이다.
     LEFT JOIN LATERAL (
       SELECT json_agg(json_build_object(
                'actual_id', a2.id, 'worker_id', a2.worker_id, 'worker_name', w2.name,
                'use_type',  a2.use_type,
                'place',     coalesce(p2.name, a2.place_text),
+               'round_trip',  pl2.round_trip,
+               'one_way_dir', pl2.one_way_dir,
+               'from_place',  fp2.name,
+               'locked',    a2.locked,
                'toll_fee',  a2.toll_fee) ORDER BY a2.use_type, a2.id) AS j
         FROM schedule_actuals a2
-        LEFT JOIN workers        w2 ON w2.id = a2.worker_id
-        LEFT JOIN schedule_places p2 ON p2.id = a2.place_id
+        LEFT JOIN workers        w2  ON w2.id  = a2.worker_id
+        LEFT JOIN schedule_places p2 ON p2.id  = a2.place_id
+        LEFT JOIN schedule_plans pl2 ON pl2.id = a2.plan_id
+        LEFT JOIN schedule_places fp2 ON fp2.id = pl2.from_place_id
        WHERE a2.vehicle_id = t.vehicle_id
          AND a2.work_date  = ${HIPASS_DATE}
     ) m ON TRUE`
@@ -2811,18 +2894,24 @@ const HIPASS_SELECT = `
 // ⚠ 개인 사용은 장소·목적을 «애초에 저장하지 않는다»(사생활). 그래서 「개인 사용」으로만 보인다.
 async function daySchedules(from, to) {
   const [{ rows: acts }, { rows: plans }] = await Promise.all([
+    // ⚠ 왕복·편도 방향·출발지는 «계획» 에만 있다 — 실적은 plan_id 를 거쳐 가져온다
     pool.query(
       `SELECT a.worker_id, a.work_date::text AS d, a.use_type, a.vacation_type,
-              coalesce(p.name, a.place_text) AS place, a.purpose
+              coalesce(p.name, a.place_text) AS place, a.purpose,
+              pl.round_trip, pl.one_way_dir, fp.name AS from_place
          FROM schedule_actuals a
-         LEFT JOIN schedule_places p ON p.id = a.place_id
+         LEFT JOIN schedule_places p  ON p.id  = a.place_id
+         LEFT JOIN schedule_plans  pl ON pl.id = a.plan_id
+         LEFT JOIN schedule_places fp ON fp.id = pl.from_place_id
         WHERE a.work_date >= $1::date AND a.work_date <= $2::date
         ORDER BY a.id`, [from, to]),
     pool.query(
       `SELECT s.worker_id, s.plan_date::text AS d, s.use_type, s.vacation_type, s.slot,
-              coalesce(p.name, s.place_text) AS place, s.purpose
+              coalesce(p.name, s.place_text) AS place, s.purpose,
+              s.round_trip, s.one_way_dir, fp.name AS from_place
          FROM schedule_plans s
-         LEFT JOIN schedule_places p ON p.id = s.place_id
+         LEFT JOIN schedule_places p  ON p.id  = s.place_id
+         LEFT JOIN schedule_places fp ON fp.id = s.from_place_id
         WHERE s.plan_date >= $1::date AND s.plan_date <= $2::date
         ORDER BY s.id`, [from, to]),
   ])
@@ -2832,7 +2921,8 @@ async function daySchedules(from, to) {
     const k = key(r)
     if (!map.has(k)) map.set(k, [])
     map.get(k).push({ source, use_type: r.use_type, vacation_type: r.vacation_type,
-      place: r.place, purpose: r.purpose, slot: r.slot })
+      place: r.place, purpose: r.purpose, slot: r.slot,
+      round_trip: r.round_trip, one_way_dir: r.one_way_dir, from_place: r.from_place })
   }
   for (const r of acts) put(r, 'actual')
   // ⚠ 「실적이 없는 날인가」 는 «계획을 담기 전» 상태로 판정해야 한다.
@@ -2847,8 +2937,11 @@ async function daySchedules(from, to) {
 function scheduleFor(map, t) {
   const who = t.claimed_worker_id
     ? [{ id: Number(t.claimed_worker_id), name: t.claimed_worker_name }]
-    : [...new Map((t.day_actuals || [])
-        .map(a => [Number(a.worker_id), { id: Number(a.worker_id), name: a.worker_name }])).values()]
+    // 손으로 사람에게 건 것은 실적이 없을 수 있다 — 그래도 그 사람의 하루는 보여 준다
+    : t.billed_worker_id
+      ? [{ id: Number(t.billed_worker_id), name: t.billed_worker_name }]
+      : [...new Map((t.day_actuals || [])
+          .map(a => [Number(a.worker_id), { id: Number(a.worker_id), name: a.worker_name }])).values()]
   return who.map(w => ({
     worker_id: w.id, worker_name: w.name,
     items: map.get(`${w.id}|${t.used_date}`) || [],
@@ -2856,14 +2949,22 @@ function scheduleFor(map, t) {
 }
 
 // 붙은 통행의 «돈 방향». 정산 계산식과 같은 낱말을 쓴다 — 헷갈리면 안 되는 자리다.
-//   deposit  직원 → 회사   (법인차량을 개인 사용)
-//   refund   회사 → 직원   (자차로 업무)
+//   deposit  직원 → 회사   (법인차량을 개인 사용 / 손으로 「입금」 으로 건 것)
+//   refund   회사 → 직원   (자차로 업무 / 손으로 「환급」 으로 건 것)
 //   company  회사 부담     (법인차량으로 업무 — 정산에 잡히지 않는다)
+//   null     아직 정해지지 않았거나 «정산 제외» 된 것
 // ⚠ 하이패스 개인카드 차는 그 위에 «대납 지급» 이 따로 얹힌다(정산이 계산한다).
-function tollDirection(vehicleKind, useType) {
+function directionOf(vehicleKind, useType) {
   if (!useType) return null
   if (useType === 'personal') return 'deposit'
   return vehicleKind === 'own' ? 'refund' : 'company'
+}
+function tollDirection(t) {
+  // 제외한 것은 어느 쪽 돈도 아니다 — 금액에서 빠졌으므로 방향도 없다
+  if (t.excluded) return null
+  // 손으로 건 것은 «사람이» 방향을 정했다. 추측하지 않는다.
+  if (t.billed_worker_id) return t.billed_kind || null
+  return directionOf(t.vehicle_kind, t.claimed_use_type)
 }
 
 // 통행 목록에 «그날 그 사람의 일정» 을 붙여 돌려준다. 두 곳이 같은 모양을 쓴다.
@@ -2876,9 +2977,38 @@ async function withSchedules(rows) {
   return rows.map(r => ({
     ...r,
     hint: tollHint(r.vehicle_kind, r.day_actuals),
-    direction: tollDirection(r.vehicle_kind, r.claimed_use_type),
+    direction: tollDirection(r),
     day_schedule: scheduleFor(map, r),
   }))
+}
+
+// 이 통행의 목록을 «고칠» 수 있는가 (2026-09-06 지시).
+//   관리자 · 대표이사        전부
+//   본인                     자기에게 배정된 것만 (남의 것은 못 고친다)
+//   아직 아무에게도 안 붙음  그날 그 차를 쓴 실적의 주인 — 자기 것으로 가져갈 수 있어야 한다
+// 🔑 판정은 «본문» 이 아니라 «DB 에서 읽은 통행» 으로 한다. 본문을 믿으면 남의 통행을
+//    열어 자기 번호를 적어 보내는 것으로 뚫린다 (CLAUDE.md 원칙).
+async function canEditToll(t, session) {
+  if (!t) return '해당 통행 내역을 찾을 수 없습니다.'
+  if (session?.role === 'admin') return null
+  if (await canApprove(session?.uid)) return null
+  const me = Number(session?.workerId)
+  if (!me) return '본인 확인이 되지 않습니다.'
+  if (t.claimed_worker_id) {
+    return Number(t.claimed_worker_id) === me ? null : '다른 분에게 배정된 통행입니다.'
+  }
+  if (t.billed_worker_id) {
+    return Number(t.billed_worker_id) === me ? null : '다른 분에게 배정된 통행입니다.'
+  }
+  const candidate = (t.day_actuals || []).some(a => Number(a.worker_id) === me)
+  return candidate ? null : '그날 이 차를 쓰신 기록이 없습니다. 관리자에게 말씀해 주십시오.'
+}
+
+// 통행 한 줄을 «판정에 쓸 모양» 으로 읽어 온다 — 위 canEditToll 이 요구하는 값들이다.
+async function tollForEdit(id) {
+  const { rows } = await pool.query(
+    `${HIPASS_SELECT} WHERE t.id = $1`, [Number(id)])
+  return rows[0] || null
 }
 
 // 목록 — 기간·차량으로 좁힌다.
@@ -3013,9 +3143,12 @@ app.get('/api/hipass/by-worker', requireLogin, async (req, res) => {
 // 실적의 하이패스 금액을 «붙어 있는 통행의 합» 으로 다시 센다.
 // 🔑 금액을 두 곳에 두지 않는다 — 목록이 정본이고 toll_fee 는 그 합계다.
 //    이렇게 해야 떼었다 붙였다 해도 금액이 어긋나지 않는다.
+// ⚠ «정산 제외»(excluded)한 것은 더하지 않는다 (2026-09-06 지시). 기록은 남기고
+//   금액에서만 빼는 것이 「제외」이므로, 빼는 자리가 바로 여기다.
 async function retotalToll(actualId, client = pool) {
   const { rows } = await client.query(
-    'SELECT coalesce(sum(amount),0)::int AS s FROM hipass_tolls WHERE actual_id = $1', [actualId])
+    'SELECT coalesce(sum(amount),0)::int AS s FROM hipass_tolls WHERE actual_id = $1 AND NOT excluded',
+    [actualId])
   await client.query('UPDATE schedule_actuals SET toll_fee = $1, updated_at = now() WHERE id = $2',
     [rows[0].s, actualId])
   return rows[0].s
@@ -3028,13 +3161,18 @@ app.post('/api/hipass/:id/claim', requireLogin, async (req, res) => {
   try {
     const { rows: t } = await pool.query('SELECT * FROM hipass_tolls WHERE id = $1', [id])
     if (!t.length) return res.status(404).json({ error: '해당 통행 내역을 찾을 수 없습니다.' })
+    // 확정된 건은 대표이사가 확정을 풀기 전에는 옮기지 못한다 (2026-09-06)
+    if (t[0].final_state === 'confirmed') {
+      return res.status(409).json({ error: '이미 확정된 통행입니다. 대표이사가 확정을 풀어야 옮길 수 있습니다.' })
+    }
 
     // 떼기 — 붙어 있던 실적의 합계를 다시 센다
+    // ⚠ auto_assigned 를 끈다. 사람이 뗀 것을 자동 배정이 다시 붙이면 안 된다.
     if (!actualId) {
       const was = t[0].actual_id
       await pool.query(
-        'UPDATE hipass_tolls SET actual_id=NULL, claimed_by=NULL, claimed_at=NULL, updated_at=now() WHERE id=$1',
-        [id])
+        `UPDATE hipass_tolls SET actual_id=NULL, claimed_by=NULL, claimed_at=NULL,
+                auto_assigned=FALSE, updated_at=now() WHERE id=$1`, [id])
       if (was) await retotalToll(was)
       return res.json({ ok: true, detached: true, actual_id: was, toll_fee: was ? await retotalToll(was) : 0 })
     }
@@ -3052,8 +3190,13 @@ app.post('/api/hipass/:id/claim', requireLogin, async (req, res) => {
     if (t[0].actual_id && Number(t[0].actual_id) !== actualId) {
       return res.status(409).json({ error: '이미 다른 실적에 붙어 있는 통행료입니다.' })
     }
+    // ⚠ 실적에 붙이면 «손으로 건 것» 은 함께 지운다 — 둘 다일 수 없다(DB 빗장).
+    //   auto_assigned 도 끈다. 사람이 정한 것이므로 자동이 다시 건드리면 안 된다.
     await pool.query(
-      `UPDATE hipass_tolls SET actual_id=$1, claimed_by=$2, claimed_at=now(), updated_at=now()
+      `UPDATE hipass_tolls
+          SET actual_id=$1, claimed_by=$2, claimed_at=now(),
+              billed_worker_id=NULL, billed_kind=NULL, billed_by=NULL, billed_at=NULL,
+              auto_assigned=FALSE, updated_at=now()
         WHERE id=$3`, [actualId, req.session.uid, id])
     res.json({ ok: true, actual_id: actualId, toll_fee: await retotalToll(actualId) })
   } catch (e) {
@@ -3184,16 +3327,21 @@ app.get('/api/hipass/roster', requireLogin, async (req, res) => {
     // 직원별 — 사람이 정해지는 것은 «실적에 붙은» 통행뿐이다
     const perWorker = new Map()
     for (const t of list) {
-      if (!t.claimed_worker_id) continue
-      const k = Number(t.claimed_worker_id)
+      // 사람이 정해지는 길은 둘이다 — 실적에 붙었거나, 손으로 걸었거나 (2026-09-06)
+      const wid = t.claimed_worker_id || t.billed_worker_id
+      if (!wid) continue
+      const k = Number(wid)
       if (!perWorker.has(k)) {
-        perWorker.set(k, { worker_id: k, worker_name: t.claimed_worker_name,
-          total: 0, count: 0, deposit: 0, refund: 0, company: 0,
+        perWorker.set(k, { worker_id: k,
+          worker_name: t.claimed_worker_name || t.billed_worker_name,
+          total: 0, count: 0, deposit: 0, refund: 0, company: 0, excluded: 0,
           notified: 0, claimed: 0, disputed: 0, confirmed: 0, rejected: 0, days: new Map() })
       }
       const w = perWorker.get(k)
-      const amt = Number(t.amount || 0)
+      // ⚠ 「제외」한 것은 «금액에는 안 넣고» 건수와 목록에는 남긴다 — 지운 것이 아니다
+      const amt = t.excluded ? 0 : Number(t.amount || 0)
       w.total += amt; w.count += 1
+      if (t.excluded) w.excluded += 1
       if (t.direction) w[t.direction] += amt
       if (t.notified_at) w.notified += 1
       if (t.worker_state === 'claimed') w.claimed += 1
@@ -3216,29 +3364,166 @@ app.get('/api/hipass/roster', requireLogin, async (req, res) => {
         perVehicle.set(k, { vehicle_id: k, vehicle_name: t.vehicle_name,
           vehicle_plate: t.vehicle_plate, vehicle_kind: t.vehicle_kind,
           hipass_personal_card: t.hipass_personal_card, card_owner_name: t.card_owner_name,
-          total: 0, count: 0, unclaimed: 0, unclaimed_amount: 0, days: new Map() })
+          total: 0, count: 0, unclaimed: 0, unclaimed_amount: 0, days: new Map(), tolls: [] })
       }
       const v = perVehicle.get(k)
-      const amt = Number(t.amount || 0)
+      const amt = t.excluded ? 0 : Number(t.amount || 0)
+      const free = !t.actual_id && !t.billed_worker_id
       v.total += amt; v.count += 1
-      if (!t.actual_id) { v.unclaimed += 1; v.unclaimed_amount += amt }
+      if (free) { v.unclaimed += 1; v.unclaimed_amount += amt }
+      // 🔑 차량별을 펼치면 «낱건» 이 나와야 고르고 고칠 수 있다 (2026-09-06 지시).
+      //    전에는 일자 요약만 줘서 체크박스를 둘 자리가 없었다.
+      v.tolls.push(t)
       if (!v.days.has(t.used_date)) v.days.set(t.used_date, { date: t.used_date, amount: 0, count: 0, unclaimed: 0 })
       const d = v.days.get(t.used_date)
       d.amount += amt; d.count += 1
-      if (!t.actual_id) d.unclaimed += 1
+      if (free) d.unclaimed += 1
     }
     const vehicles = [...perVehicle.values()]
       .map(v => ({ ...v, days: [...v.days.values()].sort((a, b) => a.date.localeCompare(b.date)) }))
       .sort((a, b) => byName(a.vehicle_name, b.vehicle_name))
 
     // 🔴 미배정 — 조용한 누락이 생기는 자리다. 개인 사용분이 여기 남으면 청구가 빠진다.
-    //    사용자 결정에 따라 «관리자가 대신 붙이지 않는다» — 그 직원에게 실적 입력을 요청한다.
+    //    «자동 배정» 이 한 사람만 쓴 날을 붙이고 나면, 여기 남는 것은
+    //    ① 그날 실적이 아예 없는 통행 ② 둘 이상이 써서 사람이 정해야 하는 통행 이다.
     res.json({
       ym, workers, vehicles,
-      unassigned: list.filter(t => !t.actual_id),
+      unassigned: list.filter(t => !t.actual_id && !t.billed_worker_id),
       can_approve: await canApprove(req.session.uid),
       me: { worker_id: req.session.workerId, role: req.session.role },
     })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ② 자동 배정 — «기본은 자동» 이다 (2026-09-06 지시).
+// ════════════════════════════════════════════════════════════
+// 🔑 025 는 「같은 날 같은 차를 둘이 썼을 수 있어 «사람이 골라» 붙인다」 였다.
+//    그 걱정은 «둘 이상이 쓴 날» 에만 해당한다. 한 사람만 쓴 날은 기계가 붙이면 된다.
+//    그래서 «후보가 정확히 하나일 때만» 붙이고, 둘 이상이면 사람에게 남긴다.
+// ⚠ 손대지 않는 것 — 이미 붙은 것 · 손으로 건 것 · 제외한 것 · 확정된 것 · 잠긴 실적.
+//   특히 «잠긴 실적» 은 정산 안내가 이미 나간 달이라, 붙이면 알린 금액과 근거가 어긋난다.
+async function autoAssign(ym, session) {
+  const [from, to] = ymRange(ym)
+  const { rows } = await pool.query(
+    `${HIPASS_SELECT}
+      WHERE ${HIPASS_DATE} >= $1::date AND ${HIPASS_DATE} <= $2::date
+        AND t.actual_id IS NULL
+        AND t.billed_worker_id IS NULL
+        AND NOT t.excluded
+        AND t.final_state <> 'confirmed'
+      ORDER BY t.used_at`, [from, to])
+
+  let assigned = 0
+  let lockedCount = 0
+  let noActual = 0
+  const ambiguous = []
+  for (const t of rows) {
+    const cands = t.day_actuals || []
+    if (cands.length === 0) { noActual += 1; continue }
+    if (cands.length > 1) {
+      // 사람이 정해야 하는 것 — 숨기지 않고 «무엇을 정해야 하는지» 를 돌려준다
+      ambiguous.push({ id: t.id, used_date: t.used_date, amount: t.amount,
+        vehicle_name: t.vehicle_name, who: cands.map(c => c.worker_name) })
+      continue
+    }
+    const only = cands[0]
+    if (only.locked) { lockedCount += 1; continue }
+    await pool.query(
+      `UPDATE hipass_tolls
+          SET actual_id=$1, claimed_by=$2, claimed_at=now(),
+              auto_assigned=TRUE, updated_at=now()
+        WHERE id=$3`, [only.actual_id, session?.uid || null, t.id])
+    await retotalToll(only.actual_id)
+    assigned += 1
+  }
+  return { assigned, ambiguous, no_actual: noActual, locked: lockedCount }
+}
+
+// 다시 돌리기. 올릴 때도 자동으로 한 번 도므로, 이것은 «실적이 나중에 들어왔을 때» 쓴다.
+app.post('/api/hipass/auto-assign', requireLogin, async (req, res) => {
+  const ym = String(req.body?.ym || '')
+  if (!/^\d{4}-\d{2}$/.test(ym)) return res.status(400).json({ error: 'ym 은 YYYY-MM 형식이어야 합니다.' })
+  if (req.session.role !== 'admin' && !await canApprove(req.session.uid)) {
+    return res.status(403).json({ error: '자동 배정은 관리자 또는 대표이사만 돌릴 수 있습니다.' })
+  }
+  try { res.json(await autoAssign(ym, req.session)) }
+  catch (e) { res.status(500).json({ error: e.message }) }
+})
+
+// ②-2 «다른 직원에게 넘기기» — 실적이 없는 사람에게도 걸 수 있다 (2026-09-06 지시).
+// 🔴 실적에 붙은 채로 사람에게 걸 수 없다. 같은 돈이 두 번 세어진다 —
+//    DB 에도 빗장(hipass_tolls_one_owner_chk)이 있지만, 여기서 «먼저 떼고» 건다.
+app.post('/api/hipass/:id/bill', requireLogin, async (req, res) => {
+  const id = Number(req.params.id)
+  const raw = req.body?.worker_id
+  const workerId = (raw === null || raw === undefined || raw === '') ? null : Number(raw)
+  const kind = String(req.body?.kind || '')
+  try {
+    const t = await tollForEdit(id)
+    const deny = await canEditToll(t, req.session)
+    if (deny) return res.status(403).json({ error: deny })
+    if (t.final_state === 'confirmed') {
+      return res.status(409).json({ error: '이미 확정된 통행입니다. 대표이사가 확정을 풀어야 고칠 수 있습니다.' })
+    }
+    // 떼기 — 아무에게도 걸지 않은 상태로 되돌린다
+    if (!workerId) {
+      await pool.query(
+        `UPDATE hipass_tolls SET billed_worker_id=NULL, billed_kind=NULL,
+                billed_by=NULL, billed_at=NULL, updated_at=now() WHERE id=$1`, [id])
+      return res.json({ ok: true, billed_worker_id: null })
+    }
+    if (!['deposit', 'refund'].includes(kind)) {
+      return res.status(400).json({ error: '입금(직원 → 회사) · 환급(회사 → 직원) 가운데 하나를 골라 주세요.' })
+    }
+    const was = t.actual_id
+    if (was) {
+      await pool.query(
+        `UPDATE hipass_tolls SET actual_id=NULL, claimed_by=NULL, claimed_at=NULL,
+                auto_assigned=FALSE, updated_at=now() WHERE id=$1`, [id])
+      await retotalToll(was)
+    }
+    await pool.query(
+      `UPDATE hipass_tolls SET billed_worker_id=$1, billed_kind=$2, billed_by=$3,
+              billed_at=now(), auto_assigned=FALSE, updated_at=now() WHERE id=$4`,
+      [workerId, kind, req.session.uid, id])
+    res.json({ ok: true, billed_worker_id: workerId, billed_kind: kind, detached_from: was })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ②-3 «정산 제외» — 지우는 것이 아니다 (2026-09-06 사용자 확인).
+// 🔑 기록·근거·「누구 것이었나」 는 그대로 두고 «금액 합산에서만» 뺀다.
+//    지우면 근거가 사라지고, 같은 파일을 다시 올리면 되살아나기까지 한다.
+app.post('/api/hipass/exclude', requireLogin, async (req, res) => {
+  const ids = Array.isArray(req.body?.ids)
+    ? req.body.ids.map(Number).filter(n => Number.isInteger(n) && n > 0) : []
+  const excluded = req.body?.excluded !== false        // 기본은 «제외한다»
+  const reason = String(req.body?.reason || '').trim().slice(0, 200) || null
+  if (!ids.length) return res.status(400).json({ error: '처리할 통행을 골라 주세요.' })
+  try {
+    const done = []
+    const blocked = []
+    const retotal = new Set()
+    // ⚠ 건마다 권한을 본다 — 자기 것과 남의 것을 섞어 보낼 수 있다
+    for (const id of ids) {
+      const t = await tollForEdit(id)
+      const deny = await canEditToll(t, req.session)
+      if (deny) { blocked.push({ id, why: deny }); continue }
+      if (t.final_state === 'confirmed') {
+        blocked.push({ id, why: '이미 확정된 통행입니다.' }); continue
+      }
+      await pool.query(
+        `UPDATE hipass_tolls SET excluded=$1, exclude_reason=$2, updated_at=now() WHERE id=$3`,
+        [excluded, excluded ? reason : null, id])
+      // 실적에 붙어 있으면 그 실적의 하이패스 금액을 다시 센다 — 제외분이 빠져야 한다
+      if (t.actual_id) retotal.add(Number(t.actual_id))
+      done.push(id)
+    }
+    for (const actualId of retotal) await retotalToll(actualId)
+    res.json({ ok: true, changed: done.length, excluded, blocked })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
@@ -3256,21 +3541,33 @@ app.post('/api/hipass/notify', requireLogin, async (req, res) => {
   }
   try {
     const { rows } = await pool.query(
+      // 받는 사람은 «실적» 또는 «손으로 건 대상» 에서 나온다 (2026-09-06)
       `SELECT t.id, ${HIPASS_DATE} AS used_date, t.gate_in, t.gate_out, t.amount,
-              t.note, t.manual, t.notified_at,
-              a.worker_id, a.use_type, w.name AS worker_name, w.email AS worker_email,
+              t.note, t.manual, t.notified_at, t.excluded, t.billed_kind,
+              coalesce(a.worker_id, t.billed_worker_id) AS worker_id,
+              a.use_type,
+              coalesce(ap.name, a.place_text) AS place,
+              apl.round_trip, apl.one_way_dir, afp.name AS from_place,
+              coalesce(w.name,  bw.name)  AS worker_name,
+              coalesce(w.email, bw.email) AS worker_email,
               v.name AS vehicle_name, v.plate AS vehicle_plate, v.kind AS vehicle_kind
          FROM hipass_tolls t
-         LEFT JOIN schedule_actuals  a ON a.id = t.actual_id
-         LEFT JOIN workers           w ON w.id = a.worker_id
-         LEFT JOIN schedule_vehicles v ON v.id = t.vehicle_id
+         LEFT JOIN schedule_actuals  a  ON a.id  = t.actual_id
+         LEFT JOIN workers           w  ON w.id  = a.worker_id
+         LEFT JOIN workers           bw ON bw.id = t.billed_worker_id
+         LEFT JOIN schedule_places   ap ON ap.id = a.place_id
+         LEFT JOIN schedule_plans   apl ON apl.id = a.plan_id
+         LEFT JOIN schedule_places  afp ON afp.id = apl.from_place_id
+         LEFT JOIN schedule_vehicles v  ON v.id  = t.vehicle_id
         WHERE t.id = ANY($1::int[])
         ORDER BY t.used_at`, [ids])
 
     const skipped = []
     const perWorker = new Map()
     for (const t of rows) {
-      if (!t.worker_id) { skipped.push({ id: t.id, why: '아직 실적에 붙지 않아 받을 분이 없습니다.' }); continue }
+      // 제외한 것은 정산에 안 잡히므로 알릴 것도 없다 — 보내면 받는 쪽이 헷갈린다
+      if (t.excluded) { skipped.push({ id: t.id, why: '정산에서 제외한 통행입니다.' }); continue }
+      if (!t.worker_id) { skipped.push({ id: t.id, why: '아직 아무에게도 배정되지 않았습니다.' }); continue }
       if (!perWorker.has(t.worker_id)) perWorker.set(t.worker_id, [])
       perWorker.get(t.worker_id).push(t)
     }
@@ -3290,7 +3587,9 @@ app.post('/api/hipass/notify', requireLogin, async (req, res) => {
       mailer.notifyHipass({
         ym,
         worker: { name: list[0].worker_name, email: list[0].worker_email },
-        rows: list.map(t => ({ ...t, direction: tollDirection(t.vehicle_kind, t.use_type) })),
+        // 손으로 건 것은 사람이 방향을 정했다 — 추측하지 않고 그 값을 쓴다
+        rows: list.map(t => ({ ...t,
+          direction: t.billed_kind || directionOf(t.vehicle_kind, t.use_type) })),
         actor: { name: req.session?.name, email: req.session?.login },
         sender,
         onSenderFail: why => markSenderBroken(req.session?.uid, why),
@@ -3321,13 +3620,16 @@ app.post('/api/hipass/:id/respond', requireLogin, async (req, res) => {
     return res.status(400).json({ error: '어디가 잘못됐는지 적어 주십시오.' })
   }
   try {
+    // 받는 사람은 «실적» 또는 «손으로 건 대상» 이다 (2026-09-06)
     const { rows } = await pool.query(
-      `SELECT t.id, t.final_state, a.worker_id
+      `SELECT t.id, t.final_state, t.excluded,
+              coalesce(a.worker_id, t.billed_worker_id) AS worker_id
          FROM hipass_tolls t
          LEFT JOIN schedule_actuals a ON a.id = t.actual_id
         WHERE t.id = $1`, [id])
     if (!rows.length) return res.status(404).json({ error: '해당 통행 내역을 찾을 수 없습니다.' })
-    if (!rows[0].worker_id) return res.status(409).json({ error: '아직 실적에 붙지 않은 통행입니다.' })
+    if (!rows[0].worker_id) return res.status(409).json({ error: '아직 아무에게도 배정되지 않은 통행입니다.' })
+    if (rows[0].excluded) return res.status(409).json({ error: '정산에서 제외한 통행입니다.' })
     // 🔑 본인 판정은 «본문» 이 아니라 «DB 의 worker_id» 로 한다 (CLAUDE.md 원칙).
     if (!canEditWorker(req.session, rows[0].worker_id)) return denyOther(res)
     // 이미 확정된 건을 직원이 되돌리지는 못한다 — 대표이사가 확정을 풀어야 한다.
@@ -3344,8 +3646,9 @@ app.post('/api/hipass/:id/respond', requireLogin, async (req, res) => {
 })
 
 // ⑤ 대표이사의 최종 판정. 확정(confirmed) · 반려(rejected) · 되돌리기(pending).
-// 🔴 «반려» 는 실적에서도 뗀다. 안 떼면 「빼라고 했는데 금액에는 그대로 남는」
-//    상태가 되어, 화면과 정산액이 어긋난다.
+// 🔑 «반려» 는 지우지도 떼지도 않는다 — 「정산 제외」로 만든다 (2026-09-06 원칙).
+//    기록·근거·「누구 것이었나」 를 남긴 채 «금액에서만» 빠진다.
+//    ⚠ 전에는 실적에서 떼었는데, 그러면 누구 것이었는지가 사라져 되돌리기 어려웠다.
 app.post('/api/hipass/finalize', requireLogin, async (req, res) => {
   const ids = Array.isArray(req.body?.ids)
     ? req.body.ids.map(Number).filter(n => Number.isInteger(n) && n > 0) : []
@@ -3358,22 +3661,33 @@ app.post('/api/hipass/finalize', requireLogin, async (req, res) => {
     return res.status(403).json({ error: '하이패스 확정은 대표이사만 할 수 있습니다.' })
   }
   try {
-    let detached = 0
+    // ⚠ 제외한 것을 «확정» 할 수는 없다 — 금액에 안 잡히는데 확정한다는 말이 성립하지 않는다
+    if (state === 'confirmed') {
+      const { rows: ex } = await pool.query(
+        'SELECT id FROM hipass_tolls WHERE id = ANY($1::int[]) AND excluded', [ids])
+      if (ex.length > 0) {
+        return res.status(409).json({
+          error: `정산에서 제외한 통행 ${ex.length}건이 섞여 있습니다. 제외를 먼저 풀어 주십시오.`,
+        })
+      }
+    }
+    // 반려 = 정산 제외. 붙어 있던 실적의 금액을 다시 세어 그만큼 줄인다.
+    let excluded = 0
     if (state === 'rejected') {
       const { rows } = await pool.query(
-        'SELECT id, actual_id FROM hipass_tolls WHERE id = ANY($1::int[]) AND actual_id IS NOT NULL', [ids])
-      for (const r of rows) {
-        await pool.query(
-          `UPDATE hipass_tolls SET actual_id=NULL, claimed_by=NULL, claimed_at=NULL, updated_at=now()
-            WHERE id=$1`, [r.id])
-        await retotalToll(r.actual_id)
-        detached += 1
-      }
+        `UPDATE hipass_tolls
+            SET excluded = TRUE,
+                exclude_reason = coalesce(exclude_reason, '대표이사 반려'),
+                updated_at = now()
+          WHERE id = ANY($1::int[]) AND NOT excluded
+        RETURNING id, actual_id`, [ids])
+      excluded = rows.length
+      for (const a of new Set(rows.map(r => r.actual_id).filter(Boolean))) await retotalToll(a)
     }
     const { rowCount } = await pool.query(
       `UPDATE hipass_tolls SET final_state=$1, final_by=$2, final_at=now(), updated_at=now()
         WHERE id = ANY($3::int[])`, [state, req.session.uid, ids])
-    res.json({ ok: true, updated: rowCount, detached })
+    res.json({ ok: true, updated: rowCount, excluded })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
