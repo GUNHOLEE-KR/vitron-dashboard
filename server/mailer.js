@@ -306,6 +306,8 @@ function vacLine(p) {
   const bits = [dayLabel(p.plan_date)]
   if (p.slot && p.slot !== 'allday') bits.push(SLOT[p.slot] || p.slot)
   bits.push(p.vacation_type || '휴가')
+  // 「기타」만 적혀 오면 받는 쪽이 무엇인지 모른다 — 사유가 있으면 함께 싣는다 (2026-09-07)
+  if (p.vacation_note) bits.push(p.vacation_note)
   return '  · ' + bits.join(' · ')
 }
 

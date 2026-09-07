@@ -3614,9 +3614,15 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12,
             padding:'12px 14px',background:'#f8fbff',border:'1px dashed #93c5fd',borderRadius:8}}>
             <div>
+              {/* 제목 규칙 (2026-09-07 지시) — 강제하지 않고 «본보기» 로 안내한다.
+                  형식을 막아 버리면 사내 회의처럼 고객사가 없는 것을 적을 수 없다. */}
               <label style={labelS}>회의 제목 *</label>
               <input value={mForm.title} onChange={e=>setMForm({...mForm,title:e.target.value})}
-                placeholder="예: 9월 1주 주간회의" style={inputS}/>
+                placeholder="고객사 장소 프로젝트명 회의주제" style={inputS}/>
+              <div style={{fontSize:11,color:'#6b7280',marginTop:4,lineHeight:1.6}}>
+                <strong>고객사 · 장소 · 프로젝트명 · 회의주제</strong> 차례로 적어 주십시오.<br/>
+                예: <strong style={{color:'#1a56db'}}>삼성전자 수원 다크호스 사양협의</strong>
+              </div>
             </div>
             <div>
               <label style={labelS}>날짜 *</label>
@@ -3671,9 +3677,14 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
             </div>
             <div style={{gridColumn:'1 / -1'}}>
               <label style={labelS}>회의 내용</label>
+              {/* 🔑 rows 8 은 「너무 작아 입력이 불편하다」 는 지적을 받았다 (2026-09-07).
+                  20줄로 늘리고 최소 높이를 함께 걸어 둔다 — 끌어서 더 키우실 수도 있다. */}
               <textarea value={mForm.body} onChange={e=>setMForm({...mForm,body:e.target.value})}
-                rows={8} placeholder={'논의한 것·결정된 것을 적으십시오.\n\n할 일이 된 것은 아래에서 «안건» 으로 따로 달면 기한·담당을 붙일 수 있습니다.'}
-                style={{...inputS,resize:'vertical',lineHeight:1.7}}/>
+                rows={20} placeholder={'논의한 것·결정된 것을 적으십시오.\n\n할 일이 된 것은 아래에서 «안건» 으로 따로 달면 기한·담당을 붙일 수 있습니다.'}
+                style={{...inputS,resize:'vertical',lineHeight:1.8,minHeight:360,fontSize:13}}/>
+              <div style={{fontSize:11,color:'#9ca3af',marginTop:4}}>
+                모서리를 끌어 더 크게 쓰실 수 있습니다.
+              </div>
             </div>
             <div style={{gridColumn:'1 / -1',display:'flex',gap:8}}>
               <button onClick={saveMeeting} disabled={mBusy}
@@ -5771,6 +5782,9 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   const [vacKind,setVacKind]=useState(()=>vacKindOf(src))
   // 반차일 때만 뜻이 있다. 고쳐 넣을 때는 원래 잡아 둔 쪽을 그대로 살린다.
   const [halfSlot,setHalfSlot]=useState(src?.slot==='pm'?'pm':'am')
+  // 🔑 「기타」에 «무엇인지» 를 적는 자리 (2026-09-07 지시 — 예: 예비군 참석).
+  //    종류와 따로 담는다 — 종류 칸에 넣으면 「기타」 합계를 셀 수 없다.
+  const [vacNote,setVacNote]=useState(src?.vacation_note||'')
   const vk=VAC_KINDS.find(k=>k.v===vacKind)||VAC_KINDS[0]
   // 휴가는 길이를 위쪽 시간대가 아니라 «종류» 에서 정한다
   const vacSlot=vk.half?halfSlot:'allday'
@@ -5916,6 +5930,7 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
       // 방향은 «편도 외부 업무» 일 때만 뜻이 있다. 그 밖에는 비워 보내 서버가 지우게 한다.
       one_way_dir:(isWork&&!atOffice&&!roundTrip)?oneWayDir:null,
       vacation_type:isVacation?vk.type:null,
+      vacation_note:isVacation?(vacNote.trim()||null):null,
       force,
     }
   }
@@ -6477,10 +6492,26 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
                 ))}
               </div>
             )}
+            {/* 🔑 「기타」에 무엇인지 적는 자리 (2026-09-07 지시).
+                ⚠ 다른 종류에도 열어 둔다 — 병가에 「입원」 처럼 덧붙일 수 있어야 하고,
+                  「기타」에만 두면 그때 또 칸을 늘리게 된다. */}
+            <div style={{marginTop:8}}>
+              <input value={vacNote} onChange={e=>setVacNote(e.target.value)}
+                disabled={!canEdit} maxLength={100}
+                placeholder={vacKind==='etc'
+                  ? '어떤 휴가인지 적어 주십시오 (예: 예비군 참석 · 경조)'
+                  : '사유 (선택) — 적어 두면 달력과 메일에 함께 보입니다'}
+                style={inputS}/>
+            </div>
             <div style={{fontSize:11,color:'#6b7280',marginTop:6,lineHeight:1.7}}>
               연차에서 깎이는 일수 — <strong>{vk.half?'0.5일 (반차)':'1일 (종일)'}</strong>
               {vk.type!=='연차'&&<> · <strong>{vk.label}</strong>는 연차에서 깎지 않고 따로 셉니다</>}
               <br/>휴가는 장소·차량을 적지 않습니다. 달력에 🌴 로 표시됩니다.
+              {vacKind==='etc'&&!vacNote.trim()&&(
+                <><br/><span style={{color:'#9a3412',fontWeight:700}}>
+                  「기타」는 사유를 적어 두셔야 나중에 무엇이었는지 알 수 있습니다.
+                </span></>
+              )}
             </div>
           </div>
         )}

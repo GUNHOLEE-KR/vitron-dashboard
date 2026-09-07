@@ -1090,6 +1090,10 @@ app.post('/api/schedule/plans', async (req, res) => {
   const placeText = keepPlace ? (b.place_text || null) : null
   const purpose   = keepPlace ? (b.purpose || null) : null
   const vacationType = useType === 'vacation' ? (b.vacation_type || null) : null
+  // 🔑 「기타」에 «무엇인지» 를 적어 두는 자리 (2026-09-07 지시 — 예: 예비군 참석).
+  //    종류와 «따로» 담는다 — 종류 칸에 넣으면 집계가 갈라진다(033 의 메모 참고).
+  const vacationNote = useType === 'vacation'
+    ? (String(b.vacation_note || '').trim().slice(0, 100) || null) : null
   try {
     // 자차 소유 검사 — 겹침 검사보다 «먼저» 본다. 애초에 쓸 수 없는 차라면
     // 「이미 예약된 차량입니다」로 되묻는 것이 안내로도 맞지 않는다.
@@ -1124,15 +1128,16 @@ app.post('/api/schedule/plans', async (req, res) => {
          (worker_id, plan_date, slot, start_time, end_time, use_type,
           place_id, place_text, purpose, transport, vehicle_id,
           est_distance_km, est_travel_min, round_trip, vacation_type, one_way_dir,
-          approval, approved_at, approved_by_id, from_place_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING *`,
+          approval, approved_at, approved_by_id, from_place_id, vacation_note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING *`,
       [b.worker_id, b.plan_date, b.slot || 'allday', b.start_time || null, b.end_time || null,
        useType, placeId, placeText, purpose, b.transport || 'office', b.vehicle_id ?? null,
        b.est_distance_km ?? null, b.est_travel_min ?? null,
        roundTrip, vacationType, oneWayDir(roundTrip, b.one_way_dir),
        approval, selfApprove ? new Date() : null, selfApprove ? req.session.uid : null,
        // 이동이 아니면 서버가 지운다 — 남으면 달력이 「A→B」 라고 거짓말을 한다
-       keepPlace ? fromPlaceOf(roundTrip, b.one_way_dir, b.from_place_id) : null]
+       keepPlace ? fromPlaceOf(roundTrip, b.one_way_dir, b.from_place_id) : null,
+       vacationNote]
     )
     // 🔑 차량 알림 — 저장은 이미 끝났다. 메일은 «덤» 이라 await 하지 않는다.
     //    이름(차량·장소·직원)이 붙은 줄이 필요해 조회용 SELECT 로 한 번 더 읽는다.
@@ -1210,7 +1215,8 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
               est_distance_km = $11, est_travel_min = $12,
               round_trip = COALESCE($13, round_trip),
               status = COALESCE($14, status), vacation_type = $15,
-              one_way_dir = $17, from_place_id = $18, updated_at = now()
+              one_way_dir = $17, from_place_id = $18,
+              vacation_note = $19, updated_at = now()
         WHERE id = $16`,
       [b.plan_date || null, b.slot || null, b.start_time || null, b.end_time || null, useType,
        keepPlace ? (b.place_id ?? cur[0].place_id) : null,
@@ -1231,6 +1237,12 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
          ? fromPlaceOf(b.round_trip === undefined ? cur[0].round_trip : !!b.round_trip,
                        b.one_way_dir === undefined ? cur[0].one_way_dir : b.one_way_dir,
                        b.from_place_id === undefined ? cur[0].from_place_id : b.from_place_id)
+         : null,
+       // 휴가가 아니게 바뀌면 사유도 지운다 — 남으면 업무 일정에 휴가 사유가 붙는다
+       useType === 'vacation'
+         ? (b.vacation_note === undefined
+             ? cur[0].vacation_note
+             : (String(b.vacation_note || '').trim().slice(0, 100) || null))
          : null]
     )
     if (rowCount === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })

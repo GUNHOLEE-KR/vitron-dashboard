@@ -305,7 +305,11 @@ export const shortVehicle = (name) => String(name || '').replace(/\s*\d+[가-힣
 // 배지 둘째 줄 — «어디에 · 무엇으로 · 왕복인가». 이름만 있으면 달력만 보고는
 // 어디 갔는지 알 수 없어 매번 눌러 봐야 했다.
 export function planDetail(plan) {
-  if (plan.use_type === 'vacation') return plan.vacation_type || ''
+  // 🔑 휴가 사유가 있으면 둘째 줄에 함께 적는다 (2026-09-07 지시) —
+  //    「기타」만 뜨면 무엇인지 알 수 없어 매번 눌러 봐야 한다.
+  if (plan.use_type === 'vacation') {
+    return [plan.vacation_type || '', plan.vacation_note || ''].filter(Boolean).join(' · ')
+  }
   if (plan.use_type === 'personal') return plan.vehicle_name ? shortVehicle(plan.vehicle_name) : ''
   const parts = [shortPlace(plan)]
   if (plan.vehicle_name) parts.push(shortVehicle(plan.vehicle_name))
