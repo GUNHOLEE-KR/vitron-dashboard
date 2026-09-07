@@ -3797,15 +3797,59 @@ function attendeeIds(v) {
   return [...new Set(v.map(Number).filter(n => Number.isInteger(n) && n > 0))]
 }
 
+// ── 서식 있는 본문 (2026-09-07 신설) ─────────────────────────
+// 🔴 브라우저가 «그대로 그리는» 글이므로 들어온 것을 믿지 않는다.
+//    ⚠ 여기 것은 «두 겹 중 앞 겹» 이다. 정규식은 태그를 온전히 이해하지 못하므로
+//      마지막 방어는 화면이 그릴 때(App.jsx 의 sanitizeHtml — DOMParser 로 훑는다)
+//      한다. 서버에서 한 번 더 거르는 까닭은, 뚫리더라도 «저장까지는 가지 않게»
+//      하기 위함이다 — 저장된 글은 나중에 다른 길로도 새어 나간다.
+const HTML_MAX = 200000
+function cleanHtml(v) {
+  if (v === null || v === undefined) return null
+  let s = String(v)
+  if (!s.trim()) return null
+  if (s.length > HTML_MAX) s = s.slice(0, HTML_MAX)
+  return s
+    // 통째로 버리는 것 — 속에 든 글까지 함께 지운다
+    .replace(/<\s*(script|style|iframe|object|embed|link|meta|form)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
+    .replace(/<\s*\/?\s*(script|style|iframe|object|embed|link|meta|form)\b[^>]*>/gi, '')
+    // on… = "…" 짜리 손잡이
+    .replace(/\son[a-z-]+\s*=\s*(".*?"|'.*?'|[^\s>]+)/gi, '')
+    // 주소로 위장한 코드
+    .replace(/(href|src|xlink:href)\s*=\s*(["']?)\s*javascript:[^"'>]*\2/gi, '$1="#"')
+}
+// 태그를 뗀 사본. 검색이 이것을 훑고, 옛 회의록과 같은 자리에 들어간다.
+function htmlToText(v) {
+  if (!v) return null
+  const s = String(v)
+    .replace(/<\s*(br|\/p|\/div|\/li|\/tr|\/h[1-6])\s*\/?\s*>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/gi, ' ').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"').replace(/&#39;/gi, "'").replace(/&amp;/gi, '&')
+    .replace(/\n{3,}/g, '\n\n').trim()
+  return s || null
+}
+
 const MEETING_SELECT = `
   SELECT m.*, u.display_name AS created_by_name,
+         aw.name AS author_name,
          (SELECT count(*)::int FROM agenda_items a WHERE a.meeting_id = m.id) AS agenda_count,
          -- 🔑 «아직 안 끝난 것» 을 따로 센다. 회의록 목록에서 이 숫자만 보면
          --    어느 회의가 아직 살아 있는지 알 수 있다.
          (SELECT count(*)::int FROM agenda_items a
-           WHERE a.meeting_id = m.id AND a.status NOT IN ('confirmed','hold')) AS agenda_open
+           WHERE a.meeting_id = m.id AND a.status NOT IN ('confirmed','hold')) AS agenda_open,
+         -- 🔑 참석자별 입력란을 «회의록과 함께» 실어 보낸다. 볼 때 한 박스로 이어
+         --    붙이는 것이 기본이라, 따로 부르게 하면 회의록마다 왕복이 한 번 더 는다.
+         (SELECT coalesce(json_agg(json_build_object(
+                    'worker_id', n.worker_id, 'name', nw.name,
+                    'body_html', n.body_html, 'body', n.body,
+                    'updated_at', n.updated_at) ORDER BY nw.name, n.worker_id), '[]'::json)
+            FROM meeting_notes n
+            LEFT JOIN workers nw ON nw.id = n.worker_id
+           WHERE n.meeting_id = m.id) AS notes
     FROM meetings m
-    LEFT JOIN kpi_users u ON u.id = m.created_by`
+    LEFT JOIN kpi_users u ON u.id = m.created_by
+    LEFT JOIN workers   aw ON aw.id = m.author_worker_id`
 
 app.get('/api/meetings', requireLogin, async (req, res) => {
   try {
@@ -3827,12 +3871,20 @@ app.post('/api/meetings', requireLogin, async (req, res) => {
   if (!title) return res.status(400).json({ error: '회의 제목을 적어 주세요.' })
   if (!b.met_on) return res.status(400).json({ error: '회의 날짜를 골라 주세요.' })
   try {
+    // 🔑 서식이 오면 그것이 주인이고, body 는 태그를 뗀 «사본» 이다 (036).
+    //    옛 화면·옛 회의록처럼 글자만 오는 경우도 그대로 받는다.
+    const html = cleanHtml(b.body_html)
+    const text = html ? htmlToText(html) : (b.body || null)
     const { rows } = await pool.query(
-      `INSERT INTO meetings (title, met_on, place, attendee_ids, attendee_text, body, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+      `INSERT INTO meetings (title, met_on, place, attendee_ids, attendee_text,
+                             body, body_html, author_worker_id, author_text, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
       [title.slice(0, 200), b.met_on, String(b.place || '').slice(0, 200) || null,
        attendeeIds(b.attendee_ids), String(b.attendee_text || '').slice(0, 300) || null,
-       b.body || null, req.session.uid])
+       text, html,
+       b.author_worker_id ? Number(b.author_worker_id) : null,
+       String(b.author_text || '').slice(0, 100) || null,
+       req.session.uid])
     const { rows: full } = await pool.query(`${MEETING_SELECT} WHERE m.id = $1`, [rows[0].id])
     res.json(full[0])
   } catch (e) {
@@ -3847,19 +3899,29 @@ app.patch('/api/meetings/:id', requireLogin, async (req, res) => {
     if (!cur.length) return res.status(404).json({ error: '해당 회의록을 찾을 수 없습니다.' })
     // 🔑 회의록은 «여럿이 함께 보는 것» 이라 적은 사람만 고칠 수 있게 하면 쓸모가 없다.
     //    회의에서 빠진 내용을 참석자가 채워 넣는 것이 정상이다. 지우기만 좁게 막는다.
+    // 🔑 서식과 글자는 «함께» 움직인다 — 하나만 바꾸면 검색이 옛 글을 찾아낸다.
+    let html = cur[0].body_html
+    let text = cur[0].body
+    if (b.body_html !== undefined) { html = cleanHtml(b.body_html); text = htmlToText(html) }
+    else if (b.body !== undefined) { text = b.body || null; html = null }
     await pool.query(
       `UPDATE meetings
           SET title = COALESCE($1, title), met_on = COALESCE($2, met_on),
-              place = $3, attendee_ids = $4, attendee_text = $5, body = $6,
+              place = $3, attendee_ids = $4, attendee_text = $5, body = $6, body_html = $7,
+              author_worker_id = $8, author_text = $9,
               updated_at = now()
-        WHERE id = $7`,
+        WHERE id = $10`,
       [b.title ? String(b.title).trim().slice(0, 200) : null,
        b.met_on || null,
        b.place === undefined ? cur[0].place : (String(b.place || '').slice(0, 200) || null),
        b.attendee_ids === undefined ? cur[0].attendee_ids : attendeeIds(b.attendee_ids),
        b.attendee_text === undefined ? cur[0].attendee_text
          : (String(b.attendee_text || '').slice(0, 300) || null),
-       b.body === undefined ? cur[0].body : (b.body || null),
+       text, html,
+       b.author_worker_id === undefined ? cur[0].author_worker_id
+         : (b.author_worker_id ? Number(b.author_worker_id) : null),
+       b.author_text === undefined ? cur[0].author_text
+         : (String(b.author_text || '').slice(0, 100) || null),
        Number(req.params.id)])
     const { rows: full } = await pool.query(`${MEETING_SELECT} WHERE m.id = $1`, [Number(req.params.id)])
     res.json(full[0])
@@ -3880,6 +3942,49 @@ app.delete('/api/meetings/:id', requireLogin, async (req, res) => {
       'SELECT count(*)::int AS n FROM agenda_items WHERE meeting_id = $1', [Number(req.params.id)])
     await pool.query('DELETE FROM meetings WHERE id = $1', [Number(req.params.id)])
     res.json({ ok: true, kept_agenda: kept[0].n })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ─── 참석자별 입력란 (2026-09-07 신설, 마이그레이션 036) ─────
+// 「컨플루언스처럼 여럿이 동시에」 대신 «사람마다 자기 칸» 을 둔다 (사용자 채택).
+//
+// 🔑 «자기 것만» 고친다 — 남의 발표 내용을 대신 고쳐 쓰면 누가 적었는지가 무너진다.
+//    ⚠ 판정은 본문이 아니라 «주소의 worker_id» 와 세션을 맞대 한다.
+//    관리자는 통과한다 (대리 입력 — 로그인 절에 적어 둔 것과 같은 규칙).
+//
+// 🔑 비우면 «지운다». 빈 줄을 남겨 두면 보는 화면에 이름만 뜬 빈 칸이 생긴다.
+app.put('/api/meetings/:id/notes/:workerId', requireLogin, async (req, res) => {
+  const meetingId = Number(req.params.id)
+  const workerId = Number(req.params.workerId)
+  if (!Number.isInteger(workerId) || workerId <= 0) {
+    return res.status(400).json({ error: '사람을 알 수 없습니다.' })
+  }
+  if (!canEditWorker(req.session, workerId)) {
+    return res.status(403).json({ error: '본인의 발표 내용만 적을 수 있습니다.' })
+  }
+  try {
+    const { rows: m } = await pool.query('SELECT id FROM meetings WHERE id = $1', [meetingId])
+    if (!m.length) return res.status(404).json({ error: '해당 회의록을 찾을 수 없습니다.' })
+
+    const html = cleanHtml(req.body?.body_html)
+    const text = htmlToText(html)
+    if (!text) {
+      await pool.query('DELETE FROM meeting_notes WHERE meeting_id = $1 AND worker_id = $2',
+        [meetingId, workerId])
+    } else {
+      await pool.query(
+        `INSERT INTO meeting_notes (meeting_id, worker_id, body_html, body, updated_by)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (meeting_id, worker_id) DO UPDATE
+            SET body_html = EXCLUDED.body_html, body = EXCLUDED.body,
+                updated_by = EXCLUDED.updated_by, updated_at = now()`,
+        [meetingId, workerId, html, text, req.session.uid])
+    }
+    // 회의록을 통째로 돌려준다 — 화면이 notes 를 함께 들고 다시 그린다.
+    const { rows: full } = await pool.query(`${MEETING_SELECT} WHERE m.id = $1`, [meetingId])
+    res.json(full[0])
   } catch (e) {
     res.status(500).json({ error: e.message })
   }

@@ -106,3 +106,27 @@ code {
   padding: 4px 8px;
   background: var(--code-bg);
 }
+
+/* 서식 있는 글 — 회의록 본문·참석자 발표 내용 (2026-09-07 신설)
+   🔑 전역 규칙(h1~h4 는 크고, p 는 margin 0)이 회의록 안에서도 그대로 먹으면
+      글이 문서가 아니라 표지처럼 보인다. 이 두 상자 «안에서만» 되돌린다. */
+.rich-view ul,
+.rich-edit ul { list-style: disc; padding-left: 22px; margin: 4px 0; }
+.rich-view ol,
+.rich-edit ol { list-style: decimal; padding-left: 24px; margin: 4px 0; }
+.rich-view li,
+.rich-edit li { margin: 2px 0; }
+.rich-view p,
+.rich-edit p { margin: 0 0 4px; }
+.rich-view h1, .rich-edit h1 { font-size: 18px; margin: 8px 0 4px; }
+.rich-view h2, .rich-edit h2 { font-size: 16px; margin: 8px 0 4px; }
+.rich-view h3, .rich-edit h3,
+.rich-view h4, .rich-edit h4 { font-size: 14px; margin: 6px 0 4px; }
+.rich-view blockquote,
+.rich-edit blockquote {
+  margin: 6px 0; padding: 4px 10px; border-left: 3px solid #bfdbfe; color: #4b5563;
+}
+.rich-view a, .rich-edit a { color: #1a56db; }
+.rich-view table, .rich-edit table { border-collapse: collapse; }
+.rich-view td, .rich-edit td,
+.rich-view th, .rich-edit th { border: 1px solid #e5e7eb; padding: 4px 8px; }

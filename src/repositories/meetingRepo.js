@@ -33,3 +33,9 @@ export const addMeeting = (row) => request('POST', '', row)
 export const updateMeeting = (id, patch) => request('PATCH', `/${id}`, patch)
 // 돌아오는 kept_agenda = 회의만 떨어지고 «남은» 안건 수.
 export const removeMeeting = (id) => request('DELETE', `/${id}`)
+
+// 참석자별 발표 내용 (2026-09-07 신설).
+// 🔑 «자기 것만» 적을 수 있다(관리자는 대리 입력 가능). 비워 보내면 그 칸을 지운다.
+//    돌아오는 것은 «회의록 전체» 다 — 화면이 notes 를 함께 들고 다시 그린다.
+export const saveMeetingNote = (meetingId, workerId, bodyHtml) =>
+  request('PUT', `/${meetingId}/notes/${workerId}`, { body_html: bodyHtml })

@@ -21,7 +21,7 @@ import { getPurchases, addPurchase, setPurchaseStatus,
 import { getAgenda, addAgenda, updateAgenda, removeAgenda,
          confirmAgenda, agendaToJira } from './repositories/agendaRepo'
 import { getMeetings, addMeeting, updateMeeting,
-         removeMeeting } from './repositories/meetingRepo'
+         removeMeeting, saveMeetingNote } from './repositories/meetingRepo'
 // ⚠ 낱건 지우기는 «골라서 한꺼번에»(bulkRemoveHipass) 만 화면에 둔다.
 //   한 건짜리 removeHipass 는 서버·호출기에만 있고 화면에서는 부르지 않는다.
 import { getHipass, uploadHipass, claimHipass, addManualHipass,
@@ -3268,6 +3268,163 @@ function buyRange(key){
   return {from:'',to:''}
 }
 
+// 서식 있는 글 — 회의록 본문·참석자 발표 내용 (2026-09-07 신설)
+// ════════════════════════════════════════════════════════════
+// 🔴 여기가 «마지막 방어» 다. 서버도 한 번 거르지만(cleanHtml) 정규식은 태그를
+//    온전히 이해하지 못한다. 글이 실제로 «실행되는» 곳은 화면이므로, 그리기
+//    직전에 브라우저의 파서로 훑어 허락한 것만 남긴다.
+// 🔑 «지우지 않고 벗긴다» — 모르는 태그는 통째로 버리지 말고 속의 글만 남긴다.
+//    통째로 버리면 남이 붙여 넣은 글이 조용히 사라져 「적었는데 없다」가 된다.
+//    다만 script 무리는 속까지 버린다 (남길 글이 아니라 코드다).
+const HTML_TAGS=new Set(['P','DIV','BR','SPAN','B','STRONG','I','EM','U','S','STRIKE','DEL',
+  'UL','OL','LI','H1','H2','H3','H4','BLOCKQUOTE','CODE','PRE','HR','A','FONT',
+  'TABLE','THEAD','TBODY','TR','TD','TH'])
+const HTML_DROP=new Set(['SCRIPT','STYLE','IFRAME','OBJECT','EMBED','LINK','META','FORM',
+  'INPUT','BUTTON','SELECT','TEXTAREA','SVG','MATH'])
+// 서식 편집기가 실제로 만드는 것만 남긴다. 붙여 넣은 글의 배경색·글꼴은 버린다 —
+// 사내 배경(흰색)에 남의 흰 글씨가 붙으면 안 보이는 글이 된다.
+const CSS_OK=new Set(['font-size','font-weight','font-style','text-decoration',
+  'text-decoration-line','color'])
+function cleanStyle(v){
+  return String(v||'').split(';').map(x=>x.trim()).filter(Boolean).filter(d=>{
+    const [k,...rest]=d.split(':')
+    const val=rest.join(':').toLowerCase()
+    if(!CSS_OK.has(k.trim().toLowerCase()))return false
+    return !/url\s*\(|expression|javascript:/.test(val)
+  }).join('; ')
+}
+function sanitizeHtml(html){
+  if(!html)return ''
+  const doc=new DOMParser().parseFromString(`<div id="__r">${html}</div>`,'text/html')
+  const root=doc.getElementById('__r')
+  const walk=el=>{
+    for(const child of [...el.children]){
+      if(HTML_DROP.has(child.tagName)){ child.remove(); continue }
+      walk(child)
+      if(!HTML_TAGS.has(child.tagName)){
+        // 벗긴다 — 속의 글은 제자리에 남는다
+        child.replaceWith(...child.childNodes)
+        continue
+      }
+      for(const a of [...child.attributes]){
+        const n=a.name.toLowerCase()
+        if(n==='style'){
+          const s=cleanStyle(a.value)
+          if(s) child.setAttribute('style',s); else child.removeAttribute('style')
+        }else if(n==='href'&&child.tagName==='A'){
+          if(!/^(https?:|mailto:|#)/i.test(a.value.trim())) child.removeAttribute('href')
+          else{ child.setAttribute('target','_blank'); child.setAttribute('rel','noreferrer') }
+        }else if(n==='color'||n==='size'||n==='face'){
+          // <font> 가 쓰는 옛 속성. 값이 글자·숫자뿐일 때만 남긴다.
+          if(!/^[\w#.,() -]{1,40}$/.test(a.value)) child.removeAttribute(a.name)
+        }else if(n!=='target'&&n!=='rel'){
+          child.removeAttribute(a.name)
+        }
+      }
+    }
+  }
+  walk(root)
+  return root.innerHTML
+}
+// 글자만 있는 옛 회의록을 서식 편집기에 담을 때 쓴다.
+const escapeHtml=s=>String(s||'').replace(/[&<>"']/g,c=>(
+  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+const textToHtml=s=>s?escapeHtml(s).split(/\r?\n/).map(l=>`<div>${l||'<br>'}</div>`).join(''):''
+// 서식이 있으면 그것을, 없으면 글자를 쓴다 (옛 회의록은 글자만 있다).
+const richOf=o=>o?.body_html||textToHtml(o?.body)
+const richEmpty=h=>!String(h||'').replace(/<[^>]*>/g,'').replace(/&nbsp;/gi,' ').trim()
+
+// 서식이 있는 글을 «보여 주는» 자리. 그리기 직전에 한 번 더 훑는다.
+function RichView({html,style}){
+  return <div style={{fontSize:12.5,color:'#374151',lineHeight:1.8,...style}}
+    className="rich-view" dangerouslySetInnerHTML={{__html:sanitizeHtml(html)}}/>
+}
+
+// 도구 막대 — 「폰트 크기, 진하게 등 워드 기능」(2026-09-07 지시)
+// ⚠ document.execCommand 는 낡은 길이지만 «모든 브라우저가 아직 하는» 유일한 길이다.
+//   새 꾸러미를 들이지 않는 값으로 이것을 쓴다.
+const RICH_TOOLS=[
+  {cmd:'bold',          label:'B',  title:'굵게',      css:{fontWeight:800}},
+  {cmd:'italic',        label:'I',  title:'기울임',     css:{fontStyle:'italic'}},
+  {cmd:'underline',     label:'U',  title:'밑줄',      css:{textDecoration:'underline'}},
+  {cmd:'strikeThrough', label:'S',  title:'취소선',     css:{textDecoration:'line-through'}},
+  {sep:true},
+  {cmd:'fontSize',arg:'2',label:'작게',title:'작은 글씨'},
+  {cmd:'fontSize',arg:'3',label:'보통',title:'보통 글씨'},
+  {cmd:'fontSize',arg:'5',label:'크게',title:'큰 글씨'},
+  {sep:true},
+  {cmd:'foreColor',arg:'#dc2626',label:'●',title:'빨강',css:{color:'#dc2626'}},
+  {cmd:'foreColor',arg:'#1a56db',label:'●',title:'파랑',css:{color:'#1a56db'}},
+  {cmd:'foreColor',arg:'#111827',label:'●',title:'검정',css:{color:'#111827'}},
+  {sep:true},
+  {cmd:'insertUnorderedList',label:'• 목록',title:'글머리 기호'},
+  {cmd:'insertOrderedList',  label:'1. 번호',title:'번호 매기기'},
+  {sep:true},
+  {cmd:'removeFormat',label:'서식 지우기',title:'고른 곳의 서식을 없앤다'},
+]
+// 🔑 «다스리지 않는»(uncontrolled) 편집기다. 글자를 칠 때마다 innerHTML 을 도로
+//    넣으면 «커서가 맨 앞으로 튄다» — React 로 contentEditable 을 다룰 때의 함정이다.
+//    docKey 가 바뀔 때(=다른 글로 갈아탈 때)만 속을 갈아 끼운다.
+function RichEditor({value,onChange,docKey,placeholder,minHeight=200,disabled}){
+  const ref=useRef(null)
+  const [focused,setFocused]=useState(false)
+  useEffect(()=>{
+    // 🔴 «담을 때도» 거른다. 보는 자리(RichView)만 막고 여기를 안 막았더니
+    //    옛 글을 고치려고 여는 순간 <img onerror> 가 그 자리에서 터졌다
+    //    (2026-09-07 실측 — innerHTML 은 script 는 안 돌리지만 onerror 는 돌린다).
+    const safe=sanitizeHtml(value||'')
+    if(ref.current&&ref.current.innerHTML!==safe) ref.current.innerHTML=safe
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[docKey])
+  const run=(t)=>{
+    ref.current?.focus()
+    try{
+      // 서식을 «태그» 가 아니라 «style» 로 넣게 한다 — <font> 는 나중에 다루기 어렵다
+      document.execCommand('styleWithCSS',false,true)
+      document.execCommand(t.cmd,false,t.arg)
+    }catch{ /* 못 하는 브라우저면 아무 일도 일어나지 않는다 */ }
+    onChange(ref.current?.innerHTML||'')
+  }
+  const empty=richEmpty(value)
+  return(
+    <div style={{border:'1px solid '+(focused?'#1a56db':'#e5e7eb'),borderRadius:8,
+      background:disabled?'#f9fafb':'#fff',overflow:'hidden'}}>
+      <div style={{display:'flex',flexWrap:'wrap',gap:3,padding:'5px 6px',
+        borderBottom:'1px solid #eef2f7',background:'#f8fafc'}}>
+        {RICH_TOOLS.map((t,i)=>t.sep
+          ?<span key={i} style={{width:1,background:'#e5e7eb',margin:'2px 3px'}}/>
+          :<button key={i} type="button" title={t.title} disabled={disabled}
+            // 🔑 onMouseDown 에서 막지 않으면 «고른 글이 풀려» 서식이 아무 데도 안 걸린다
+            onMouseDown={e=>e.preventDefault()} onClick={()=>run(t)}
+            style={{padding:'3px 8px',borderRadius:5,fontSize:11.5,lineHeight:1.4,
+              border:'1px solid #e5e7eb',background:'#fff',color:'#374151',
+              cursor:disabled?'default':'pointer',...(t.css||{})}}>{t.label}</button>)}
+      </div>
+      <div style={{position:'relative'}}>
+        {empty&&!focused&&placeholder&&(
+          <div style={{position:'absolute',top:9,left:11,right:11,fontSize:12.5,color:'#9ca3af',
+            lineHeight:1.8,pointerEvents:'none',whiteSpace:'pre-wrap'}}>{placeholder}</div>
+        )}
+        <div ref={ref} contentEditable={!disabled} suppressContentEditableWarning
+          onInput={e=>onChange(e.currentTarget.innerHTML)}
+          onBlur={e=>{ setFocused(false); onChange(e.currentTarget.innerHTML) }}
+          onFocus={()=>setFocused(true)}
+          // 🔑 붙여 넣기는 «글자만» 받는다. 워드·웹에서 통째로 오는 서식은 배경색·글꼴까지
+          //    끌고 와 화면을 망가뜨린다 (sanitizeHtml 이 버리긴 하지만 애초에 안 받는다).
+          onPaste={e=>{
+            e.preventDefault()
+            const t=e.clipboardData?.getData('text/plain')||''
+            try{ document.execCommand('insertText',false,t) }catch{ /* 안 되면 그냥 둔다 */ }
+            onChange(ref.current?.innerHTML||'')
+          }}
+          className="rich-edit"
+          style={{minHeight,padding:'9px 11px',fontSize:12.5,lineHeight:1.8,color:'#374151',
+            outline:'none',overflowY:'auto',resize:'vertical'}}/>
+      </div>
+    </div>
+  )
+}
+
 // 안건 — 회의에서 나온 것·확인해야 할 것 (2026-09-04 신설)
 // ════════════════════════════════════════════════════════════
 // 🔑 «대시보드에 적고, 키울 것만 Jira 로 올린다»(사용자 결정). 적는 문턱이 낮아야
@@ -3337,8 +3494,11 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
   const shownMeetings=(()=>{
     const q=mq.trim().toLowerCase()
     if(!q) return meetings
+    // 🔑 참석자 발표 내용도 함께 훑는다 — 읽을 때 한 박스로 보이는 것이니
+    //    찾을 때만 갈라져 있으면 「분명히 적혀 있는데 안 나온다」가 된다.
     return meetings.filter(m=>
-      [m.title,m.place,m.body,String(m.met_on).slice(0,10)]
+      [m.title,m.place,m.body,String(m.met_on).slice(0,10),
+       ...(m.notes||[]).map(n=>n.body)]
         .some(v=>String(v||'').toLowerCase().includes(q)))
   })()
   // ── 달력에 놓기 (2026-09-06 신설) ───────────────────────────
@@ -3363,20 +3523,33 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
   }
   const nameOfWorker=id=>{const w=workers.find(x=>Number(x.id)===Number(id));return w?workerLabel(w,dupNames):`#${id}`}
 
+  // 🔑 작성자는 «실제로 적은 사람» 이다 (2026-09-07 지시). 로그인한 사람(created_by)과
+  //    다를 수 있어 — 회의에 못 온 사람의 회의록을 대신 적어 주는 일이 있다.
+  //    명단에 없는 분은 글자로 적는다. 기본값은 로그인한 본인.
   function newMeetingForm(){
-    setMForm({id:null,title:'',met_on:today(),place:'',attendee_ids:[],attendee_text:'',body:''})
+    setMForm({id:null,title:'',met_on:today(),place:'',attendee_ids:[],attendee_text:'',
+      body_html:'',author_worker_id:me?.worker_id||'',author_text:'',author_mode:'pick'})
   }
   function editMeetingForm(m){
     setMForm({id:m.id,title:m.title,met_on:String(m.met_on).slice(0,10),place:m.place||'',
-      attendee_ids:[...(m.attendee_ids||[])],attendee_text:m.attendee_text||'',body:m.body||''})
+      attendee_ids:[...(m.attendee_ids||[])],attendee_text:m.attendee_text||'',
+      // 옛 회의록은 글자만 있다 — 서식 편집기에 담을 수 있게 바꿔 넣는다
+      body_html:richOf(m),
+      author_worker_id:m.author_worker_id||'',author_text:m.author_text||'',
+      author_mode:m.author_text?'text':'pick'})
   }
   async function saveMeeting(){
     if(!mForm.title.trim()){ showToast('회의 제목을 적어 주세요'); return }
     if(!mForm.met_on){ showToast('회의 날짜를 골라 주세요'); return }
     try{
       setMBusy(true)
+      const manual=mForm.author_mode==='text'
       const body={title:mForm.title.trim(),met_on:mForm.met_on,place:mForm.place||null,
-        attendee_ids:mForm.attendee_ids,attendee_text:mForm.attendee_text||null,body:mForm.body||null}
+        attendee_ids:mForm.attendee_ids,attendee_text:mForm.attendee_text||null,
+        body_html:richEmpty(mForm.body_html)?null:mForm.body_html,
+        // 🔑 «둘 중 하나» 만 담는다. 양쪽에 남으면 어느 쪽이 작성자인지 알 수 없다.
+        author_worker_id:manual?null:(mForm.author_worker_id||null),
+        author_text:manual?(mForm.author_text.trim()||null):null}
       const isEdit=!!mForm.id
       const saved=isEdit?await updateMeeting(mForm.id,body):await addMeeting(body)
       setMForm(null); await reloadMeetings()
@@ -3401,6 +3574,31 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
       showToast(`지웠습니다${r.kept_agenda?` · 안건 ${r.kept_agenda}건은 남겼습니다`:''}`)
     }catch(e){ showToast('실패: '+e.message) }
     finally{ setMBusy(false) }
+  }
+
+  // ── 참석자별 발표 내용 (2026-09-07 신설) ─────────────────────
+  // 「컨플루언스처럼 동시에」 대신 «사람마다 자기 칸» 을 둔다 (사용자 채택).
+  // 🔑 자기 칸만 고치므로 부딪히지 않는다. 볼 때는 본문 아래에 이어 붙여 «한 박스».
+  const [noteFor,setNoteFor]=useState(null)   // {meetingId, workerId}
+  const [noteHtml,setNoteHtml]=useState('')
+  const [noteBusy,setNoteBusy]=useState(false)
+  const noteOf=(m,wid)=>(m.notes||[]).find(n=>Number(n.worker_id)===Number(wid))||null
+  const canEditNote=wid=>canEditOthers||Number(me?.worker_id)===Number(wid)
+  function openNote(m,wid){
+    setNoteFor({meetingId:m.id,workerId:wid})
+    setNoteHtml(richOf(noteOf(m,wid)))
+  }
+  async function saveNote(){
+    if(!noteFor)return
+    try{
+      setNoteBusy(true)
+      const html=richEmpty(noteHtml)?null:noteHtml
+      await saveMeetingNote(noteFor.meetingId,noteFor.workerId,html)
+      setNoteFor(null); setNoteHtml('')
+      await reloadMeetings()
+      showToast(html?'발표 내용을 저장했습니다':'발표 내용을 비웠습니다')
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setNoteBusy(false) }
   }
 
   // 상위업무 목록 — 종료한 것은 기본으로 감추고 「완료 포함」으로 꺼낸다(업무 입력과 같은 규칙).
@@ -3656,10 +3854,35 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
               <input type="date" value={mForm.met_on}
                 onChange={e=>setMForm({...mForm,met_on:e.target.value})} style={inputS}/>
             </div>
-            <div style={{gridColumn:'1 / -1'}}>
+            <div>
               <label style={labelS}>장소 (선택)</label>
               <input value={mForm.place} onChange={e=>setMForm({...mForm,place:e.target.value})}
                 placeholder="예: 본사 회의실 / 화상" style={inputS}/>
+            </div>
+            <div>
+              {/* 작성자 (2026-09-07 지시) — «실제로 적은 사람» 을 남긴다.
+                  회의에 못 온 사람의 회의록을 대신 적어 주는 일이 있어, 로그인한
+                  사람과 어긋난다. 명단에 없는 분은 직접 적는다. */}
+              <label style={labelS}>작성자</label>
+              <div style={{display:'flex',gap:6}}>
+                <select value={mForm.author_mode==='text'?'__text__':(mForm.author_worker_id||'')}
+                  onChange={e=>{
+                    const v=e.target.value
+                    if(v==='__text__') setMForm({...mForm,author_mode:'text'})
+                    else setMForm({...mForm,author_mode:'pick',author_worker_id:v,author_text:''})
+                  }}
+                  style={{...inputS,flex:mForm.author_mode==='text'?'0 0 130px':1}}>
+                  <option value="">— 안 적음 —</option>
+                  {workers.map(w=><option key={w.id} value={w.id}>{workerLabel(w,dupNames)}</option>)}
+                  <option value="__text__">직접 입력…</option>
+                </select>
+                {mForm.author_mode==='text'&&(
+                  <input value={mForm.author_text} autoFocus
+                    onChange={e=>setMForm({...mForm,author_text:e.target.value})}
+                    placeholder="명단에 없는 분 — 이름을 적으십시오"
+                    style={{...inputS,flex:1}}/>
+                )}
+              </div>
             </div>
             <div style={{gridColumn:'1 / -1'}}>
               <label style={labelS}>
@@ -3704,13 +3927,17 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
             </div>
             <div style={{gridColumn:'1 / -1'}}>
               <label style={labelS}>회의 내용</label>
-              {/* 🔑 rows 8 은 「너무 작아 입력이 불편하다」 는 지적을 받았다 (2026-09-07).
-                  20줄로 늘리고 최소 높이를 함께 걸어 둔다 — 끌어서 더 키우실 수도 있다. */}
-              <textarea value={mForm.body} onChange={e=>setMForm({...mForm,body:e.target.value})}
-                rows={20} placeholder={'논의한 것·결정된 것을 적으십시오.\n\n할 일이 된 것은 아래에서 «안건» 으로 따로 달면 기한·담당을 붙일 수 있습니다.'}
-                style={{...inputS,resize:'vertical',lineHeight:1.8,minHeight:360,fontSize:13}}/>
+              {/* 🔑 서식 편집기 (2026-09-07 지시 — 「폰트 크기, 진하게 등 워드 기능」).
+                  최소 높이 360 은 「작성란이 작아 불편하다」 는 지적을 받아 둔 것이고,
+                  모서리를 끌어 더 키울 수 있다.
+                  ⚠ docKey — 다른 회의록으로 갈아탈 때만 속을 갈아 끼운다. 글자마다
+                    갈면 커서가 맨 앞으로 튄다. */}
+              <RichEditor value={mForm.body_html} docKey={`m-${mForm.id||'new'}`}
+                onChange={v=>setMForm(f=>({...f,body_html:v}))} minHeight={360}
+                placeholder={'논의한 것·결정된 것을 적으십시오.\n\n할 일이 된 것은 아래에서 «안건» 으로 따로 달면 기한·담당을 붙일 수 있습니다.'}/>
               <div style={{fontSize:11,color:'#9ca3af',marginTop:4}}>
-                모서리를 끌어 더 크게 쓰실 수 있습니다.
+                글을 고른 뒤 위 단추를 누르면 서식이 걸립니다. 모서리를 끌어 더 크게 쓰실 수 있습니다.
+                {' '}붙여 넣은 글은 <strong>글자만</strong> 들어옵니다.
               </div>
             </div>
             <div style={{gridColumn:'1 / -1',display:'flex',gap:8}}>
@@ -3798,13 +4025,91 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
                           </strong>
                           :<span>미기재</span>}
                         {m.attendee_text&&<> · {m.attendee_text}</>}
-                        {m.created_by_name&&<> · 작성 {m.created_by_name}</>}
+                        {/* 🔑 작성자는 «실제로 적은 사람». 안 적었으면 넣은 사람으로 갈음한다 */}
+                        {(m.author_text||m.author_name||m.created_by_name)&&
+                          <> · 작성 {m.author_text||m.author_name||m.created_by_name}</>}
                       </div>
-                      {m.body
-                        ?<div style={{fontSize:12.5,color:'#374151',whiteSpace:'pre-wrap',
-                          lineHeight:1.8,background:'#fff',border:'1px solid #e5e7eb',
-                          borderRadius:7,padding:'10px 12px'}}>{m.body}</div>
-                        :<div style={{fontSize:11,color:'#9ca3af'}}>회의 내용이 비어 있습니다.</div>}
+                      {/* 🔑 본문과 참석자 발표 내용을 «한 박스» 에 이어 붙인다 (2026-09-07 지시) —
+                          따로 적었어도 읽을 때는 회의록 하나로 보여야 한다. */}
+                      {(()=>{
+                        const notes=(m.notes||[]).filter(n=>!richEmpty(richOf(n)))
+                        if(richEmpty(richOf(m))&&notes.length===0){
+                          return <div style={{fontSize:11,color:'#9ca3af'}}>회의 내용이 비어 있습니다.</div>
+                        }
+                        return(
+                          <div style={{background:'#fff',border:'1px solid #e5e7eb',
+                            borderRadius:7,padding:'10px 12px'}}>
+                            {!richEmpty(richOf(m))&&<RichView html={richOf(m)}/>}
+                            {notes.map(n=>(
+                              <div key={n.worker_id} style={{marginTop:10,paddingTop:8,
+                                borderTop:'1px dashed #e5e7eb'}}>
+                                <div style={{fontSize:11,fontWeight:700,color:'#1a56db',marginBottom:4}}>
+                                  🗣 {n.name||nameOfWorker(n.worker_id)}
+                                </div>
+                                <RichView html={richOf(n)}/>
+                              </div>
+                            ))}
+                          </div>
+                        )
+                      })()}
+                      {/* ── 참석자별 발표 내용 (2026-09-07 신설) ──────────────
+                          🔑 «미리 적어 두는» 자리다. 사람마다 자기 칸이라 동시에 적어도
+                             부딪히지 않는다 — 「동시 편집」을 포기하고 택한 길이다. */}
+                      {(m.attendee_ids||[]).length>0&&(
+                        <div style={{marginTop:10,padding:'9px 11px',background:'#f8fbff',
+                          border:'1px dashed #bfdbfe',borderRadius:7}}>
+                          <div style={{fontSize:11,color:'#6b7280',marginBottom:6,lineHeight:1.7}}>
+                            🗣 <strong style={{color:'#374151'}}>참석자별 발표 내용</strong>
+                            {' '}— 회의 전에 미리 적어 두실 수 있습니다.
+                            <strong>본인 칸만</strong> 고칠 수 있고, 위 회의 내용에 이어 붙어 보입니다.
+                          </div>
+                          <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+                            {(m.attendee_ids||[]).map(wid=>{
+                              const n=noteOf(m,wid)
+                              const has=n&&!richEmpty(richOf(n))
+                              const mine=Number(me?.worker_id)===Number(wid)
+                              const editing=noteFor&&noteFor.meetingId===m.id
+                                &&Number(noteFor.workerId)===Number(wid)
+                              return(
+                                <button key={wid} disabled={!canEditNote(wid)||noteBusy}
+                                  onClick={()=>editing?setNoteFor(null):openNote(m,wid)}
+                                  title={canEditNote(wid)?'':'본인 것만 적을 수 있습니다'}
+                                  style={{padding:'5px 12px',borderRadius:20,fontSize:12,
+                                    fontWeight:editing?700:500,
+                                    cursor:canEditNote(wid)?'pointer':'default',
+                                    border:'1px solid '+(editing?'#1a56db':has?'#93c5fd':'#e5e7eb'),
+                                    background:editing?'#1a56db':has?'#eff6ff':'#fff',
+                                    color:editing?'#fff':canEditNote(wid)?'#374151':'#9ca3af'}}>
+                                  {has?'✅ ':''}{nameOfWorker(wid)}{mine?' (나)':''}
+                                </button>
+                              )
+                            })}
+                          </div>
+                          {noteFor&&noteFor.meetingId===m.id&&(
+                            <div style={{marginTop:8}}>
+                              <div style={{fontSize:11,color:'#6b7280',marginBottom:4}}>
+                                <strong style={{color:'#1a56db'}}>{nameOfWorker(noteFor.workerId)}</strong>
+                                {' '}님의 발표 내용
+                              </div>
+                              <RichEditor value={noteHtml} docKey={`n-${m.id}-${noteFor.workerId}`}
+                                onChange={setNoteHtml} minHeight={140} disabled={noteBusy}
+                                placeholder={'이 회의에서 말씀하실 내용을 미리 적어 두십시오.'}/>
+                              <div style={{display:'flex',gap:6,marginTop:6}}>
+                                <button onClick={saveNote} disabled={noteBusy}
+                                  style={{...rowBtnS,border:'none',background:'#1a56db',color:'#fff'}}>
+                                  {noteBusy?'저장 중…':'저장'}
+                                </button>
+                                <button onClick={()=>setNoteFor(null)} disabled={noteBusy}
+                                  style={{...rowBtnS,border:'1px solid #e5e7eb',background:'#fff',
+                                    color:'#6b7280'}}>취소</button>
+                                <span style={{fontSize:11,color:'#9ca3af',alignSelf:'center'}}>
+                                  비우고 저장하면 그 칸이 지워집니다.
+                                </span>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
                       <div style={{display:'flex',gap:6,marginTop:8,flexWrap:'wrap'}}>
                         <button onClick={()=>editMeetingForm(m)} disabled={mBusy}
                           style={{...rowBtnS,border:'1px solid #e5e7eb',background:'#fff',color:'#374151'}}>
