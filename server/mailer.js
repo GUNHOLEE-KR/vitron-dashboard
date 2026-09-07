@@ -302,25 +302,36 @@ function buildDone({ actorName, actorEmail, a, sender }) {
 // 🔑 가는 곳이 방향에 따라 다르다 — 신청·취소는 대표이사에게, 승인·반려는 «신청한 사람» 에게.
 const VAC_TITLE = { request: '신청', cancel: '취소', approved: '승인', rejected: '반려' }
 
+// 휴가를 «시간» 으로 센다 (2026-09-07 지시 — 1휴가 = 8시간).
+// 🔑 저장된 vacation_hours 가 정본이다. 그 전 기록은 종일 8 · 반차 4 로 읽는다
+//    (035 가 이미 채워 두었으므로 이 갈래는 사실상 안전망이다).
+const VAC_HOURS_PER_DAY = 8
+const vacHours = p =>
+  p?.vacation_hours != null ? Number(p.vacation_hours)
+    : (p?.slot === 'allday' ? VAC_HOURS_PER_DAY : VAC_HOURS_PER_DAY / 2)
+// 며칠인가 — 시간을 하루로 나눈 값. 부르는 쪽이 아직 일수로 말할 때 쓴다.
+const vacDays = p => vacHours(p) / VAC_HOURS_PER_DAY
+
 function vacLine(p) {
   const bits = [dayLabel(p.plan_date)]
-  if (p.slot && p.slot !== 'allday') bits.push(SLOT[p.slot] || p.slot)
+  // 시각을 지정한 휴가는 «몇 시부터 몇 시까지» 가 있어야 받는 쪽이 판단할 수 있다
+  if (p.slot === 'time' && p.start_time && p.end_time) {
+    bits.push(`${String(p.start_time).slice(0, 5)}~${String(p.end_time).slice(0, 5)}`)
+  } else if (p.slot && p.slot !== 'allday') bits.push(SLOT[p.slot] || p.slot)
   bits.push(p.vacation_type || '휴가')
+  bits.push(`${vacHours(p)}시간`)
   // 「기타」만 적혀 오면 받는 쪽이 무엇인지 모른다 — 사유가 있으면 함께 싣는다 (2026-09-07)
   if (p.vacation_note) bits.push(p.vacation_note)
   return '  · ' + bits.join(' · ')
 }
-
-// 휴가가 며칠인가 — 종일 1일, 오전·오후 0.5일.
-// ⚠ 「시각 지정」은 휴가에서 고를 수 없게 막아 두었다(화면). 옛 기록이 있으면 0.5 로 센다.
-const vacDays = p => (p.slot === 'allday' ? 1 : 0.5)
 
 function buildVacation({ kind, actorName, actorEmail, plans, to, reason, sender }) {
   const c = cfg()
   const first = plans[0] || {}
   const who = first.worker_name || actorName || '누군가'
   const many = plans.length > 1 ? ` 외 ${plans.length - 1}일` : ''
-  const total = plans.reduce((s, p) => s + vacDays(p), 0)
+  const totalHours = plans.reduce((s, p) => s + vacHours(p), 0)
+  const totalDays = Math.round((totalHours / VAC_HOURS_PER_DAY) * 10) / 10
 
   // 🔑 공가는 휴가가 아니다 (2026-09-07) — 제목이 「[휴가] 예비군」 이면 말이 어긋난다.
   //    한 번에 넣은 것은 종류가 같으므로 첫 건으로 판정해도 된다.
@@ -334,7 +345,9 @@ function buildVacation({ kind, actorName, actorEmail, plans, to, reason, sender 
     rejected: `휴가가 반려되었습니다.`,
   }[kind]
 
-  const body = [head, '', ...plans.map(vacLine), '', `합계 ${total}일`, '']
+  // 「둘 다 보인다」 (2026-09-07 지시) — 세는 것은 시간이고, 일수는 8로 나눈 값이다
+  const body = [head, '', ...plans.map(vacLine), '',
+    `합계 ${totalHours}시간 (${totalDays}일)`, '']
   if (kind === 'rejected' && reason) body.push(`사유 : ${reason}`, '')
 
   if (kind === 'request') {
@@ -800,4 +813,4 @@ function notifyPurchase({ kind, actor, purchase, to, reason, sender, onSenderFai
 
 module.exports = { notify, notifyDone, notifyVacation, notifyPurchase, notifySettlement,
   notifyHipass,
-  isEnabled, lastResult, isVehiclePlan, vacDays, verifyLogin, setAccount }
+  isEnabled, lastResult, isVehiclePlan, vacDays, vacHours, verifyLogin, setAccount }

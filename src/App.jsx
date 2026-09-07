@@ -217,19 +217,34 @@ const PLAN_KINDS=[
 // 🔑 「공가」는 휴가가 아니다 (2026-09-07 지시) — 예비군·민방위·건강검진처럼
 //    «업무는 아니지만 해야 하는 일» 이다. 연차에서 깎지 않고, 달력에서도
 //    🏛 로 갈라 보인다. 무엇인지는 «사유» 칸에 자유롭게 적는다(목록을 고정하지 않는다).
+// 🔴 「반차」 단추는 없앴다 (2026-09-07 지시) — 휴가를 «시간» 으로 적게 되면서
+//    반차는 「4시간」 이 되었다. 종류에 남겨 두면 길이를 두 곳에서 정하게 된다.
 const VAC_KINDS=[
-  {v:'annual',  label:'연차',half:false,type:'연차'},
-  {v:'half',    label:'반차',half:true, type:'연차'},
-  {v:'sick',    label:'병가',half:false,type:'병가'},
-  {v:'reward',  label:'포상',half:false,type:'포상'},
-  {v:'official',label:'공가',half:false,type:'공가'},
-  {v:'etc',     label:'기타',half:false,type:'기타'},
+  {v:'annual',  label:'연차',type:'연차'},
+  {v:'sick',    label:'병가',type:'병가'},
+  {v:'reward',  label:'포상',type:'포상'},
+  {v:'official',label:'공가',type:'공가'},
+  {v:'etc',     label:'기타',type:'기타'},
 ]
-// 저장된 값 → 화면에서 고른 것. 「연차인데 종일이 아니면」 반차다.
-const vacKindOf=p=>{
-  if(p?.vacation_type==='연차'&&p.slot&&p.slot!=='allday')return 'half'
-  return VAC_KINDS.find(k=>!k.half&&k.type===p?.vacation_type)?.v||'annual'
+const vacKindOf=p=>VAC_KINDS.find(k=>k.type===p?.vacation_type)?.v||'annual'
+
+// ── 휴가 시간 (2026-09-07 지시 — 1휴가 = 8시간, 1시간 단위) ──
+// ⚠ 서버(vacationHoursOf)와 «같은 규칙» 이라야 한다. 서버가 계산해 저장하는 값이
+//   정본이고, 여기 것은 적는 동안 «미리 보여 주기» 위한 것이다.
+const VAC_WORK={start:'09:00',end:'18:00',lunchStart:'12:00',lunchEnd:'13:00'}
+const VAC_HOURS_PER_DAY=8
+const hhmm=s=>{const [h,m]=String(s||'').split(':').map(Number)
+  return (Number.isFinite(h)?h:0)*60+(Number.isFinite(m)?m:0)}
+function vacHoursCalc(slot,start,end){
+  if(slot!=='time') return VAC_HOURS_PER_DAY
+  const a=Math.max(hhmm(start),hhmm(VAC_WORK.start))
+  const z=Math.min(hhmm(end),hhmm(VAC_WORK.end))
+  if(!(z>a)) return 0
+  const lunch=Math.max(0,Math.min(z,hhmm(VAC_WORK.lunchEnd))-Math.max(a,hhmm(VAC_WORK.lunchStart)))
+  return Math.max(0,Math.round((z-a-lunch)/60))
 }
+// 고를 수 있는 시각 — 1시간 단위 (지시). 09:00 ~ 18:00
+const VAC_TIMES=Array.from({length:10},(_,i)=>`${String(9+i).padStart(2,'0')}:00`)
 // 휴가 한 건의 상태. legacy = 승인 제도가 생기기 «전» 에 들어온 기록(approval 이 비어 있다).
 // 소급 승인을 요구하지 않기로 했으므로 「기록」이라 부르고 색도 중립으로 둔다.
 const VAC_STATE={
@@ -4732,14 +4747,28 @@ function ScheduleVacation({showToast,onOpenPlan}){
                   <td style={tdS}>{it.hired_at||<span style={{color:'#b91c1c'}}>없음</span>}</td>
                   <td style={{...tdS,fontSize:11,color:'#6b7280'}}>
                     {it.range?`${it.range.from} ~ ${it.range.to}`:'-'}</td>
-                  <td style={tdS}>{it.granted==null?'-':`${it.granted}일`}</td>
-                  <td style={tdS}>{it.used}일</td>
+                  {/* 🔑 «일과 시간을 둘 다» 보인다 (2026-09-07 지시). 세는 것은 시간이고,
+                      일수는 하루 8시간으로 나눈 값이다. */}
+                  <td style={tdS}>
+                    {it.granted==null?'-':<>{it.granted}일
+                      <div style={{fontSize:10,color:'#6b7280'}}>{it.granted_hours}시간</div></>}
+                  </td>
+                  <td style={tdS}>
+                    {it.used}일
+                    <div style={{fontSize:10,color:'#6b7280'}}>{it.used_hours}시간</div>
+                  </td>
                   <td style={{...tdS,color:it.waiting?'#92400e':'#9ca3af',
-                    fontWeight:it.waiting?700:400}}>{it.waiting?`${it.waiting}일`:'-'}</td>
+                    fontWeight:it.waiting?700:400}}>
+                    {it.waiting?<>{it.waiting}일
+                      <div style={{fontSize:10}}>{it.waiting_hours}시간</div></>:'-'}
+                  </td>
                   <td style={{...tdS,fontWeight:700,color:low?'#b91c1c':'#111827'}}>
-                    {it.remaining==null?'-':`${it.remaining}일`}</td>
+                    {it.remaining==null?'-':<>{it.remaining}일
+                      <div style={{fontSize:10,fontWeight:500,color:low?'#b91c1c':'#6b7280'}}>
+                        {it.remaining_hours}시간</div></>}
+                  </td>
                   <td style={{...tdS,fontSize:11,color:'#6b7280'}}>
-                    {other.length?other.map(([k,v])=>`${k} ${v}일`).join(' · '):'-'}</td>
+                    {other.length?other.map(([k,v])=>`${k} ${v}시간`).join(' · '):'-'}</td>
                   {/* 🔑 「며칠 썼나」 만으로는 확인이 안 된다. 언제 썼는지가 있어야
                       본인이 「그날 맞다」 를 가릴 수 있다. 길어서 접어 둔다. */}
                   <td style={tdS}>
@@ -4764,9 +4793,13 @@ function ScheduleVacation({showToast,onOpenPlan}){
                             <span key={i} style={{fontSize:11,padding:'3px 9px',borderRadius:12,
                               background:st.bg,border:`1px solid ${st.border}`,color:st.fg,fontWeight:600}}>
                               {v.plan_date} ({dayName(v.plan_date)})
-                              {v.slot!=='allday'&&` · ${SLOT_MAP[v.slot]||v.slot}`}
+                              {/* 시각을 지정한 휴가는 «몇 시부터» 가 있어야 본인이 가릴 수 있다 */}
+                              {v.slot==='time'&&v.start_time&&v.end_time
+                                ?` · ${String(v.start_time).slice(0,5)}~${String(v.end_time).slice(0,5)}`
+                                :v.slot!=='allday'?` · ${SLOT_MAP[v.slot]||v.slot}`:''}
                               {` · ${v.vacation_type||'휴가'}`}
-                              {` · ${v.slot==='allday'?1:0.5}일`}
+                              {v.vacation_note?` · ${v.vacation_note}`:''}
+                              {` · ${v.vacation_hours??(v.slot==='allday'?8:4)}시간`}
                               {` · ${st.label}`}
                             </span>
                           )
@@ -4785,8 +4818,12 @@ function ScheduleVacation({showToast,onOpenPlan}){
           1년 이상은 15일, 3년 이상부터 2년마다 1일씩 늘어 최대 25일입니다. 연차 연도는 <strong>입사일 기준</strong>입니다.<br/>
           ⚠ <strong>「개근」은 시스템이 판단하지 않습니다.</strong> 결근 자료가 없어 개근한 것으로 보고 셉니다 —
           1년 미만인 분이 결근한 달이 있으면 실제보다 많게 나옵니다.<br/>
-          ⚠ <strong>「연차」만 잔여에서 깎습니다.</strong> 병가·포상·기타는 세어 보여 주기만 합니다.
-          반차(오전·오후)는 0.5일, <strong>반려된 신청은 세지 않습니다.</strong><br/>
+          ⚠ <strong>「연차」만 잔여에서 깎습니다.</strong> 병가·포상·공가·기타는 세어 보여 주기만 합니다.
+          <strong>반려된 신청은 세지 않습니다.</strong><br/>
+          🕘 <strong>휴가는 «시간»으로 셉니다</strong> — 하루 <strong>{VAC_HOURS_PER_DAY}시간</strong>.
+          시각을 지정하면 근무 {VAC_WORK.start}~{VAC_WORK.end} 안에서
+          <strong> 점심({VAC_WORK.lunchStart}~{VAC_WORK.lunchEnd})을 빼고</strong> 셉니다.
+          예전 기록은 종일 8시간·반차 4시간으로 환산했습니다.<br/>
           ⚠ <strong>잔여 = 부여 − 사용</strong> 입니다. <strong>승인된 것만 「사용」으로 셉니다</strong> —
           승인 대기 중인 신청은 아직 결재가 안 난 것이라 잔여에서도 빼지 않습니다(옆 칸에 따로 보여 드립니다).
         </div>
@@ -5814,14 +5851,17 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
           (src.place_id||src.transport==='office'?'work':'vehicle')))
         : (defaultKind||(defaultVehicleId?'vehicle':'work')))
   const [vacKind,setVacKind]=useState(()=>vacKindOf(src))
-  // 반차일 때만 뜻이 있다. 고쳐 넣을 때는 원래 잡아 둔 쪽을 그대로 살린다.
-  const [halfSlot,setHalfSlot]=useState(src?.slot==='pm'?'pm':'am')
+  // 🔑 휴가 길이는 «종일» 이거나 «시각 지정» 이다 (2026-09-07 — 반차 단추 폐지).
+  const [vacWhole,setVacWhole]=useState(()=>!(src?.use_type==='vacation'&&src?.slot==='time'))
+  const [vacFrom,setVacFrom]=useState(()=>String(src?.start_time||'09:00').slice(0,5))
+  const [vacTo,setVacTo]=useState(()=>String(src?.end_time||'13:00').slice(0,5))
   // 🔑 「기타」에 «무엇인지» 를 적는 자리 (2026-09-07 지시 — 예: 예비군 참석).
   //    종류와 따로 담는다 — 종류 칸에 넣으면 「기타」 합계를 셀 수 없다.
   const [vacNote,setVacNote]=useState(src?.vacation_note||'')
   const vk=VAC_KINDS.find(k=>k.v===vacKind)||VAC_KINDS[0]
-  // 휴가는 길이를 위쪽 시간대가 아니라 «종류» 에서 정한다
-  const vacSlot=vk.half?halfSlot:'allday'
+  // 휴가는 길이를 위쪽 시간대가 아니라 «여기» 에서 정한다 — 종일이거나 시각 지정이다
+  const vacSlot=vacWhole?'allday':'time'
+  const vacHours=vacHoursCalc(vacSlot,vacFrom,vacTo)
   const [pickerOpen,setPickerOpen]=useState(false)   // 장소 선택 창
   // 장소가 상위 값이다. 사무실이면 이동 수단·차량·거리를 묻지 않는다.
   const [placeId,setPlaceId]=useState(
@@ -5950,7 +5990,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   function buildBody(planDate,placeIdToUse,km,min,force=false){
     const ut=isVacation?'vacation':(isVehicleOnly?(personal?'personal':'business'):'business')
     return {
-      // 🔑 휴가의 길이는 「종류」에서 정해진다 — 연차·병가는 종일, 반차는 오전/오후.
+      // 🔑 휴가의 길이는 «종일 / 시각 지정» 으로 정해진다 (2026-09-07 — 반차 폐지).
+      //    시간은 서버가 다시 세어 저장한다 — 화면 값을 믿지 않는다.
       worker_id:Number(workerId), plan_date:planDate, slot:isVacation?vacSlot:slot, use_type:ut,
       place_id:isWork&&!atOffice&&placeIdToUse?Number(placeIdToUse):null,
       purpose:isWork?purpose:null,
@@ -5965,6 +6006,9 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
       one_way_dir:(isWork&&!atOffice&&!roundTrip)?oneWayDir:null,
       vacation_type:isVacation?vk.type:null,
       vacation_note:isVacation?(vacNote.trim()||null):null,
+      // 시각 지정 휴가일 때만 시각을 싣는다 — 종일이면 서버가 8시간으로 센다
+      start_time:isVacation?(vacWhole?null:vacFrom):null,
+      end_time:isVacation?(vacWhole?null:vacTo):null,
       force,
     }
   }
@@ -6005,18 +6049,19 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
       //    지적을 받았다(2026-08-26). 창 하나가 두 가지를 물으면 «취소»가 어느 쪽을
       //    가리키는지 알 수 없다. 이제 취소는 «등록 자체»를 취소한다.
       if(isVacation){
-        const one=vk.half?0.5:1
-        const what=vk.half?`반차 (${SLOT_MAP[halfSlot]})`:vk.label
+        const when=vacWhole?'종일':`${vacFrom}~${vacTo}`
         const note=vacNote.trim()?` · ${vacNote.trim()}`:''
-        const days=targets.map(d=>`${d} (${dayName(d)}) · ${what}${note} · ${one}일`)
+        const days=targets.map(d=>
+          `${d} (${dayName(d)}) · ${vk.label} · ${when}${note} · ${vacHours}시간`)
         // ⚠ 공가는 휴가가 아니다 — 「휴가를 신청할까요」 로 물으면 말이 어긋난다.
         //   연차에서 깎이지 않는다는 것도 이 자리에서 알려 준다.
         const isOfficial=vk.type==='공가'
+        const totalH=targets.length*vacHours
         if(!confirm(
           `아래 ${isOfficial?'공가':'휴가'}를 신청할까요?\n\n· ${days.join('\n· ')}\n\n`
-          +`합계 ${targets.length*one}일`
-          +(vk.type==='연차'?'':` (${vk.label} — 연차에서 깎이지 않습니다)`)+'\n\n'
-          +'신청하면 대표이사에게 승인 요청 메일이 갑니다.'
+          +`합계 ${totalH}시간 (${Math.round(totalH/VAC_HOURS_PER_DAY*10)/10}일)`
+          +(vk.type==='연차'?'':` — ${vk.label}는 연차에서 깎이지 않습니다`)+'\n\n'
+          +'신청하면 승인권자에게 승인 요청 메일이 갑니다.'
         ))return
       }
 
@@ -6518,18 +6563,37 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
                     color:vacKind===k.v?'#1a56db':'#6b7280'}}>{k.label}</button>
               ))}
             </div>
-            {/* 반차를 고른 때에만 «어느 반나절인가» 를 묻는다. 늘 띄우면 종일 휴가에도
-                고를 것이 있는 것처럼 보인다. */}
-            {vk.half&&(
-              <div style={{display:'flex',gap:6,marginTop:8}}>
-                {[['am','오전 반차'],['pm','오후 반차']].map(([v,label])=>(
-                  <button key={v} onClick={()=>canEdit&&setHalfSlot(v)} disabled={!canEdit}
-                    style={{flex:1,padding:'8px 4px',borderRadius:7,cursor:canEdit?'pointer':'default',fontSize:12,
-                      fontWeight:halfSlot===v?700:500,
-                      border:'1px solid '+(halfSlot===v?'#059669':'#e5e7eb'),
-                      background:halfSlot===v?'#ecfdf5':'#fff',
-                      color:halfSlot===v?'#047857':'#6b7280'}}>{label}</button>
-                ))}
+            {/* 🔑 길이는 «종일» 이거나 «시각 지정» 이다 (2026-09-07 — 반차 단추 폐지).
+                시간은 서버가 근무·점심 시각을 보고 계산한다. */}
+            <div style={{display:'flex',gap:6,marginTop:8}}>
+              {[[true,'종일 (8시간)'],[false,'시간 지정']].map(([v,label])=>(
+                <button key={String(v)} onClick={()=>canEdit&&setVacWhole(v)} disabled={!canEdit}
+                  style={{flex:1,padding:'8px 4px',borderRadius:7,cursor:canEdit?'pointer':'default',fontSize:12,
+                    fontWeight:vacWhole===v?700:500,
+                    border:'1px solid '+(vacWhole===v?'#059669':'#e5e7eb'),
+                    background:vacWhole===v?'#ecfdf5':'#fff',
+                    color:vacWhole===v?'#047857':'#6b7280'}}>{label}</button>
+              ))}
+            </div>
+            {!vacWhole&&(
+              <div style={{display:'flex',gap:6,marginTop:8,alignItems:'center',flexWrap:'wrap'}}>
+                <select value={vacFrom} onChange={e=>setVacFrom(e.target.value)}
+                  disabled={!canEdit} style={{...inputS,width:'auto'}}>
+                  {VAC_TIMES.map(t=><option key={t} value={t}>{t}</option>)}
+                </select>
+                <span style={{fontSize:12,color:'#6b7280'}}>~</span>
+                <select value={vacTo} onChange={e=>setVacTo(e.target.value)}
+                  disabled={!canEdit} style={{...inputS,width:'auto'}}>
+                  {VAC_TIMES.map(t=><option key={t} value={t}>{t}</option>)}
+                </select>
+                <strong style={{fontSize:13,color:vacHours>0?'#047857':'#b91c1c'}}>
+                  = {vacHours}시간
+                </strong>
+                {vacHours===0&&(
+                  <span style={{fontSize:11,color:'#b91c1c',fontWeight:700}}>
+                    끝 시각이 시작보다 뒤여야 합니다
+                  </span>
+                )}
               </div>
             )}
             {/* 🔑 「기타」에 무엇인지 적는 자리 (2026-09-07 지시).
@@ -6549,8 +6613,11 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
               {/* ⚠ 「연차에서 깎이는 일수」 를 먼저 적으면 병가·공가도 깎이는 것처럼 읽힌다.
                   연차일 때와 아닐 때 «말을 갈라» 둔다. */}
               {vk.type==='연차'
-                ?<>연차에서 깎이는 일수 — <strong>{vk.half?'0.5일 (반차)':'1일 (종일)'}</strong></>
+                ?<>연차에서 깎이는 시간 — <strong>{vacHours}시간</strong>
+                   {' '}({Math.round(vacHours/VAC_HOURS_PER_DAY*100)/100}일 · 하루 {VAC_HOURS_PER_DAY}시간)</>
                 :<><strong>{vk.label}</strong>는 <strong>연차에서 깎지 않습니다</strong> — 종류별로 따로 셉니다</>}
+              {!vacWhole&&<><br/>근무 {VAC_WORK.start}~{VAC_WORK.end} 기준이고
+                <strong> 점심({VAC_WORK.lunchStart}~{VAC_WORK.lunchEnd})은 빼고</strong> 셉니다.</>}
               {vacKind==='official'
                 ?<><br/>🏛 <strong>공가</strong>는 휴가가 아니라 <strong>업무는 아니지만 해야 하는 일</strong>입니다
                    (예비군·민방위·건강검진·관공서). 달력에 <strong>🏛</strong> 로 따로 보입니다.</>

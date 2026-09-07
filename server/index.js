@@ -1090,6 +1090,7 @@ app.post('/api/schedule/plans', async (req, res) => {
   const placeText = keepPlace ? (b.place_text || null) : null
   const purpose   = keepPlace ? (b.purpose || null) : null
   const vacationType = useType === 'vacation' ? (b.vacation_type || null) : null
+  const vacationHours = useType === 'vacation' ? vacationHoursOf(b) : null
   // 🔑 「기타」에 «무엇인지» 를 적어 두는 자리 (2026-09-07 지시 — 예: 예비군 참석).
   //    종류와 «따로» 담는다 — 종류 칸에 넣으면 집계가 갈라진다(033 의 메모 참고).
   const vacationNote = useType === 'vacation'
@@ -1128,8 +1129,8 @@ app.post('/api/schedule/plans', async (req, res) => {
          (worker_id, plan_date, slot, start_time, end_time, use_type,
           place_id, place_text, purpose, transport, vehicle_id,
           est_distance_km, est_travel_min, round_trip, vacation_type, one_way_dir,
-          approval, approved_at, approved_by_id, from_place_id, vacation_note)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) RETURNING *`,
+          approval, approved_at, approved_by_id, from_place_id, vacation_note, vacation_hours)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,
       [b.worker_id, b.plan_date, b.slot || 'allday', b.start_time || null, b.end_time || null,
        useType, placeId, placeText, purpose, b.transport || 'office', b.vehicle_id ?? null,
        b.est_distance_km ?? null, b.est_travel_min ?? null,
@@ -1137,7 +1138,7 @@ app.post('/api/schedule/plans', async (req, res) => {
        approval, selfApprove ? new Date() : null, selfApprove ? req.session.uid : null,
        // 이동이 아니면 서버가 지운다 — 남으면 달력이 「A→B」 라고 거짓말을 한다
        keepPlace ? fromPlaceOf(roundTrip, b.one_way_dir, b.from_place_id) : null,
-       vacationNote]
+       vacationNote, vacationHours]
     )
     // 🔑 차량 알림 — 저장은 이미 끝났다. 메일은 «덤» 이라 await 하지 않는다.
     //    이름(차량·장소·직원)이 붙은 줄이 필요해 조회용 SELECT 로 한 번 더 읽는다.
@@ -1236,7 +1237,7 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
               round_trip = COALESCE($13, round_trip),
               status = COALESCE($14, status), vacation_type = $15,
               one_way_dir = $17, from_place_id = $18,
-              vacation_note = $19, updated_at = now()
+              vacation_note = $19, vacation_hours = $20, updated_at = now()
         WHERE id = $16`,
       [b.plan_date || null, b.slot || null, b.start_time || null, b.end_time || null, useType,
        keepPlace ? (b.place_id ?? cur[0].place_id) : null,
@@ -1263,6 +1264,17 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
          ? (b.vacation_note === undefined
              ? cur[0].vacation_note
              : (String(b.vacation_note || '').trim().slice(0, 100) || null))
+         : null,
+       // 시간은 «시간대·시각이 바뀌면» 다시 센다. 안 보냈으면 원래 값을 그대로 둔다 —
+       // 결재가 난 휴가의 시간이 다른 것을 고치다가 흔들리면 안 된다.
+       useType === 'vacation'
+         ? ((b.slot === undefined && b.start_time === undefined && b.end_time === undefined)
+             ? cur[0].vacation_hours
+             : vacationHoursOf({
+                 slot: b.slot ?? cur[0].slot,
+                 start_time: b.start_time ?? cur[0].start_time,
+                 end_time: b.end_time ?? cur[0].end_time,
+               }))
          : null]
     )
     if (rowCount === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
@@ -1413,6 +1425,35 @@ function annualLeaveDays(hiredAt, on) {
   return Math.min(25, 15 + Math.floor((years - 1) / 2))
 }
 
+// ── 휴가를 «시간» 으로 센다 (2026-09-07 지시) ────────────────
+// 🔑 1휴가 = 8시간, 1시간 단위. 시작·끝 «시각» 을 받아 «식사시간을 빼고» 센다.
+// ⚠ 회사의 근무·점심 시각은 여기 «한 곳» 에만 둔다. 다르면 이 줄만 고치면 된다.
+//   (사용자가 시각을 따로 말씀하지 않아 09:00~18:00 · 점심 12:00~13:00 으로 잡았다 —
+//    그래야 하루가 정확히 8시간이 된다)
+// 🔑 계산 결과를 «저장» 한다(035). 조회할 때마다 다시 세면 이 상수를 바꾸는 순간
+//    이미 결재된 지난 휴가의 시간까지 소급해 달라진다.
+const WORK_TIME = { start: '09:00', end: '18:00', lunchStart: '12:00', lunchEnd: '13:00' }
+const HOURS_PER_DAY = 8
+const hhmmToMin = s => {
+  const [h, m] = String(s || '').split(':').map(Number)
+  return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0)
+}
+function vacationHoursOf(b) {
+  // 종일이면 그냥 하루치다 — 시각을 묻지 않는다
+  if (b?.slot !== 'time') return HOURS_PER_DAY
+  const a = Math.max(hhmmToMin(b.start_time), hhmmToMin(WORK_TIME.start))
+  const z = Math.min(hhmmToMin(b.end_time), hhmmToMin(WORK_TIME.end))
+  if (!(z > a)) return 0
+  // 겹치는 만큼만 점심을 뺀다 — 오전만 쓰면 점심이 걸리지 않는다
+  const lunch = Math.max(0,
+    Math.min(z, hhmmToMin(WORK_TIME.lunchEnd)) - Math.max(a, hhmmToMin(WORK_TIME.lunchStart)))
+  return Math.max(0, Math.round((z - a - lunch) / 60))
+}
+// 저장된 값이 정본이다. 없으면(035 이전 기록) 종전 규칙으로 환산해 읽는다.
+const vacHoursOf = v =>
+  v.vacation_hours != null ? Number(v.vacation_hours)
+    : (v.slot === 'allday' ? HOURS_PER_DAY : HOURS_PER_DAY / 2)
+
 // 그 사람의 «올해 연차 연도» — 입사일 기준으로 센다(법정 원칙).
 function leaveYearRange(hiredAt, on) {
   if (!hiredAt) return null
@@ -1446,7 +1487,8 @@ app.get('/api/schedule/vacation-summary', async (req, res) => {
         // 🔑 반려된 건도 «목록에는» 담는다. 빼 버리면 신청한 사람이 「내 9/4 는 어디 갔나」를
         //    화면에서 알 수 없다. 세는 데서만 뺀다 — 어느 쪽인지는 approval 로 구분된다.
         const { rows: vac } = await pool.query(
-          `SELECT plan_date, slot, vacation_type, approval
+          `SELECT plan_date, slot, start_time, end_time, vacation_type, vacation_note,
+                  vacation_hours, approval
              FROM schedule_plans
             WHERE worker_id = $1 AND use_type = 'vacation'
               AND plan_date >= $2 AND plan_date <= $3
@@ -1455,7 +1497,9 @@ app.get('/api/schedule/vacation-summary', async (req, res) => {
         rows = vac
         for (const v of vac) {
           if (v.approval === 'rejected') continue
-          const days = mailer.vacDays(v)
+          // 🔑 2026-09-07 부터 «시간» 으로 센다. 저장된 vacation_hours 가 정본이고,
+          //    그 전 기록은 종일 8 · 반차 4 로 읽는다 (035 가 이미 채워 두었다).
+          const days = vacHoursOf(v)
           // 🔑 «승인된 것만» 쓴 것으로 센다 (2026-08-26 사용자 지시).
           //    대기 중인 신청은 아직 결재가 안 난 것이라 「썼다」 고 말할 수 없다.
           //    잔여에서도 빼지 않는다 — 반려될 수도 있는 날을 미리 깎으면
@@ -1471,12 +1515,23 @@ app.get('/api/schedule/vacation-summary', async (req, res) => {
           if (v.vacation_type === '연차') used += days
         }
       }
+      // 🔑 «일과 시간을 둘 다» 내보낸다 (2026-09-07 지시).
+      //    세는 것은 시간이고, 일수는 8로 나눈 값이다 — 사람은 「며칠 남았나」 로도 본다.
       const round1 = n => Math.round(n * 10) / 10
+      const toDays = h => round1(h / HOURS_PER_DAY)
+      const grantedHours = granted == null ? null : granted * HOURS_PER_DAY
       out.push({
-        worker_id: w.id, name: w.name, hired_at: w.hired_at,
-        range, granted, used: round1(used), waiting: round1(waiting),
-        remaining: granted == null ? null : round1(granted - used),
-        by_type: byType, rows,
+        worker_id: w.id, name: w.name, hired_at: w.hired_at, range,
+        granted, granted_hours: grantedHours,
+        // ⚠ used·waiting·remaining 은 여전히 «일» 이다 — 이름을 그대로 두고 뜻을 바꾸면
+        //   읽는 쪽이 조용히 어긋난다. 시간은 _hours 로 따로 준다.
+        used: toDays(used), used_hours: used,
+        waiting: toDays(waiting), waiting_hours: waiting,
+        remaining: granted == null ? null : toDays(grantedHours - used),
+        remaining_hours: grantedHours == null ? null : grantedHours - used,
+        by_type: byType,          // 시간
+        hours_per_day: HOURS_PER_DAY,
+        rows,
       })
     }
     // 승인 대기 목록. 🔑 승인할 수 있는 사람에게만 내려보낸다 —
