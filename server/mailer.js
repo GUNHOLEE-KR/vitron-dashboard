@@ -322,7 +322,10 @@ function buildVacation({ kind, actorName, actorEmail, plans, to, reason, sender 
   const many = plans.length > 1 ? ` 외 ${plans.length - 1}일` : ''
   const total = plans.reduce((s, p) => s + vacDays(p), 0)
 
-  const subject = `[휴가] ${VAC_TITLE[kind]} · ${who} · ${dayLabel(first.plan_date)}${many}`
+  // 🔑 공가는 휴가가 아니다 (2026-09-07) — 제목이 「[휴가] 예비군」 이면 말이 어긋난다.
+  //    한 번에 넣은 것은 종류가 같으므로 첫 건으로 판정해도 된다.
+  const tag = first.vacation_type === '공가' ? '공가' : '휴가'
+  const subject = `[${tag}] ${VAC_TITLE[kind]} · ${who} · ${dayLabel(first.plan_date)}${many}`
 
   const head = {
     request:  `${who} 님이 휴가를 신청했습니다.`,

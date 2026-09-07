@@ -223,9 +223,16 @@ export function buildGroupRows(groupBy, workers, places, vehicles, plans, opts =
           color: '#0ea5e9', match: p => p.place_id === id, cellDefaults: { placeId: id },
         })
       })
+    // 🔑 공가는 «휴가와 다른 줄» 로 세운다 (2026-09-07 지시) — 한 줄에 섞으면
+    //    그날 쉬는 사람과 예비군 간 사람이 구별되지 않는다.
     rows.push({
       key: 'vac', label: '🌴 휴가', color: '#059669',
-      match: p => p.use_type === 'vacation', cellDefaults: { kind: 'vacation' },
+      match: p => p.use_type === 'vacation' && !isOfficialLeave(p),
+      cellDefaults: { kind: 'vacation' },
+    })
+    rows.push({
+      key: 'official', label: '🏛 공가', color: '#7c3aed',
+      match: p => isOfficialLeave(p), cellDefaults: { kind: 'vacation' },
     })
     return rows
   }
@@ -279,7 +286,7 @@ export function placeLabel(plan) {
 // 배지에 넣을 짧은 장소 이름. 달력 칸이 좁아 긴 이름은 잘라야 한다.
 // 편도면 방향을 화살표로 덧붙인다 — 「→현장」 은 나가는 길, 「현장→」 은 돌아오는 길.
 export function shortPlace(plan) {
-  if (plan.use_type === 'vacation') return plan.vacation_type || '휴가'
+  if (plan.use_type === 'vacation') return plan.vacation_type || '휴가'   // 공가면 '공가' 가 그대로 나온다
   if (plan.use_type === 'personal') return '개인 사용'
   if (plan.transport === 'office') return '사무실'
   const nm = plan.place_name || plan.place_text || ''
@@ -295,8 +302,18 @@ export function shortPlace(plan) {
   }
   return cut
 }
+// 🔑 「공가」는 휴가가 아니다 (2026-09-07 지시) — 예비군·민방위·건강검진처럼
+//    «업무가 아니지만 해야 하는 일» 이다. 연차에서 깎지 않는다.
+//    ⚠ 저장은 use_type='vacation' 을 그대로 쓴다 — 유형을 새로 만들면 use_type 이
+//      13개 파일 90곳에 걸쳐 있어 한 곳만 빠뜨려도 그 일정이 통계에서 조용히 사라진다.
+//      대신 «보이는 것» 은 휴가와 확실히 갈라 둔다 (아이콘·이름·색).
+export const OFFICIAL_LEAVE = '공가'
+export const isOfficialLeave = p =>
+  p?.use_type === 'vacation' && p?.vacation_type === OFFICIAL_LEAVE
+
 // 배지에 붙는 아이콘 — 휴가는 이동 수단이 없으므로 따로 잡는다
 export function planIcon(plan) {
+  if (isOfficialLeave(plan)) return '🏛'
   if (plan.use_type === 'vacation') return '🌴'
   return (TRANSPORT_MAP[plan.transport] || TRANSPORT_MAP.office).icon
 }

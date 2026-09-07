@@ -203,7 +203,7 @@ async function copyText(s){
 const PLAN_KINDS=[
   {v:'work',    label:'업무',      icon:'📋', desc:'장소에서 하는 일'},
   {v:'vehicle', label:'차량 예약', icon:'🚗', desc:'차량만 쓰는 경우'},
-  {v:'vacation',label:'휴가',      icon:'🌴', desc:'연차·병가 등'},
+  {v:'vacation',label:'휴가',      icon:'🌴', desc:'연차·병가·공가 등'},
 ]
 // 휴가 종류. 값이 늘거나 바뀔 수 있으므로 여기 한 곳에서만 관리한다.
 // 화면에서 고르는 것은 이 다섯 가지다 (2026-08-26 지시).
@@ -213,12 +213,17 @@ const PLAN_KINDS=[
 // 🔑 저장은 «종류»(vacation_type)와 «길이»(slot)로 갈라 담는다.
 //    반차는 연차를 반나절 쓰는 것이므로 종류는 그대로 '연차' 다.
 //    ⚠ 종류 칸에 '반차' 를 담으면 연차 소진 집계가 '연차' 만 세다가 반차를 통째로 놓친다.
+//
+// 🔑 「공가」는 휴가가 아니다 (2026-09-07 지시) — 예비군·민방위·건강검진처럼
+//    «업무는 아니지만 해야 하는 일» 이다. 연차에서 깎지 않고, 달력에서도
+//    🏛 로 갈라 보인다. 무엇인지는 «사유» 칸에 자유롭게 적는다(목록을 고정하지 않는다).
 const VAC_KINDS=[
-  {v:'annual',label:'연차',half:false,type:'연차'},
-  {v:'half',  label:'반차',half:true, type:'연차'},
-  {v:'sick',  label:'병가',half:false,type:'병가'},
-  {v:'reward',label:'포상',half:false,type:'포상'},
-  {v:'etc',   label:'기타',half:false,type:'기타'},
+  {v:'annual',  label:'연차',half:false,type:'연차'},
+  {v:'half',    label:'반차',half:true, type:'연차'},
+  {v:'sick',    label:'병가',half:false,type:'병가'},
+  {v:'reward',  label:'포상',half:false,type:'포상'},
+  {v:'official',label:'공가',half:false,type:'공가'},
+  {v:'etc',     label:'기타',half:false,type:'기타'},
 ]
 // 저장된 값 → 화면에서 고른 것. 「연차인데 종일이 아니면」 반차다.
 const vacKindOf=p=>{
@@ -2790,7 +2795,8 @@ function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan
       {!isSettle&&<div style={{marginBottom:10,fontSize:11,color:'#6b7280',display:'flex',gap:14,
         flexWrap:'wrap',background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,
         padding:'8px 12px'}}>
-        <span>🏢 사무실</span><span>🚗 법인차량</span><span>🚙 자차</span><span>🚌 대중교통</span><span>🌴 휴가</span>
+        <span>🏢 사무실</span><span>🚗 법인차량</span><span>🚙 자차</span><span>🚌 대중교통</span>
+        <span>🌴 휴가</span><span>🏛 공가(예비군·건강검진 등)</span>
         <span style={{color:'#c2410c'}}>● 확인 필요(지난 날짜인데 실적 없음)</span>
         <span>↺ 계획과 달랐음</span>
         <span style={{borderBottom:'1px dashed #6b7280'}}>점선 = 개인 사용</span>
@@ -5529,7 +5535,9 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
           <span style={{marginLeft:6}}>{plan.worker_name}</span>
           <span style={{marginLeft:6,color:'#6b7280'}}>{SLOT_MAP[plan.slot]}</span>
           <div>
-            {vacation?`🌴 휴가 · ${plan.vacation_type||''}`
+            {vacation?(plan.vacation_type==='공가'
+               ?`🏛 공가${plan.vacation_note?` · ${plan.vacation_note}`:''}`
+               :`🌴 휴가 · ${plan.vacation_type||''}${plan.vacation_note?` · ${plan.vacation_note}`:''}`)
              :personal?'개인 사용'
              :atOffice?'🏢 사무실'
              :`${planIcon(plan)} ${plan.place_name||plan.place_text||'장소 미정'}`}
@@ -5973,9 +5981,15 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
       if(isVacation){
         const one=vk.half?0.5:1
         const what=vk.half?`반차 (${SLOT_MAP[halfSlot]})`:vk.label
-        const days=targets.map(d=>`${d} (${dayName(d)}) · ${what} · ${one}일`)
+        const note=vacNote.trim()?` · ${vacNote.trim()}`:''
+        const days=targets.map(d=>`${d} (${dayName(d)}) · ${what}${note} · ${one}일`)
+        // ⚠ 공가는 휴가가 아니다 — 「휴가를 신청할까요」 로 물으면 말이 어긋난다.
+        //   연차에서 깎이지 않는다는 것도 이 자리에서 알려 준다.
+        const isOfficial=vk.type==='공가'
         if(!confirm(
-          `아래 휴가를 신청할까요?\n\n· ${days.join('\n· ')}\n\n합계 ${targets.length*one}일\n\n`
+          `아래 ${isOfficial?'공가':'휴가'}를 신청할까요?\n\n· ${days.join('\n· ')}\n\n`
+          +`합계 ${targets.length*one}일`
+          +(vk.type==='연차'?'':` (${vk.label} — 연차에서 깎이지 않습니다)`)+'\n\n'
           +'신청하면 대표이사에게 승인 요청 메일이 갑니다.'
         ))return
       }
@@ -6498,18 +6512,26 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
             <div style={{marginTop:8}}>
               <input value={vacNote} onChange={e=>setVacNote(e.target.value)}
                 disabled={!canEdit} maxLength={100}
-                placeholder={vacKind==='etc'
-                  ? '어떤 휴가인지 적어 주십시오 (예: 예비군 참석 · 경조)'
-                  : '사유 (선택) — 적어 두면 달력과 메일에 함께 보입니다'}
+                placeholder={vacKind==='official'
+                  ? '무슨 일인지 적어 주십시오 (예: 예비군 참석 · 건강검진 · 관공서)'
+                  : vacKind==='etc'
+                    ? '어떤 휴가인지 적어 주십시오 (예: 경조)'
+                    : '사유 (선택) — 적어 두면 달력과 메일에 함께 보입니다'}
                 style={inputS}/>
             </div>
             <div style={{fontSize:11,color:'#6b7280',marginTop:6,lineHeight:1.7}}>
-              연차에서 깎이는 일수 — <strong>{vk.half?'0.5일 (반차)':'1일 (종일)'}</strong>
-              {vk.type!=='연차'&&<> · <strong>{vk.label}</strong>는 연차에서 깎지 않고 따로 셉니다</>}
-              <br/>휴가는 장소·차량을 적지 않습니다. 달력에 🌴 로 표시됩니다.
-              {vacKind==='etc'&&!vacNote.trim()&&(
+              {/* ⚠ 「연차에서 깎이는 일수」 를 먼저 적으면 병가·공가도 깎이는 것처럼 읽힌다.
+                  연차일 때와 아닐 때 «말을 갈라» 둔다. */}
+              {vk.type==='연차'
+                ?<>연차에서 깎이는 일수 — <strong>{vk.half?'0.5일 (반차)':'1일 (종일)'}</strong></>
+                :<><strong>{vk.label}</strong>는 <strong>연차에서 깎지 않습니다</strong> — 종류별로 따로 셉니다</>}
+              {vacKind==='official'
+                ?<><br/>🏛 <strong>공가</strong>는 휴가가 아니라 <strong>업무는 아니지만 해야 하는 일</strong>입니다
+                   (예비군·민방위·건강검진·관공서). 달력에 <strong>🏛</strong> 로 따로 보입니다.</>
+                :<><br/>휴가는 장소·차량을 적지 않습니다. 달력에 🌴 로 표시됩니다.</>}
+              {(vacKind==='etc'||vacKind==='official')&&!vacNote.trim()&&(
                 <><br/><span style={{color:'#9a3412',fontWeight:700}}>
-                  「기타」는 사유를 적어 두셔야 나중에 무엇이었는지 알 수 있습니다.
+                  「{vk.label}」는 사유를 적어 두셔야 나중에 무엇이었는지 알 수 있습니다.
                 </span></>
               )}
             </div>
@@ -6829,7 +6851,8 @@ function DaySchedule({rows}){
         <div key={w.worker_id}>
           <strong style={{color:'#374151'}}>{w.worker_name}</strong>{' '}
           {w.items.map((it,i)=>{
-            const txt=it.use_type==='vacation'?`🌴 ${it.vacation_type||'휴가'}`
+            const txt=it.use_type==='vacation'
+              ?`${it.vacation_type==='공가'?'🏛':'🌴'} ${it.vacation_type||'휴가'}`
               :it.use_type==='personal'?'개인 사용'
                 :[it.place,it.purpose].filter(Boolean).join(' · ')||'업무'
             // 왕복인지 편도인지가 정산 감각을 좌우한다 — 글자로 짧게 붙인다
