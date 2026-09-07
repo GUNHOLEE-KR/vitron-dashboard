@@ -1179,6 +1179,24 @@ async function notifyVehicle(kind, planId, req, batchId, conflicts) {
 
 // 휴가 알림용으로 «이름까지 붙은» 계획 한 줄을 읽어 mailer 에 넘긴다.
 // ⚠ 실패해도 삼킨다 — 알림 때문에 신청이 흔들리면 안 된다.
+// 휴가 승인권자들의 메일 주소 (2026-09-07 지시).
+// 🔑 신청은 «승인할 수 있는 사람 전원» 에게 간다 — 한 사람만 보면 그가 자리를 비웠을 때
+//    신청이 그대로 묻힌다. 지금은 두 분(이건호·고광용)이다.
+// ⚠ 사람 이름을 코드에 박지 않는다. 권한(can_approve_settlement)에서 끌어온다 —
+//   권한이 옮겨 가면 받는 사람도 저절로 따라간다.
+// ⚠ 빈 목록이면 null 을 준다 — 메일러가 그때 종전대로 MAIL_TO 로 떨어뜨린다.
+async function approverEmails(excludeUid) {
+  const { rows } = await pool.query(
+    `SELECT u.id, coalesce(w.email, u.login_id) AS email
+       FROM kpi_users u
+       LEFT JOIN workers w ON w.id = u.worker_id
+      WHERE u.active AND u.can_approve_settlement`)
+  const list = rows
+    .filter(r => r.email && Number(r.id) !== Number(excludeUid))
+    .map(r => r.email)
+  return list.length ? [...new Set(list)].join(', ') : null
+}
+
 async function notifyVacationPlan(kind, planId, req, batchId) {
   try {
     if (!mailer.isEnabled()) return
@@ -1186,6 +1204,8 @@ async function notifyVacationPlan(kind, planId, req, batchId) {
     if (!rows.length) return
     mailer.notifyVacation({
       kind, plans: rows[0], batchId,
+      // 신청·취소는 «승인권자 전원» 에게
+      to: await approverEmails(),
       actor: { name: req.session?.name, email: req.session?.login },
       sender: await senderFor(req.session?.uid),
       onSenderFail: why => markSenderBroken(req.session?.uid, why),
@@ -1339,19 +1359,23 @@ app.patch('/api/schedule/plans/:id/approval', async (req, res) => {
   }
 })
 
-// 승인·반려 결과는 «신청한 사람» 에게 알린다.
-// ⚠ 회사 메일 주소가 없는 직원이면 보낼 곳이 없다. 그때는 조용히 넘기지 않고 로그에 남긴다 —
-//   「보냈겠지」 하고 넘어가면 당사자만 결과를 모른 채로 남는다.
+// 승인·반려 결과는 «신청한 사람 + 다른 승인권자» 에게 알린다 (2026-09-07 지시).
+// 🔑 처리한 사람은 뺀다 — 자기가 누른 것을 자기에게 알릴 이유가 없다.
+//    이건호 부장이 승인하면 신청자와 «대표이사» 에게 가고, 그 반대도 같다.
+// ⚠ 회사 메일 주소가 없는 직원이면 당사자에게는 보낼 곳이 없다. 그때는 조용히 넘기지
+//   않고 로그에 남긴다 — 「보냈겠지」 하고 넘어가면 당사자만 결과를 모른 채로 남는다.
 async function notifyVacationResult(kind, planId, req, reason) {
   try {
     if (!mailer.isEnabled()) return
     const { rows } = await pool.query(`${PLAN_SELECT} WHERE p.id = $1`, [planId])
     if (!rows.length) return
-    const to = rows[0].worker_email
-    if (!to) {
+    const mine = rows[0].worker_email
+    if (!mine) {
       console.warn(`[mail] vacation ${kind}: ${rows[0].worker_name} 님의 메일 주소가 없어 못 보냄 (plan#${planId})`)
-      return
     }
+    const others = await approverEmails(req.session?.uid)
+    const to = [mine, others].filter(Boolean).join(', ')
+    if (!to) return
     mailer.notifyVacation({
       kind, plans: rows[0], to, reason,
       actor: { name: req.session?.name, email: req.session?.login },
@@ -3815,6 +3839,7 @@ app.delete('/api/meetings/:id', requireLogin, async (req, res) => {
 const AGENDA_STATUS = ['open', 'doing', 'done', 'confirmed', 'hold']
 const AGENDA_SELECT = `
   SELECT a.*, w.name AS owner_name, w.team AS owner_team,
+         rp.name AS reporter_name,
          j.summary AS parent_summary,
          c.display_name AS created_by_name,
          d.display_name AS done_by_name,
@@ -3822,6 +3847,7 @@ const AGENDA_SELECT = `
          mt.title AS meeting_title, mt.met_on AS meeting_date
     FROM agenda_items a
     LEFT JOIN workers w      ON w.id = a.owner_worker_id
+    LEFT JOIN workers rp     ON rp.id = a.reporter_worker_id
     LEFT JOIN jira_issues j  ON j.jira_key = a.parent_key
     LEFT JOIN kpi_users c    ON c.id = a.created_by
     LEFT JOIN kpi_users d    ON d.id = a.done_by
@@ -3870,8 +3896,8 @@ app.post('/api/agenda', requireLogin, async (req, res) => {
     const { rows } = await pool.query(
       `INSERT INTO agenda_items
          (title, detail, owner_worker_id, due_date, status,
-          parent_key, parent_text, source, meeting_id, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+          parent_key, parent_text, source, meeting_id, created_by, reporter_worker_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
       [title.slice(0, 200), b.detail || null,
        b.owner_worker_id ? Number(b.owner_worker_id) : null,
        b.due_date || null,
@@ -3880,7 +3906,9 @@ app.post('/api/agenda', requireLogin, async (req, res) => {
        String(b.parent_text || '').slice(0, 200) || null,
        String(b.source || '').slice(0, 200) || null,
        b.meeting_id ? Number(b.meeting_id) : null,
-       req.session.uid])
+       req.session.uid,
+       // 🔑 «보고자» — 회의에서 이 안건을 말할 사람. 담당자와 다를 수 있다 (2026-09-07)
+       b.reporter_worker_id ? Number(b.reporter_worker_id) : null])
     const { rows: full } = await pool.query(`${AGENDA_SELECT} WHERE a.id = $1`, [rows[0].id])
     res.json(full[0])
   } catch (e) {
@@ -3914,7 +3942,7 @@ app.patch('/api/agenda/:id', requireLogin, async (req, res) => {
           SET title = COALESCE($1, title), detail = $2,
               owner_worker_id = $3, due_date = $4, status = $5,
               parent_key = $6, parent_text = $7, source = $8,
-              meeting_id = $12,
+              meeting_id = $12, reporter_worker_id = $13,
               done_at = CASE WHEN $9 THEN now() ELSE done_at END,
               done_by = CASE WHEN $9 THEN $10::int ELSE done_by END,
               updated_at = now()
@@ -3931,7 +3959,10 @@ app.patch('/api/agenda/:id', requireLogin, async (req, res) => {
        toDone, req.session.uid, Number(req.params.id),
        // ⚠ 「안 보냄」과 「비우기」는 다른 뜻이다 — 안 보내면 지금 걸린 회의를 그대로 둔다
        b.meeting_id === undefined ? cur[0].meeting_id
-         : (b.meeting_id ? Number(b.meeting_id) : null)])
+         : (b.meeting_id ? Number(b.meeting_id) : null),
+       // 보고자도 같은 규칙 — 안 보내면 그대로, 빈 값이면 비운다
+       b.reporter_worker_id === undefined ? cur[0].reporter_worker_id
+         : (b.reporter_worker_id ? Number(b.reporter_worker_id) : null)])
     const { rows: full } = await pool.query(`${AGENDA_SELECT} WHERE a.id = $1`, [Number(req.params.id)])
     res.json(full[0])
   } catch (e) {
@@ -4035,8 +4066,11 @@ app.post('/api/agenda/:id/to-jira', requireLogin, async (req, res) => {
   if (!j) return res.status(500).json({ error: 'Jira 환경변수가 설정되지 않았습니다.' })
   try {
     const { rows: cur } = await pool.query(
-      `SELECT a.*, w.email AS owner_email FROM agenda_items a
-         LEFT JOIN workers w ON w.id = a.owner_worker_id WHERE a.id = $1`, [Number(req.params.id)])
+      `SELECT a.*, w.email AS owner_email, rp.name AS reporter_name
+         FROM agenda_items a
+         LEFT JOIN workers w  ON w.id  = a.owner_worker_id
+         LEFT JOIN workers rp ON rp.id = a.reporter_worker_id
+        WHERE a.id = $1`, [Number(req.params.id)])
     if (!cur.length) return res.status(404).json({ error: '해당 안건을 찾을 수 없습니다.' })
     const a = cur[0]
     if (a.jira_key) return res.status(409).json({ error: `이미 ${a.jira_key} 로 올라가 있습니다.` })
@@ -4052,10 +4086,16 @@ app.post('/api/agenda/:id/to-jira', requireLogin, async (req, res) => {
       } catch { /* 못 찾으면 담당자 없이 간다 */ }
     }
 
+    // 🔑 «보고자» 는 Jira 필드가 아니라 «제목 뒤 _이름» 으로 붙인다 (2026-09-07 결정).
+    //    Jira 의 보고자 필드를 채우려면 계정 매핑이 필요한데, 그 품이 얻는 것보다 크다.
+    //    제목에 붙이면 Jira 목록에서 «누가 보고할 것인가» 가 바로 보인다.
+    // ⚠ 두 번 붙이지 않는다 — 이미 「_이름」 으로 끝나면 그대로 둔다.
+    const suffix = a.reporter_name ? `_${a.reporter_name}` : ''
+    const summary = suffix && !a.title.endsWith(suffix) ? `${a.title}${suffix}` : a.title
     const fields = {
       project: { key: 'VITRON' },
       issuetype: { name: '작업' },
-      summary: a.title,
+      summary,
     }
     // 🔴 「고정업무」처럼 Jira 에 없는 항목(MANUAL-…)은 상위로 쓸 수 없다.
     //    넣으면 400 이 나므로 아예 빼고, 화면이 그 사실을 알린다.

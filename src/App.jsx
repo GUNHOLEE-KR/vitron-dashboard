@@ -3273,6 +3273,8 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
   const [title,setTitle]=useState('')
   const [detail,setDetail]=useState('')
   const [ownerId,setOwnerId]=useState(me?.worker_id??'')
+  // 보고자 — 회의에서 이 안건을 말할 사람 (2026-09-07 지시). 담당자와 다를 수 있다.
+  const [reporterId,setReporterId]=useState('')
   const [due,setDue]=useState('')
   const [source,setSource]=useState('')
   // 프로젝트 = 업무 입력과 «같은 목록»(Jira 상위업무). 없으면 직접 적거나 비운다.
@@ -3406,13 +3408,14 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
       // 🔑 Jira 키는 «전체 문구» 에서 뽑는다. 「고정업무」처럼 키가 없는 것도 있어
       //    (그런 것은 Jira 상위로 못 쓴다) 문구는 문구대로 함께 남긴다.
       await addAgenda({title:title.trim(),detail:detail||null,
-        owner_worker_id:ownerId?Number(ownerId):null, due_date:due||null,
+        owner_worker_id:ownerId?Number(ownerId):null,
+        reporter_worker_id:reporterId?Number(reporterId):null, due_date:due||null,
         parent_key:parentPick?jiraKeyOf(parentPick):null,
         parent_text:parentPick||parentText||null,
         source:source||null,
         // 🔑 회의록을 열어 둔 채 적으면 «그 회의의 안건» 이 된다. 이것이 기본 흐름이다.
         meeting_id:openMeeting?openMeeting.id:null})
-      setTitle(''); setDetail(''); setDue(''); setSource('')
+      setTitle(''); setDetail(''); setDue(''); setSource(''); setReporterId('')
       setParentText(''); setParentPick('')
       setOpenForm(false); reload()
       showToast('안건을 등록했습니다')
@@ -3449,6 +3452,8 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
     if(!confirm(`「${a.title}」을 Jira 에 「작업」으로 올릴까요?\n\n`
       +(a.due_date?`· 기한 ${a.due_date}\n`:'')
       +(a.owner_name?`· 담당 ${a.owner_name}\n`:'')
+      // 보고자는 Jira 필드가 아니라 «제목 뒤 _이름» 으로 붙는다 — 그 사실을 미리 알린다
+      +(a.reporter_name?`· 제목 뒤에 «_${a.reporter_name}» 이 붙습니다 (보고자)\n`:'')
       +(manual?'\n⚠ 고른 상위업무는 Jira 에 없는 항목이라 «상위 없이» 올라갑니다.':'')))return
     try{
       setBusy(a.id)
@@ -3475,6 +3480,7 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
       await updateAgenda(editing.id,{
         title:editing.title, detail:editing.detail, due_date:editing.due_date||null,
         owner_worker_id:editing.owner_worker_id?Number(editing.owner_worker_id):null,
+        reporter_worker_id:editing.reporter_worker_id?Number(editing.reporter_worker_id):null,
         source:editing.source||null,
       })
       setEditing(null); reload(); showToast('고쳤습니다')
@@ -3891,6 +3897,15 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
                 {workers.map(w=><option key={w.id} value={w.id}>{workerLabel(w,dupNames)}</option>)}
               </select>
             </div>
+            {/* 🔑 «보고자» — 회의에서 말할 사람. 맡아 하는 사람(담당자)과 다를 수 있다
+                (2026-09-07 지시). Jira 로 올릴 때 제목 뒤에 _이름 으로 붙는다. */}
+            <div>
+              <label style={labelS}>보고자</label>
+              <select value={reporterId} onChange={e=>setReporterId(e.target.value)} style={inputS}>
+                <option value="">지정 안 함</option>
+                {workers.map(w=><option key={w.id} value={w.id}>{workerLabel(w,dupNames)}</option>)}
+              </select>
+            </div>
             <div>
               <label style={labelS}>기한</label>
               <input type="date" value={due} onChange={e=>setDue(e.target.value)} style={inputS}/>
@@ -3991,6 +4006,9 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
                   </div>
                   <div style={{fontSize:11,color:'#6b7280',marginTop:4,lineHeight:1.7}}>
                     {a.owner_name?<>담당 <strong style={{color:'#374151'}}>{a.owner_name}</strong></>:'담당 미지정'}
+                    {/* 보고자는 담당자와 다를 수 있다 — 같으면 굳이 두 번 적지 않는다 */}
+                    {a.reporter_name&&a.reporter_name!==a.owner_name&&
+                      <> · 보고 <strong style={{color:'#7c3aed'}}>{a.reporter_name}</strong></>}
                     {(a.parent_summary||a.parent_text)&&
                       <> · 프로젝트 <strong style={{color:'#374151'}}>{a.parent_summary||a.parent_text}</strong></>}
                     {/* 전체를 볼 때는 «어느 회의에서 나왔는지» 가 붙어야 뜻이 산다 */}
@@ -4092,11 +4110,19 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
                 onChange={e=>setEditing({...editing,detail:e.target.value})}
                 style={{...inputS,resize:'vertical'}}/>
             </div>
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:10}}>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10,marginBottom:10}}>
               <div>
                 <label style={labelS}>담당자</label>
                 <select value={editing.owner_worker_id||''}
                   onChange={e=>setEditing({...editing,owner_worker_id:e.target.value})} style={inputS}>
+                  <option value="">지정 안 함</option>
+                  {workers.map(w=><option key={w.id} value={w.id}>{workerLabel(w,dupNames)}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={labelS}>보고자</label>
+                <select value={editing.reporter_worker_id||''}
+                  onChange={e=>setEditing({...editing,reporter_worker_id:e.target.value})} style={inputS}>
                   <option value="">지정 안 함</option>
                   {workers.map(w=><option key={w.id} value={w.id}>{workerLabel(w,dupNames)}</option>)}
                 </select>
