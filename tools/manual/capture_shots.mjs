@@ -431,6 +431,24 @@ const SHOTS = [
         if(h)window.scrollTo(0,h.getBoundingClientRect().top+scrollY-260)},6400)
     })()` },
 
+  // 스케줄 달력의 «공휴일 붉은 띠» (2026-09-06 신설)
+  // 🔑 「이번 달에서 한 번 넘긴다」 로 두면 달이 바뀔 때마다 엉뚱한 달이 찍힌다.
+  //    붉은 띠가 «나올 때까지» 넘겨 스스로 찾아가게 한다 — 언제 돌려도 그림이 나온다.
+  { file: '90_일정_공휴일.png', wait: 9000,
+    js: `(()=>{const S=(f,t)=>setTimeout(f,t)
+      S(()=>__click('스케줄'),1200)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.trim()==='월'); if(b)b.click()},2400)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.trim()==='▶'); if(!b)return
+        let n=0
+        const hasBand=()=>[...document.querySelectorAll('div')]
+          .some(x=>getComputedStyle(x).backgroundColor==='rgb(220, 38, 38)')
+        const step=()=>{ if(hasBand()||n>=6) return
+          n++; b.click(); setTimeout(step,650) }
+        step()},3600)
+    })()` },
+
   // ⚠ 「검색 → 결과를 누르면 달력이 그 달로 간다」 도 찍어 두려 했으나, 그러려면
   //   «다른 달» 회의록이 있어야 한다. 시험용으로 넣었다가 지웠으므로 촬영 정의를
   //   남기면 다음에 돌릴 때 엉뚱한 것을 찍는다 — 재현되지 않는 정의는 두지 않는다.
