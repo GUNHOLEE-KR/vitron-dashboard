@@ -411,8 +411,13 @@ const SHOTS = [
 
   // 회의록 «달력으로 찾기» (2026-09-06 신설) — 회의가 있는 날에 제목이 놓이고,
   // 그 제목을 누르면 «아래에» 본문이 펼쳐진다. 그 차례가 한 장에 보이게 찍는다.
-  { file: '88_회의록_달력.png', wait: 8000,
+  // 🔴 «먼저» 촬영감을 심는다:  node tools/manual/seed_meeting_demo.mjs
+  //    그림 8-1·8-3·8-4 가 «같은 회의» 라야 「달력에서 열고 → 발표 내용을 적고 →
+  //    프로젝트별로 본다」 가 한 이야기로 이어진다.
+  { file: '88_회의록_달력.png', wait: 9000,
     js: `(()=>{const S=(f,t)=>setTimeout(f,t)
+      const T='9월 1주 주간회의 (교육 자료 예시)'
+      let badge=null
       S(()=>{const t=[...document.querySelectorAll('button')]
         .find(x=>x.textContent.trim()==='회의록'); if(t)t.click()},1200)
       S(()=>{const b=[...document.querySelectorAll('button')]
@@ -422,13 +427,14 @@ const SHOTS = [
         .filter(n=>{const s=getComputedStyle(n)
           return s.display==='grid' && s.gridTemplateColumns.split(' ').length===7}).pop()
         if(!g)return
-        const badge=[...g.querySelectorAll('div')]
-          .find(n=>getComputedStyle(n).cursor==='pointer')
+        badge=[...g.querySelectorAll('div')]
+          .find(n=>n.textContent.trim()===T&&getComputedStyle(n).cursor==='pointer')
+          ||[...g.querySelectorAll('div')].find(n=>getComputedStyle(n).cursor==='pointer')
         if(badge)badge.click()},4400)
-      // 달력이 길어 본문이 아래로 밀린다. 펼쳐진 자리로 굴려 둔다.
-      S(()=>{const h=[...document.querySelectorAll('span')]
-        .find(x=>x.textContent.trim()==='▲ 접기')
-        if(h)window.scrollTo(0,h.getBoundingClientRect().top+scrollY-260)},6400)
+      // ⚠ 「▲ 접기」에 맞추면 «달력 윗부분이 통째로 잘린다»(2026-09-08 실측).
+      //   제목 배지가 있는 «달력 줄» 을 기준으로 삼아, 제목과 펼쳐진 회의록을 함께 담는다.
+      S(()=>{if(!badge)return
+        window.scrollTo(0,badge.getBoundingClientRect().top+scrollY-300)},7000)
     })()` },
 
   // 스케줄 달력의 «공휴일 붉은 띠» (2026-09-06 신설)
