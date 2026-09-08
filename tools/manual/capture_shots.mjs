@@ -449,6 +449,72 @@ const SHOTS = [
         step()},3600)
     })()` },
 
+  // 휴가 «시간 지정» (2026-09-07 신설 — 반차를 없애고 시각을 받는다)
+  // 🔑 「= N시간」 이 나온 모습이라야 «시스템이 계산한다» 는 것이 보인다.
+  //    ⚠ «저장하지 않는다». 창을 열어 고르기만 한 상태에서 찍는다.
+  { file: '95_휴가_시간지정.png', wait: 9000,
+    js: `(()=>{const S=(f,t)=>setTimeout(f,t)
+      S(()=>__click('스케줄'),1200)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.trim()==='+ 계획 추가'); if(b)b.click()},2600)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.includes('휴가')&&x.textContent.includes('연차')); if(b)b.click()},3800)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.trim()==='시간 지정'); if(b)b.click()},4900)
+      S(()=>{const set=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set
+        const ss=[...document.querySelectorAll('select')]
+          .filter(s=>[...s.options].some(o=>/^\\d\\d:\\d\\d$/.test(o.value)))
+        if(ss[0]){set.call(ss[0],'09:00'); ss[0].dispatchEvent(new Event('change',{bubbles:true}))}
+        if(ss[1]){setTimeout(()=>{set.call(ss[1],'13:00')
+          ss[1].dispatchEvent(new Event('change',{bubbles:true}))},350)}},6000)
+      // ⚠ 팝업은 «자기 스크롤» 이 따로 있다. window.scrollTo 로는 꿈쩍도 하지 않는다
+      //   (2026-09-08 실측 — 달력만 찍히고 휴가 칸이 화면 밖에 남았다).
+      //   글자를 품은 자리에서 위로 올라가며 «넘치는 상자» 를 찾아 그것을 굴린다.
+      S(()=>{const h=[...document.querySelectorAll('div,label')]
+        .find(x=>x.textContent.trim()==='휴가 종류'); if(!h)return
+        let p=h.parentElement
+        while(p&&p!==document.body&&p.scrollHeight<=p.clientHeight+4) p=p.parentElement
+        if(p&&p!==document.body) p.scrollTop=h.getBoundingClientRect().top
+          -p.getBoundingClientRect().top+p.scrollTop-30},7600)
+    })()` },
+
+  // 참석자별 발표 내용 — 프로젝트를 고르고 본인 칸에 적는 자리 (2026-09-08 신설)
+  // 🔴 «먼저» 촬영감을 심어야 한다:  node tools/manual/seed_meeting_demo.mjs
+  //    찍은 뒤에는:                  node tools/manual/seed_meeting_demo.mjs del
+  // ⚠ 조회 화면은 «달력의 제목» 을 눌러야 회의록이 펼쳐진다. 아래 목록은 그 뒤에 생긴다
+  //   — 목록에서 찾으려 했더니 달력만 찍혔다 (2026-09-08 실측).
+  { file: '96_회의록_발표내용.png', wait: 12000,
+    js: `(()=>{const S=(f,t)=>setTimeout(f,t)
+      const T='9월 1주 주간회의 (교육 자료 예시)'
+      S(()=>__click('회의록'),1200)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.includes('지난 회의록 조회')); if(b)b.click()},2400)
+      S(()=>{const r=[...document.querySelectorAll('div,span,button')]
+        .filter(x=>x.textContent.trim()===T&&x.children.length===0)[0]; if(r)r.click()},3800)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.includes('(나)')); if(b)b.click()},6000)
+      S(()=>{const h=[...document.querySelectorAll('strong')]
+        .find(x=>x.textContent.trim()==='참석자별 발표 내용')
+        if(h)window.scrollTo(0,h.getBoundingClientRect().top+scrollY-150)},9600)
+    })()` },
+
+  // 같은 글을 «프로젝트별» 로 다시 묶은 모습 (2026-09-08 신설)
+  // 🔑 그림 8-3 과 «같은 회의록» 이라야 「묶는 기준만 바뀐다」가 눈에 들어온다.
+  { file: '97_회의록_프로젝트별.png', wait: 12000,
+    js: `(()=>{const S=(f,t)=>setTimeout(f,t)
+      const T='9월 1주 주간회의 (교육 자료 예시)'
+      S(()=>__click('회의록'),1200)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.includes('지난 회의록 조회')); if(b)b.click()},2400)
+      S(()=>{const r=[...document.querySelectorAll('div,span,button')]
+        .filter(x=>x.textContent.trim()===T&&x.children.length===0)[0]; if(r)r.click()},3800)
+      S(()=>{const b=[...document.querySelectorAll('button')]
+        .find(x=>x.textContent.includes('프로젝트별')); if(b)b.click()},6000)
+      S(()=>{const h=[...document.querySelectorAll('span,div')]
+        .find(x=>x.textContent.trim()==='발표 내용을')
+        if(h)window.scrollTo(0,h.getBoundingClientRect().top+scrollY-150)},9600)
+    })()` },
+
   // ⚠ 「검색 → 결과를 누르면 달력이 그 달로 간다」 도 찍어 두려 했으나, 그러려면
   //   «다른 달» 회의록이 있어야 한다. 시험용으로 넣었다가 지웠으므로 촬영 정의를
   //   남기면 다음에 돌릴 때 엉뚱한 것을 찍는다 — 재현되지 않는 정의는 두지 않는다.
@@ -537,6 +603,16 @@ try {
       await goto(URL_BASE)
       if (s.js) await cdp.send('Runtime.evaluate', { expression: s.js })
       await sleep(s.wait ?? 1200)
+      // 🔑 「🔴 테스트 서버」 붉은 띠를 그림에서 뺀다 (2026-09-08).
+      //    촬영은 테스트 DB 에서 하는데(운영에 시험감을 심을 수 없다) 그 띠가 그대로
+      //    찍히면 «교육 자료를 읽는 직원» 이 운영 화면에도 붉은 띠가 있는 줄 안다.
+      //    ⚠ 지우지 않고 «자리는 남긴 채» 감춘다 — 지우면 위에 붙은 머리글이
+      //      다시 배치돼 잡아 둔 스크롤 위치가 어긋난다.
+      await cdp.send('Runtime.evaluate', { expression: `(()=>{
+        const b=[...document.querySelectorAll('div')]
+          .find(x=>x.textContent.startsWith('🔴 테스트 서버')&&x.children.length<=3)
+        if(b) b.style.visibility='hidden'
+      })()` })
       const params = { format: 'png' }
       if (s.clip) {
         const r = await cdp.send('Runtime.evaluate', {
