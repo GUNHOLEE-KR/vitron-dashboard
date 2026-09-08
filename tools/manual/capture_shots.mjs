@@ -614,9 +614,14 @@ try {
       //    찍히면 «교육 자료를 읽는 직원» 이 운영 화면에도 붉은 띠가 있는 줄 안다.
       //    ⚠ 지우지 않고 «자리는 남긴 채» 감춘다 — 지우면 위에 붙은 머리글이
       //      다시 배치돼 잡아 둔 스크롤 위치가 어긋난다.
+      // 🔴 «가장 안쪽» 을 집어야 한다. 띠·머리글·탭 줄은 한 덩어리로 묶여 있어
+      //    바깥 상자의 글도 「🔴 테스트 서버」로 시작한다 — 그것을 집으면
+      //    «머리글과 탭 줄까지 통째로» 사라진다(2026-09-08 실측 — 탭 그림이 0바이트로
+      //    나와 잡았다). 글이 «가장 짧은» 것이 띠 자신이다.
       await cdp.send('Runtime.evaluate', { expression: `(()=>{
         const b=[...document.querySelectorAll('div')]
-          .find(x=>x.textContent.startsWith('🔴 테스트 서버')&&x.children.length<=3)
+          .filter(x=>x.textContent.startsWith('🔴 테스트 서버'))
+          .sort((a,b)=>a.textContent.length-b.textContent.length)[0]
         if(b) b.style.visibility='hidden'
       })()` })
       const params = { format: 'png' }
