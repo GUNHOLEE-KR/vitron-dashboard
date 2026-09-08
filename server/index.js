@@ -3840,12 +3840,18 @@ const MEETING_SELECT = `
            WHERE a.meeting_id = m.id AND a.status NOT IN ('confirmed','hold')) AS agenda_open,
          -- 🔑 참석자별 입력란을 «회의록과 함께» 실어 보낸다. 볼 때 한 박스로 이어
          --    붙이는 것이 기본이라, 따로 부르게 하면 회의록마다 왕복이 한 번 더 는다.
+         -- 🔑 한 사람이 «프로젝트마다» 한 줄이다 (037). 화면이 인원별·프로젝트별
+         --    양쪽으로 묶으므로 둘 다 이름을 붙여 보낸다.
          (SELECT coalesce(json_agg(json_build_object(
-                    'worker_id', n.worker_id, 'name', nw.name,
+                    'id', n.id, 'worker_id', n.worker_id, 'name', nw.name,
+                    'parent_key', n.parent_key, 'parent_text', n.parent_text,
+                    'parent_summary', nj.summary,
                     'body_html', n.body_html, 'body', n.body,
-                    'updated_at', n.updated_at) ORDER BY nw.name, n.worker_id), '[]'::json)
+                    'updated_at', n.updated_at)
+                  ORDER BY nw.name, n.worker_id, n.parent_text NULLS LAST), '[]'::json)
             FROM meeting_notes n
-            LEFT JOIN workers nw ON nw.id = n.worker_id
+            LEFT JOIN workers     nw ON nw.id = n.worker_id
+            LEFT JOIN jira_issues nj ON nj.jira_key = n.parent_key
            WHERE n.meeting_id = m.id) AS notes
     FROM meetings m
     LEFT JOIN kpi_users u ON u.id = m.created_by
@@ -3970,17 +3976,25 @@ app.put('/api/meetings/:id/notes/:workerId', requireLogin, async (req, res) => {
 
     const html = cleanHtml(req.body?.body_html)
     const text = htmlToText(html)
+    // 🔑 «한 사람 × 한 프로젝트» 가 한 줄이다 (037). 프로젝트를 안 고르면
+    //    「미지정」 줄 하나 — 빈 글자로 잠가 두 줄이 생기지 않게 한다.
+    const pText = String(req.body?.parent_text || '').slice(0, 300) || null
+    const pKey = pText ? (String(req.body?.parent_key || '').slice(0, 50) || null) : null
     if (!text) {
-      await pool.query('DELETE FROM meeting_notes WHERE meeting_id = $1 AND worker_id = $2',
-        [meetingId, workerId])
+      await pool.query(
+        `DELETE FROM meeting_notes
+          WHERE meeting_id = $1 AND worker_id = $2 AND coalesce(parent_text,'') = coalesce($3,'')`,
+        [meetingId, workerId, pText])
     } else {
       await pool.query(
-        `INSERT INTO meeting_notes (meeting_id, worker_id, body_html, body, updated_by)
-         VALUES ($1,$2,$3,$4,$5)
-         ON CONFLICT (meeting_id, worker_id) DO UPDATE
-            SET body_html = EXCLUDED.body_html, body = EXCLUDED.body,
+        `INSERT INTO meeting_notes (meeting_id, worker_id, parent_key, parent_text,
+                                    body_html, body, updated_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (meeting_id, worker_id, coalesce(parent_text,'')) DO UPDATE
+            SET parent_key = EXCLUDED.parent_key,
+                body_html = EXCLUDED.body_html, body = EXCLUDED.body,
                 updated_by = EXCLUDED.updated_by, updated_at = now()`,
-        [meetingId, workerId, html, text, req.session.uid])
+        [meetingId, workerId, pKey, pText, html, text, req.session.uid])
     }
     // 회의록을 통째로 돌려준다 — 화면이 notes 를 함께 들고 다시 그린다.
     const { rows: full } = await pool.query(`${MEETING_SELECT} WHERE m.id = $1`, [meetingId])

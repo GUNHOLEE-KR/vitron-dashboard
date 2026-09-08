@@ -3576,38 +3576,88 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
     finally{ setMBusy(false) }
   }
 
-  // ── 참석자별 발표 내용 (2026-09-07 신설) ─────────────────────
+  // ── 참석자별 발표 내용 (2026-09-07 신설 · 09-08 프로젝트) ─────
   // 「컨플루언스처럼 동시에」 대신 «사람마다 자기 칸» 을 둔다 (사용자 채택).
   // 🔑 자기 칸만 고치므로 부딪히지 않는다. 볼 때는 본문 아래에 이어 붙여 «한 박스».
-  const [noteFor,setNoteFor]=useState(null)   // {meetingId, workerId}
+  // 🔑 한 줄 = «한 사람 × 한 프로젝트» (2026-09-08 지시). 한 사람이 여러 프로젝트를
+  //    나눠 적고, 그것으로 [인원별] / [프로젝트별] 두 가지로 다시 묶어 본다.
+  const [noteFor,setNoteFor]=useState(null)   // {meetingId, workerId, orig}
   const [noteHtml,setNoteHtml]=useState('')
+  const [notePick,setNotePick]=useState('')   // 목록에서 고른 «전체 문구»
+  const [noteText,setNoteText]=useState('')   // 목록에 없어 직접 적은 것
   const [noteBusy,setNoteBusy]=useState(false)
-  const noteOf=(m,wid)=>(m.notes||[]).find(n=>Number(n.worker_id)===Number(wid))||null
+  // 🔑 보기는 «묶는 기준» 만 바꾼다 — 담긴 글은 하나다. 두 벌로 두면 어긋난다.
+  const [noteView,setNoteView]=useState('worker')  // worker 인원별 / project 프로젝트별
+  const notesOf=(m,wid)=>(m.notes||[]).filter(n=>Number(n.worker_id)===Number(wid))
   const canEditNote=wid=>canEditOthers||Number(me?.worker_id)===Number(wid)
-  function openNote(m,wid){
-    setNoteFor({meetingId:m.id,workerId:wid})
-    setNoteHtml(richOf(noteOf(m,wid)))
+  // 프로젝트 이름 — Jira 제목이 있으면 그것, 없으면 적어 둔 문구, 둘 다 없으면 「미지정」
+  const projLabel=n=>n.parent_summary||cleanName(n.parent_text)||n.parent_text||'프로젝트 미지정'
+  // 🔑 같은 글을 «인원별» 로도 «프로젝트별» 로도 묶는다. 미지정은 늘 맨 뒤로 보낸다 —
+  //    가운데 끼면 「빈 것부터 채우라」는 신호처럼 보인다.
+  function groupNotes(notes,by){
+    const map=new Map()
+    for(const n of notes){
+      const k=by==='worker'?`w${n.worker_id}`:`p${n.parent_text||''}`
+      if(!map.has(k)) map.set(k,{
+        key:k, last:by==='project'&&!n.parent_text,
+        label:by==='worker'?(n.name||nameOfWorker(n.worker_id)):projLabel(n), rows:[]})
+      map.get(k).rows.push(n)
+    }
+    return [...map.values()].sort((a,b)=>
+      (a.last?1:0)-(b.last?1:0)||a.label.localeCompare(b.label,'ko'))
   }
+  function openNote(m,wid,orig){
+    setNoteFor({meetingId:m.id,workerId:wid,orig:orig||null})
+    setNoteHtml(richOf(orig))
+    // 적어 둔 프로젝트가 지금 목록에 «그대로» 있으면 고르개에, 없으면 글자 칸에 담는다
+    const t=orig?.parent_text||''
+    const inList=t&&Object.keys(jiraTree||{}).includes(t)
+    setNotePick(inList?t:'')
+    setNoteText(inList?'':t)
+  }
+  function closeNote(){ setNoteFor(null); setNoteHtml(''); setNotePick(''); setNoteText('') }
   async function saveNote(){
     if(!noteFor)return
+    const {meetingId,workerId,orig}=noteFor
+    const html=richEmpty(noteHtml)?null:noteHtml
+    const newText=notePick||noteText.trim()||null
+    const oldText=orig?.parent_text||null
+    const moved=!!orig&&(oldText||'')!==(newText||'')
+    // 🔴 옮겨 갈 자리에 «이미 적어 둔 것» 이 있으면 덮어쓰게 된다. 조용히 지우지 않는다.
+    if(html&&(moved||!orig)){
+      const m=meetings.find(x=>String(x.id)===String(meetingId))
+      const clash=(m?.notes||[]).find(n=>Number(n.worker_id)===Number(workerId)
+        &&(n.parent_text||'')===(newText||'')&&n!==orig)
+      if(clash&&!confirm(`「${projLabel(clash)}」로 이미 적어 두신 것이 있습니다.\n\n`
+        +'그 내용을 이번 것으로 덮어쓸까요?'))return
+    }
     try{
       setNoteBusy(true)
-      const html=richEmpty(noteHtml)?null:noteHtml
-      await saveMeetingNote(noteFor.meetingId,noteFor.workerId,html)
-      setNoteFor(null); setNoteHtml('')
+      if(!html){
+        // 비웠다 — 지울 대상은 «원래 있던 줄» 이다(프로젝트 고르개를 만졌더라도)
+        await saveMeetingNote(meetingId,workerId,null,{parent_text:orig?oldText:newText})
+      }else{
+        // 프로젝트를 옮겼으면 옛 줄을 «먼저» 지운다 — 안 그러면 같은 글이 두 자리에 남는다
+        if(moved) await saveMeetingNote(meetingId,workerId,null,{parent_text:oldText})
+        await saveMeetingNote(meetingId,workerId,html,
+          {parent_key:notePick?jiraKeyOf(notePick):null,parent_text:newText})
+      }
+      closeNote()
       await reloadMeetings()
-      showToast(html?'발표 내용을 저장했습니다':'발표 내용을 비웠습니다')
+      showToast(html?'발표 내용을 저장했습니다':'발표 내용을 지웠습니다')
     }catch(e){ showToast('실패: '+e.message) }
     finally{ setNoteBusy(false) }
   }
 
   // 상위업무 목록 — 종료한 것은 기본으로 감추고 「완료 포함」으로 꺼낸다(업무 입력과 같은 규칙).
   // 🔑 이미 골라 둔 값은 완료여도 목록에 남긴다. 빼면 지난 안건을 열었을 때 빈칸이 된다.
+  // ⚠ 발표 내용에서 고른 것(notePick)도 «함께» 남긴다 — 안 그러면 완료된 프로젝트로
+  //   적어 둔 발표 내용을 열었을 때 고르개가 조용히 빈칸이 되고, 저장하면 프로젝트가 날아간다.
   const parents=useMemo(()=>{
     const all=Object.keys(jiraTree||{})
-    return all.filter(t=>showDone||!jiraDone.has(t)||t===parentPick)
+    return all.filter(t=>showDone||!jiraDone.has(t)||t===parentPick||t===notePick)
       .sort((a,b)=>(cleanName(a)||a).localeCompare(cleanName(b)||b,'ko'))
-  },[jiraTree,jiraDone,showDone,parentPick])
+  },[jiraTree,jiraDone,showDone,parentPick,notePick])
   const doneCount=Object.keys(jiraTree||{}).filter(t=>jiraDone.has(t)).length
 
   const inputS={padding:'8px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,width:'100%'}
@@ -4036,17 +4086,45 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
                         if(richEmpty(richOf(m))&&notes.length===0){
                           return <div style={{fontSize:11,color:'#9ca3af'}}>회의 내용이 비어 있습니다.</div>
                         }
+                        // 🔑 묶는 기준만 바꾼다 — 담긴 글은 하나다 (2026-09-08 지시).
+                        //    묶은 «바깥» 이 인원이면 안쪽 꼬리표는 프로젝트, 그 반대도 같다.
+                        const groups=groupNotes(notes,noteView)
                         return(
                           <div style={{background:'#fff',border:'1px solid #e5e7eb',
                             borderRadius:7,padding:'10px 12px'}}>
                             {!richEmpty(richOf(m))&&<RichView html={richOf(m)}/>}
-                            {notes.map(n=>(
-                              <div key={n.worker_id} style={{marginTop:10,paddingTop:8,
+                            {notes.length>0&&(
+                              <div style={{display:'flex',gap:4,alignItems:'center',flexWrap:'wrap',
+                                marginTop:10,paddingTop:8,borderTop:'1px dashed #e5e7eb'}}>
+                                <span style={{fontSize:11,color:'#6b7280',marginRight:2}}>발표 내용을</span>
+                                {[{v:'worker',label:'🗣 인원별'},{v:'project',label:'📁 프로젝트별'}].map(t=>(
+                                  <button key={t.v} onClick={()=>setNoteView(t.v)}
+                                    style={{padding:'3px 10px',borderRadius:20,fontSize:11,
+                                      fontWeight:noteView===t.v?700:500,cursor:'pointer',
+                                      border:'1px solid '+(noteView===t.v?'#1a56db':'#e5e7eb'),
+                                      background:noteView===t.v?'#eff6ff':'#fff',
+                                      color:noteView===t.v?'#1a56db':'#6b7280'}}>{t.label}</button>
+                                ))}
+                                <span style={{fontSize:11,color:'#9ca3af'}}>로 보기</span>
+                              </div>
+                            )}
+                            {groups.map(g=>(
+                              <div key={g.key} style={{marginTop:10,paddingTop:8,
                                 borderTop:'1px dashed #e5e7eb'}}>
                                 <div style={{fontSize:11,fontWeight:700,color:'#1a56db',marginBottom:4}}>
-                                  🗣 {n.name||nameOfWorker(n.worker_id)}
+                                  {noteView==='worker'?'🗣':'📁'} {g.label}
                                 </div>
-                                <RichView html={richOf(n)}/>
+                                {g.rows.map(n=>(
+                                  <div key={n.id||`${n.worker_id}-${n.parent_text||''}`}
+                                    style={{marginBottom:6}}>
+                                    <div style={{fontSize:10.5,color:'#6b7280',marginBottom:2}}>
+                                      {noteView==='worker'
+                                        ?<>📁 {projLabel(n)}</>
+                                        :<>🗣 {n.name||nameOfWorker(n.worker_id)}</>}
+                                    </div>
+                                    <RichView html={richOf(n)}/>
+                                  </div>
+                                ))}
                               </div>
                             ))}
                           </div>
@@ -4061,53 +4139,108 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
                           <div style={{fontSize:11,color:'#6b7280',marginBottom:6,lineHeight:1.7}}>
                             🗣 <strong style={{color:'#374151'}}>참석자별 발표 내용</strong>
                             {' '}— 회의 전에 미리 적어 두실 수 있습니다.
-                            <strong>본인 칸만</strong> 고칠 수 있고, 위 회의 내용에 이어 붙어 보입니다.
+                            <strong>본인 칸만</strong> 고칠 수 있고, 위 회의 내용에 이어 붙어 보입니다.<br/>
+                            📁 <strong>프로젝트를 골라</strong> 적으시면 위에서{' '}
+                            <strong>[프로젝트별]</strong> 로도 묶어 보실 수 있습니다 —
+                            프로젝트가 여럿이면 <strong>나눠서</strong> 적으십시오.
                           </div>
                           <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
                             {(m.attendee_ids||[]).map(wid=>{
-                              const n=noteOf(m,wid)
-                              const has=n&&!richEmpty(richOf(n))
+                              const mySaved=notesOf(m,wid).filter(n=>!richEmpty(richOf(n)))
                               const mine=Number(me?.worker_id)===Number(wid)
-                              const editing=noteFor&&noteFor.meetingId===m.id
+                              const open=noteFor&&noteFor.meetingId===m.id
                                 &&Number(noteFor.workerId)===Number(wid)
                               return(
                                 <button key={wid} disabled={!canEditNote(wid)||noteBusy}
-                                  onClick={()=>editing?setNoteFor(null):openNote(m,wid)}
+                                  onClick={()=>open?closeNote():openNote(m,wid,mySaved[0]||null)}
                                   title={canEditNote(wid)?'':'본인 것만 적을 수 있습니다'}
                                   style={{padding:'5px 12px',borderRadius:20,fontSize:12,
-                                    fontWeight:editing?700:500,
+                                    fontWeight:open?700:500,
                                     cursor:canEditNote(wid)?'pointer':'default',
-                                    border:'1px solid '+(editing?'#1a56db':has?'#93c5fd':'#e5e7eb'),
-                                    background:editing?'#1a56db':has?'#eff6ff':'#fff',
-                                    color:editing?'#fff':canEditNote(wid)?'#374151':'#9ca3af'}}>
-                                  {has?'✅ ':''}{nameOfWorker(wid)}{mine?' (나)':''}
+                                    border:'1px solid '+(open?'#1a56db':mySaved.length?'#93c5fd':'#e5e7eb'),
+                                    background:open?'#1a56db':mySaved.length?'#eff6ff':'#fff',
+                                    color:open?'#fff':canEditNote(wid)?'#374151':'#9ca3af'}}>
+                                  {mySaved.length?'✅ ':''}{nameOfWorker(wid)}{mine?' (나)':''}
+                                  {mySaved.length>1?` · ${mySaved.length}`:''}
                                 </button>
                               )
                             })}
                           </div>
-                          {noteFor&&noteFor.meetingId===m.id&&(
+                          {noteFor&&noteFor.meetingId===m.id&&(()=>{
+                            const mySaved=notesOf(m,noteFor.workerId)
+                              .filter(n=>!richEmpty(richOf(n)))
+                            return(
                             <div style={{marginTop:8}}>
                               <div style={{fontSize:11,color:'#6b7280',marginBottom:4}}>
                                 <strong style={{color:'#1a56db'}}>{nameOfWorker(noteFor.workerId)}</strong>
                                 {' '}님의 발표 내용
                               </div>
-                              <RichEditor value={noteHtml} docKey={`n-${m.id}-${noteFor.workerId}`}
-                                onChange={setNoteHtml} minHeight={140} disabled={noteBusy}
+                              {/* 🔑 이 사람이 «이미 적어 둔 것» 을 먼저 세워 준다. 없으면 새 것 하나.
+                                  프로젝트마다 한 줄이라 여기서 갈아타며 적는다. */}
+                              {(mySaved.length>0||noteFor.orig)&&(
+                                <div style={{display:'flex',gap:5,flexWrap:'wrap',marginBottom:6}}>
+                                  {mySaved.map(n=>{
+                                    const on=noteFor.orig&&(noteFor.orig.parent_text||'')===(n.parent_text||'')
+                                    return(
+                                      <button key={n.id||n.parent_text||''} disabled={noteBusy}
+                                        onClick={()=>openNote(m,noteFor.workerId,n)}
+                                        style={{padding:'3px 10px',borderRadius:6,fontSize:11,
+                                          cursor:'pointer',fontWeight:on?700:500,
+                                          border:'1px solid '+(on?'#1a56db':'#e5e7eb'),
+                                          background:on?'#eff6ff':'#fff',
+                                          color:on?'#1a56db':'#6b7280'}}>
+                                        📁 {projLabel(n)}
+                                      </button>
+                                    )
+                                  })}
+                                  <button disabled={noteBusy}
+                                    onClick={()=>openNote(m,noteFor.workerId,null)}
+                                    style={{padding:'3px 10px',borderRadius:6,fontSize:11,
+                                      cursor:'pointer',fontWeight:noteFor.orig?500:700,
+                                      border:'1px dashed '+(noteFor.orig?'#93c5fd':'#1a56db'),
+                                      background:'#fff',color:'#1a56db'}}>
+                                    + 다른 프로젝트로 적기
+                                  </button>
+                                </div>
+                              )}
+                              {/* 프로젝트 — 안건 등록과 «같은 목록·같은 방식» (2026-09-08 지시) */}
+                              <label style={{...labelS,marginBottom:3}}>📁 어느 프로젝트에 관한 내용입니까?</label>
+                              <select value={notePick} disabled={noteBusy}
+                                onChange={e=>{ setNotePick(e.target.value); if(e.target.value) setNoteText('') }}
+                                style={{...inputS,fontSize:12}}>
+                                <option value="">선택 안 함 (아래에 직접 적거나 비워 두셔도 됩니다)</option>
+                                {parents.map(t=>(
+                                  <option key={t} value={t}>
+                                    {jiraDone.has(t)?'(완료) ':''}{cleanName(t)||t}
+                                  </option>
+                                ))}
+                              </select>
+                              {!notePick&&(
+                                <input value={noteText} disabled={noteBusy}
+                                  onChange={e=>setNoteText(e.target.value)}
+                                  placeholder="목록에 없으면 직접 적으십시오 (비워 두면 「프로젝트 미지정」)"
+                                  style={{...inputS,fontSize:12,marginTop:5}}/>
+                              )}
+                              <div style={{height:6}}/>
+                              <RichEditor value={noteHtml} disabled={noteBusy} minHeight={140}
+                                docKey={`n-${m.id}-${noteFor.workerId}-${noteFor.orig?.parent_text||''}-${noteFor.orig?'e':'n'}`}
+                                onChange={setNoteHtml}
                                 placeholder={'이 회의에서 말씀하실 내용을 미리 적어 두십시오.'}/>
-                              <div style={{display:'flex',gap:6,marginTop:6}}>
+                              <div style={{display:'flex',gap:6,marginTop:6,flexWrap:'wrap'}}>
                                 <button onClick={saveNote} disabled={noteBusy}
                                   style={{...rowBtnS,border:'none',background:'#1a56db',color:'#fff'}}>
                                   {noteBusy?'저장 중…':'저장'}
                                 </button>
-                                <button onClick={()=>setNoteFor(null)} disabled={noteBusy}
+                                <button onClick={closeNote} disabled={noteBusy}
                                   style={{...rowBtnS,border:'1px solid #e5e7eb',background:'#fff',
                                     color:'#6b7280'}}>취소</button>
                                 <span style={{fontSize:11,color:'#9ca3af',alignSelf:'center'}}>
-                                  비우고 저장하면 그 칸이 지워집니다.
+                                  비우고 저장하면 그 줄이 지워집니다.
                                 </span>
                               </div>
                             </div>
-                          )}
+                            )
+                          })()}
                         </div>
                       )}
                       <div style={{display:'flex',gap:6,marginTop:8,flexWrap:'wrap'}}>
