@@ -6495,11 +6495,26 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
         //   연차에서 깎이지 않는다는 것도 이 자리에서 알려 준다.
         const isOfficial=vk.type==='공가'
         const totalH=targets.length*vacHours
+        // 🔑 «지난 날짜» 는 신청이 아니라 정리다 (2026-09-10 지시) — 메일이 가지 않고
+        //    그 자리에서 승인된 것으로 들어간다. 서버도 같은 기준으로 판정한다.
+        //    ⚠ 지난 날짜와 앞으로의 날짜가 «섞일» 수 있으므로 갈라서 말한다 —
+        //      「메일이 갑니다」 한 줄로 뭉뚱그리면 어느 쪽이 갔는지 알 수 없다.
+        const nowD=today()
+        const past=targets.filter(d=>d<nowD)
+        const future=targets.filter(d=>d>=nowD)
+        const mailLine=
+          past.length===0
+            ?'신청하면 승인권자에게 승인 요청 메일이 갑니다.'
+            :future.length===0
+              ?`지난 날짜라 «정리 기록» 으로 넣습니다 — 메일이 가지 않고 바로 승인됩니다.`
+              :`지난 날짜 ${past.length}건은 «정리 기록» 이라 메일 없이 바로 승인되고,\n`
+               +`나머지 ${future.length}건만 승인권자에게 신청 메일이 갑니다.`
         if(!confirm(
-          `아래 ${isOfficial?'공가':'휴가'}를 신청할까요?\n\n· ${days.join('\n· ')}\n\n`
+          `아래 ${isOfficial?'공가':'휴가'}를 ${past.length&&!future.length?'넣을까요':'신청할까요'}?`
+          +`\n\n· ${days.join('\n· ')}\n\n`
           +`합계 ${totalH}시간 (${Math.round(totalH/VAC_HOURS_PER_DAY*10)/10}일)`
           +(vk.type==='연차'?'':` — ${vk.label}는 연차에서 깎이지 않습니다`)+'\n\n'
-          +'신청하면 승인권자에게 승인 요청 메일이 갑니다.'
+          +mailLine
         ))return
       }
 

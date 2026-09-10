@@ -1123,7 +1123,18 @@ app.post('/api/schedule/plans', async (req, res) => {
     //    대표이사가 자기 휴가를 넣고 자기에게 승인 요청 메일을 보낸 뒤 자기가 승인하는 것은
     //    절차가 아니라 헛돌기다. 누가 승인했는지는 그대로 남는다.
     const selfApprove = useType === 'vacation' && await canApprove(req.session.uid)
-    const approval = useType === 'vacation' ? (selfApprove ? 'approved' : 'pending') : null
+    // 🔑 «지난 날짜» 휴가·공가는 신청이 아니라 «정리» 다 (2026-09-10 지시).
+    //    이미 지나간 일을 적어 두는 것이라 결재할 것이 없다 — 실적 완료 보고를
+    //    「당일 것만 보낸다」 로 둔 것과 같은 결이다(notifyDone 참고).
+    //    메일을 보내지 않고 그 자리에서 승인된 것으로 넣는다.
+    //    🔴 그때 approved_by_id 는 «비운다» — 사람이 승인한 것이 아니기 때문이다.
+    //       이 한 칸으로 셋이 갈린다:
+    //         approval NULL          = 승인 제도 밖(업무 일정·제도 이전 기록)
+    //         approved + by 있음     = 사람이 승인했다
+    //         approved + by 없음     = «지난 날짜 정리»(자동)
+    const backfill = useType === 'vacation' && String(b.plan_date) < todayLocal()
+    const approval = useType === 'vacation'
+      ? (selfApprove || backfill ? 'approved' : 'pending') : null
     const { rows } = await pool.query(
       `INSERT INTO schedule_plans
          (worker_id, plan_date, slot, start_time, end_time, use_type,
@@ -1135,7 +1146,8 @@ app.post('/api/schedule/plans', async (req, res) => {
        useType, placeId, placeText, purpose, b.transport || 'office', b.vehicle_id ?? null,
        b.est_distance_km ?? null, b.est_travel_min ?? null,
        roundTrip, vacationType, oneWayDir(roundTrip, b.one_way_dir),
-       approval, selfApprove ? new Date() : null, selfApprove ? req.session.uid : null,
+       approval, (selfApprove || backfill) ? new Date() : null,
+       selfApprove ? req.session.uid : null,
        // 이동이 아니면 서버가 지운다 — 남으면 달력이 「A→B」 라고 거짓말을 한다
        keepPlace ? fromPlaceOf(roundTrip, b.one_way_dir, b.from_place_id) : null,
        vacationNote, vacationHours]
@@ -1146,8 +1158,15 @@ app.post('/api/schedule/plans', async (req, res) => {
     // 휴가 신청 알림 — 🔑 「신청할까요?」는 «화면» 이 등록 «전에» 묻는다(사용자 지시).
     //    여기까지 왔다는 것은 사람이 「신청한다」 고 답했다는 뜻이다.
     //    ⚠ 결재자가 스스로 넣은 것은 이미 승인이라 보낼 곳이 없다.
+    //    ⚠ «지난 날짜» 는 정리이지 신청이 아니라 보내지 않는다 — 안 보낸 사실은
+    //      로그에 남긴다(조용히 넘기면 「왜 메일이 안 왔지」를 답할 수 없다).
     if (useType === 'vacation' && !selfApprove) {
-      notifyVacationPlan('request', rows[0].id, req, b.batch_id)
+      if (backfill) {
+        console.log(`[mail] skip(backfill) vacation plan#${rows[0].id} :: `
+          + `plan_date ${b.plan_date} < ${todayLocal()} — 지난 날짜 정리라 자동 승인`)
+      } else {
+        notifyVacationPlan('request', rows[0].id, req, b.batch_id)
+      }
     }
     res.json(rows[0])
   } catch (e) {
@@ -1319,11 +1338,17 @@ app.delete('/api/schedule/plans/:id', async (req, res) => {
       const sender = await senderFor(req.session?.uid)
       const onSenderFail = why => markSenderBroken(req.session?.uid, why)
       if (doomed.use_type === 'vacation') {
-        // 🔑 휴가 취소는 «신청을 물린다» 는 뜻이라 대표이사에게 알려야 한다.
-        //    ⚠ 이미 반려된 건은 알리지 않는다 — 대표이사가 이미 아는 일이고,
+        // 🔑 휴가 취소는 «신청을 물린다» 는 뜻이라 승인권자에게 알려야 한다.
+        //    ⚠ 이미 반려된 건은 알리지 않는다 — 승인권자가 이미 아는 일이고,
         //    반려당한 사람이 그 줄을 지웠다고 다시 메일이 가면 성가시기만 하다.
-        if (doomed.approval !== 'rejected') {
+        //    ⚠ «지난 날짜» 건도 알리지 않는다 (2026-09-10 지시) — 신청 메일이 애초에
+        //      가지 않았는데 취소 메일만 가면 받는 쪽은 «없던 신청» 이 취소됐다고 읽는다.
+        const wasBackfill = String(doomed.plan_date).slice(0, 10) < todayLocal()
+        if (doomed.approval !== 'rejected' && !wasBackfill) {
           mailer.notifyVacation({ kind: 'cancel', plans: doomed, actor, sender, onSenderFail })
+        } else if (wasBackfill) {
+          console.log(`[mail] skip(backfill) vacation cancel plan#${req.params.id} :: `
+            + `plan_date ${String(doomed.plan_date).slice(0, 10)}`)
         }
       } else {
         mailer.notify({ kind: 'delete', plans: doomed, actor, sender, onSenderFail })
