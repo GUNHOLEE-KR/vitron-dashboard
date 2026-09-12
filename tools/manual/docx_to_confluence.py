@@ -317,6 +317,33 @@ def header(prof):
 """
 
 
+# 🔴 첨부는 «쪽에 저절로 보이지 않는다» — Confluence 는 ⋯ 메뉴 안에만 넣어 둔다.
+#   「정본은 아래 첨부 파일」 이라고 써 놓고 목록이 안 보이면 읽는 사람이 못 찾는다
+#   (2026-09-12 실제로 열어 보고 알았다). `attachments` 매크로로 본문에 세운다.
+#   ⚠ 마크다운 변환기가 `ac:` 태그를 망가뜨리므로, 자리표시만 심고 HTML 로 바꾼 «뒤»에
+#     갈아 끼운다.
+ATTACH_MARK = "[[ATTACHMENTS]]"
+
+
+def _attachments_macro(prof):
+    """그 문서의 정본 파일«만» 세우는 매크로. 지난 판(1.7 등)은 걸러 낸다."""
+    names = [prof[k] for k in ("docx", "pdf") if prof.get(k)]
+    pats = ",".join(n.replace(".", r"\.") for n in names)
+    return ('<ac:structured-macro ac:name="attachments" ac:schema-version="1">'
+            '<ac:parameter ac:name="upload">false</ac:parameter>'
+            '<ac:parameter ac:name="old">false</ac:parameter>'
+            '<ac:parameter ac:name="patterns">%s</ac:parameter>'
+            '</ac:structured-macro>' % pats)
+
+
+def _fill_attachments(html, prof):
+    """자리표시가 든 문단을 매크로로 갈아 끼운다."""
+    if ATTACH_MARK not in html:
+        return html
+    return re.sub(r"<p>\s*" + re.escape(ATTACH_MARK) + r"\s*</p>",
+                  _attachments_macro(prof), html)
+
+
 def _md_section(md, heading, levels="##"):
     """`heading` 줄부터 같은/상위 단계의 다음 제목 직전까지를 잘라 온다.
 
@@ -446,7 +473,7 @@ def create(md, parent_id, title):
     return res
 
 
-def upload(md, page_id, title=None, msg="정본(DOCX)에서 자동 변환 반영"):
+def upload(md, page_id, title=None, msg="정본(DOCX)에서 자동 변환 반영", prof=None):
     """Confluence 쪽 본문을 교체한다. 마크다운 → storage(XHTML) 로 바꿔 보낸다."""
     call, host = _client()
     base = f"https://{host}/wiki/rest/api/content/{page_id}"
@@ -455,7 +482,7 @@ def upload(md, page_id, title=None, msg="정본(DOCX)에서 자동 변환 반영
     title = title or cur["title"]
     print(f"대상: {title} (현재 버전 {ver})")
 
-    html = to_html(md)
+    html = _fill_attachments(to_html(md), prof) if prof else to_html(md)
     body = {
         "id": str(page_id),
         "type": "page",
@@ -481,9 +508,11 @@ def _full_body(prof):
 
 
 def _summary_body(prof):
-    """요약 — 머리말 · 목차 · 개정 이력만. 정본은 첨부 파일이다."""
+    """요약 — 머리말 · 정본 내려받기 · 목차 · 개정 이력만. 정본은 첨부 파일이다."""
     md = convert(docx_path(prof))
-    parts = [summary_header(prof), _md_section(md, "## 목차")]
+    parts = [summary_header(prof),
+             "## 정본 내려받기", ATTACH_MARK,
+             _md_section(md, "## 목차")]
     rev = _revisions(md)
     if rev:
         parts += ["---", "## 개정 이력", rev]
@@ -514,7 +543,7 @@ if __name__ == "__main__":
             # 🔴 요약본은 첨부가 «정본» 이다. 붙이기 전에 본문을 지우면 그동안 이 쪽에는
             #    아무 내용도 없다 — 그래서 첨부가 먼저다.
             attach(prof, page_id)
-        upload(_body(prof, full), page_id,
+        upload(_body(prof, full), page_id, prof=None if full else prof,
                msg="정본(DOCX) 전문 반영" if full else "정본은 첨부로 · 본문은 목차와 개정 이력만")
         sys.exit(0)
 
