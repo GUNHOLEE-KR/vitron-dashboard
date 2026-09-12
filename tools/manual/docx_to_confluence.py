@@ -9,6 +9,20 @@
     --doc manual     업무현황_대시보드_사용자매뉴얼.docx   → [대시보드] 9. 사용 방법(매뉴얼) 170164226
     --doc training   VITRON_ERP_직원교육자료.docx        → [대시보드] 13. 직원 교육 자료
 
+■ 🔑 기본은 «요약» 이다 (2026-09-12 전환)
+  종전에는 본문 전문을 그대로 올렸다. 그런데 이 변환기에는 «그림을 옮길 수단이 없어»
+  매뉴얼 72장·교육 자료 41장이 전부 「▸ 그림 · 설명」 자리표시자로만 남는다.
+  그래서 Confluence 쪽에는 그림 없는 4.8만 자 사본이 앉아 있었고 — 스스로 본문 첫머리에
+  「그림까지 보시려면 DOCX 를 열어 주십시오」 라고 적고 있었다. 읽는 사람을 결국 파일로
+  보낼 사본이 두 쪽에 74,367자(대시보드 문서 전체의 25%)를 차지하고 있었던 것이다.
+
+  이제 올리는 것은 **머리말 · 목차 · 개정 이력** 뿐이고, 정본은 **첨부 파일**로 붙인다.
+  전문이 필요하면 `--full` 을 준다.
+    python tools/manual/docx_to_confluence.py --upload 170164226          # 요약(기본)
+    python tools/manual/docx_to_confluence.py --upload 170164226 --full   # 전문
+  🔴 `--upload` 는 본문을 갈아 끼우기 «전에» docx·pdf 를 먼저 첨부한다. 붙이는 일과
+     줄이는 일이 갈라져 있으면 「본문은 요약인데 첨부는 옛 판」 이 조용히 생긴다.
+
 ■ 왜 REST 로 올리는가
   변환 결과가 3만 자를 넘어 사람이(또는 대화 도구가) 본문을 옮겨 붙이면 실수가 난다.
   파일에서 곧바로 올려야 정본과 어긋나지 않는다. 인증은 프로젝트 루트 `.env` 의
@@ -61,11 +75,18 @@ DOCS = {
     },
     "training": {
         "docx": "VITRON_ERP_직원교육자료.docx",
-        "pdf": None,          # 인쇄용을 만들지 않기로 했다 (2026-08-31 지시)
+        # 2026-08-31 에 「인쇄용은 만들지 않는다」 고 정했었다. 2026-09-12 에 되살렸는데
+        # 쓰임새가 다르다 — 나눠 주는 «인쇄물» 이 아니라, 본문을 첨부로 돌리면서
+        # 브라우저에서 바로 넘겨 볼 수 있게 붙이는 «미리보기» 다 (사용자 확인).
+        "pdf": "VITRON_ERP_직원교육자료.pdf",
         "builder": "tools/manual/build_erp_training.py",
         "what": "직원 교육 자료",
     },
 }
+
+
+for _k, _v in DOCS.items():
+    _v["_key"] = _k          # 안내문에 `--doc <이름>` 을 적어 주려면 자기 이름이 필요하다
 
 
 def docx_path(prof):
@@ -296,6 +317,64 @@ def header(prof):
 """
 
 
+def _md_section(md, heading, levels="##"):
+    """`heading` 줄부터 같은/상위 단계의 다음 제목 직전까지를 잘라 온다.
+
+    없으면 빈 문자열. 목차·개정 이력처럼 «요약본에 살려 둘 조각» 을 뽑는 데 쓴다.
+    """
+    i = md.find(heading)
+    if i < 0:
+        return ""
+    j = md.find("\n" + levels + " ", i + len(heading))
+    return (md[i:] if j < 0 else md[i:j]).strip()
+
+
+def _revisions(md):
+    """「판 2.2 에서 새로 들어온 것」 같은 개정 이력 소절을 모아 온다.
+
+    매뉴얼 정본은 이 이력을 «읽는 법» 절 안에 넣어 두었다. 전문을 걷어내면 이것까지
+    사라지는데, 「무엇이 언제 바뀌었나」는 목차보다도 자주 찾는 것이라 살려 둔다.
+    """
+    out = []
+    for m in re.finditer(r"^#{2,4} (판 [0-9.]+.*)$", md, re.M):
+        s = m.end()
+        n = re.search(r"^#{1,4} ", md[s:], re.M)
+        body = (md[s:] if not n else md[s:s + n.start()]).strip()
+        out.append("### " + m.group(1) + "\n\n" + body)
+    return "\n\n".join(out)
+
+
+def summary_header(prof):
+    """요약본 머리말. 쪽수·그림 수는 «세어서» 넣는다 — 적어 두면 반드시 옛말이 된다."""
+    pages = _page_count(prof)
+    figs = _figure_count(prof)
+    what = prof["what"]
+    rows = ["| 정본 | 첨부 `%s`%s |" % (prof["docx"], " (%d쪽)" % pages if pages else "")]
+    if prof.get("pdf"):
+        rows.append("| PDF | 첨부 `%s` — 브라우저에서 바로 넘겨 볼 수 있습니다 |" % prof["pdf"])
+    if figs:
+        rows.append("| 화면 그림 | %d장 — **첨부 파일에만 있습니다** |" % figs)
+    rows.append("| 원본 자리 | `docs/manual/` |")
+    rows.append("| 생성기 | `%s` |" % prof["builder"])
+    rows.append("| 이 쪽 갱신 | `tools/manual/docx_to_confluence.py --doc %s --upload «pageId»` |"
+                % prof["_key"])
+    return """이 쪽은 {what}의 **안내**입니다. 정본은 아래 **첨부 파일**이고,
+본문 전체는 여기에 싣지 않습니다.
+
+| 항목 | 값 |
+| --- | --- |
+{table}
+
+> **왜 본문을 싣지 않는가**
+> 이 쪽을 만드는 자동 변환기에는 «그림을 옮길 수단이 없습니다». 전문을 실으면 그림
+> {nfig}장이 모두 「▸ 그림 · 설명」 자리표시자로만 남아, 읽는 분을 결국 첨부 파일로
+> 보내게 됩니다. 그런 사본은 길기만 하고 정본과 어긋나기 쉬워, 목차와 개정 이력만
+> 남기고 정본은 첨부로 두었습니다 (2026-09-12).
+
+---
+""".format(what=what, table="\n".join(rows), nfig=figs or 0)
+
+
 def _env(keys):
     """프로젝트 루트 .env 에서 값을 읽는다(값은 반환만 하고 찍지 않는다)."""
     vals = {}
@@ -367,7 +446,7 @@ def create(md, parent_id, title):
     return res
 
 
-def upload(md, page_id, title=None):
+def upload(md, page_id, title=None, msg="정본(DOCX)에서 자동 변환 반영"):
     """Confluence 쪽 본문을 교체한다. 마크다운 → storage(XHTML) 로 바꿔 보낸다."""
     call, host = _client()
     base = f"https://{host}/wiki/rest/api/content/{page_id}"
@@ -383,8 +462,7 @@ def upload(md, page_id, title=None):
         "title": title,
         "space": {"key": cur["space"]["key"]},
         "body": {"storage": {"value": html, "representation": "storage"}},
-        "version": {"number": ver + 1,
-                    "message": "정본(DOCX)에서 자동 변환 반영"},
+        "version": {"number": ver + 1, "message": msg},
     }
     res = call("PUT", base, body)
     print(f"완료: 버전 {res['version']['number']} · 본문 {len(html):,}자(HTML)")
@@ -395,28 +473,59 @@ def _arg(name, default=None):
     return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
 
 
-def _body(prof):
-    """올릴 본문. 표지(제목·버전·작성일)는 Confluence 에서 필요 없으므로 목차부터 싣는다."""
+def _full_body(prof):
+    """전문. 표지(제목·버전·작성일)는 Confluence 에서 필요 없으므로 목차부터 싣는다."""
     md = convert(docx_path(prof))
     cut = md.find("## 목차")
     return header(prof) + "\n" + md[cut:] if cut > 0 else md
 
 
+def _summary_body(prof):
+    """요약 — 머리말 · 목차 · 개정 이력만. 정본은 첨부 파일이다."""
+    md = convert(docx_path(prof))
+    parts = [summary_header(prof), _md_section(md, "## 목차")]
+    rev = _revisions(md)
+    if rev:
+        parts += ["---", "## 개정 이력", rev]
+    return "\n\n".join(p for p in parts if p).strip() + "\n"
+
+
+def _body(prof, full=False):
+    return _full_body(prof) if full else _summary_body(prof)
+
+
+def attach(prof, page_id):
+    """정본 docx(있으면 pdf 도)를 그 쪽에 붙인다. 본문을 갈아 끼우기 «전에» 부른다."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from attach_to_confluence import upload as _up
+    paths = [os.path.join(ROOT, "docs", "manual", prof["docx"])]
+    if prof.get("pdf"):
+        paths.append(os.path.join(ROOT, "docs", "manual", prof["pdf"]))
+    _up(page_id, paths)
+
+
 if __name__ == "__main__":
     prof = DOCS[_arg("--doc", "manual")]
+    full = "--full" in sys.argv
 
     if "--upload" in sys.argv:
-        upload(_body(prof), _arg("--upload"))
+        page_id = _arg("--upload")
+        if not full:
+            # 🔴 요약본은 첨부가 «정본» 이다. 붙이기 전에 본문을 지우면 그동안 이 쪽에는
+            #    아무 내용도 없다 — 그래서 첨부가 먼저다.
+            attach(prof, page_id)
+        upload(_body(prof, full), page_id,
+               msg="정본(DOCX) 전문 반영" if full else "정본은 첨부로 · 본문은 목차와 개정 이력만")
         sys.exit(0)
 
     if "--create" in sys.argv:
         title = _arg("--title")
         if not title:
             raise SystemExit("FAIL: --create 에는 --title «쪽 제목» 이 함께 필요합니다")
-        create(_body(prof), _arg("--create"), title)
+        create(_body(prof, full), _arg("--create"), title)
         sys.exit(0)
 
-    md = _body(prof)
+    md = _body(prof, full)
     dst = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else os.path.join(
         ROOT, "docs", "manual", "confluence_body.md")
     with open(dst, "w", encoding="utf-8", newline="\n") as f:
