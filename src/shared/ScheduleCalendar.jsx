@@ -11,6 +11,7 @@ import {
   workerColor, calWeekDays, monthGridDays, isSameMonth, mdLabel, dayName,
   shortPlace, placeLabel, planIcon, planDetail, planState, PLAN_STATE_MARK,
   groupByPlace, groupColor, topWorkerOf,
+  carUnits, carpoolMembers,
 } from './schedule-core'
 
 // 달력 배지 하나.
@@ -40,6 +41,11 @@ export function PlanBadge({ plan, workers, onClick, todayStr, compact = false })
         {!compact && <span style={{ opacity: .9, overflow: 'hidden', textOverflow: 'ellipsis' }}>{shortPlace(plan)}</span>}
         {/* 시간대는 종일이 아닐 때만 — 배차 겹침을 판단할 때 필요하다 */}
         {plan.slot !== 'allday' && <span style={{ opacity: .85, fontSize: compact ? 9 : 10 }}>{SLOT_MAP[plan.slot]}</span>}
+        {/* 동승 (2026-09-14) — 한 차에 함께 탄다. 누구와 타는지는 풍선에 */}
+        {carpoolMembers(plan).length > 0 && (
+          <span title={`동승 ${carpoolMembers(plan).map(m => m.worker_name).join('·')} (첫 사람이 대표)`}
+            style={{ fontSize: compact ? 9 : 10 }}>👥</span>
+        )}
         {st === 'needCheck' && <span style={{ color: '#c2410c', fontWeight: 700 }}>{PLAN_STATE_MARK.needCheck}</span>}
         {st === 'changed' && <span>{PLAN_STATE_MARK.changed}</span>}
       </div>
@@ -295,9 +301,13 @@ export function ScheduleWeek({ anchor, shown, workers, todayStr, onOpenPlan, onO
                         <PlanGroupBadge key={g[0].id} plans={g} workers={workers} todayStr={todayStr}
                           onClick={p => onOpenPlan && onOpenPlan(p)} />
                       ))}
-                    {/* 차량 기준에서 한 칸에 둘 이상이면 배차가 겹친 것이다 */}
-                    {groupBy === 'vehicle' && row.key.startsWith('v') && list.length > 1 && (
-                      <div style={{ fontSize: 10, color: '#991b1b', fontWeight: 700 }}>겹침 {list.length}건</div>
+                    {/* 차량 기준에서 한 칸에 «배차 단위» 가 둘 이상이면 겹친 것이다.
+                        🔑 동승(2026-09-14)은 여럿이 타도 한 단위라 겹침이 아니다 */}
+                    {groupBy === 'vehicle' && row.key.startsWith('v') && carUnits(list) > 1 && (
+                      <div style={{ fontSize: 10, color: '#991b1b', fontWeight: 700 }}>겹침 {carUnits(list)}건</div>
+                    )}
+                    {groupBy === 'vehicle' && row.key.startsWith('v') && list.length > 1 && carUnits(list) === 1 && (
+                      <div style={{ fontSize: 10, color: '#1e40af', fontWeight: 700 }}>👥 동승 {list.length}명</div>
                     )}
                   </td>
                 )
@@ -362,8 +372,11 @@ export function ScheduleDay({ date, byDate, workers, vehicles, todayStr, onOpenP
                 <strong style={{ fontSize: 12 }}>{row.label}</strong>
                 {row.sub && <span style={{ fontSize: 10, color: '#6b7280' }}>{row.sub}</span>}
                 <span style={{ fontSize: 11, color: '#6b7280' }}>· {items.length}건</span>
-                {groupBy === 'vehicle' && row.key.startsWith('v') && items.length > 1 && (
+                {groupBy === 'vehicle' && row.key.startsWith('v') && carUnits(items) > 1 && (
                   <span style={{ fontSize: 10, color: '#991b1b', fontWeight: 700 }}>겹침</span>
+                )}
+                {groupBy === 'vehicle' && row.key.startsWith('v') && items.length > 1 && carUnits(items) === 1 && (
+                  <span style={{ fontSize: 10, color: '#1e40af', fontWeight: 700 }}>👥 동승</span>
                 )}
               </div>
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -434,7 +447,7 @@ export function ScheduleDay({ date, byDate, workers, vehicles, todayStr, onOpenP
             <thead><tr><th style={thS}>차량</th><th style={thS}>사용자</th></tr></thead>
             <tbody>
               {carRows.map(({ v, users }) => (
-                <tr key={v.id} style={{ background: users.length > 1 ? '#fef2f2' : 'transparent' }}>
+                <tr key={v.id} style={{ background: carUnits(users) > 1 ? '#fef2f2' : 'transparent' }}>
                   <td style={{ ...tdS, textAlign: 'left', fontWeight: 600 }}>
                     {v.name}<div style={{ fontSize: 10, color: '#6b7280' }}>{v.plate}</div>
                   </td>
@@ -445,9 +458,13 @@ export function ScheduleDay({ date, byDate, workers, vehicles, todayStr, onOpenP
                         <div key={u.id} style={{ fontSize: 11 }}>
                           {u.worker_name} <span style={{ color: '#6b7280' }}>({SLOT_MAP[u.slot]})</span>
                           {u.use_type === 'personal' && <span style={{ color: '#92400e' }}> 개인</span>}
+                          {/* 동승 — 먼저 잡은 사람이 대표, 나머지는 동승 */}
+                          {carpoolMembers(u).length > 0 && (
+                            <span style={{ color: '#1e40af' }}>{u.carpool_rider ? ' 👥동승' : ' 👥대표'}</span>
+                          )}
                         </div>
                       ))}
-                    {users.length > 1 && <div style={{ fontSize: 10, color: '#991b1b', fontWeight: 700 }}>겹침</div>}
+                    {carUnits(users) > 1 && <div style={{ fontSize: 10, color: '#991b1b', fontWeight: 700 }}>겹침</div>}
                   </td>
                 </tr>
               ))}

@@ -321,6 +321,19 @@ export function planIcon(plan) {
 export const shortVehicle = (name) => String(name || '').replace(/\s*\d+[가-힣]\s*\d+\s*$/, '').trim()
 // 배지 둘째 줄 — «어디에 · 무엇으로 · 왕복인가». 이름만 있으면 달력만 보고는
 // 어디 갔는지 알 수 없어 매번 눌러 봐야 했다.
+// ── 동승 (2026-09-14) ─────────────────────────────────────────
+// 🔑 한 차에 여럿이 «함께 탄» 것은 한 번의 배차다. 그래서 겹침은 사람 수가 아니라
+//    «배차 단위» 수로 센다 — 동승 묶음(carpool_group)은 하나, 묶음 없는 계획은 각각 하나.
+// ⚠ 포털은 이 칸을 받지 않을 수 있다. 없으면 계획마다 한 단위라 예전과 똑같이 센다.
+export function carUnits(list) {
+  return new Set((list || []).map(p => (p.carpool_group ? `g${p.carpool_group}` : `p${p.id}`))).size
+}
+// 함께 타는 사람이 둘 이상일 때만 동승이다 (묶음에 혼자 남았으면 동승이 아니다)
+export function carpoolMembers(plan) {
+  const m = Array.isArray(plan?.carpool_members) ? plan.carpool_members : []
+  return m.length > 1 ? m : []
+}
+
 export function planDetail(plan) {
   // 🔑 휴가 사유가 있으면 둘째 줄에 함께 적는다 (2026-09-07 지시) —
   //    「기타」만 뜨면 무엇인지 알 수 없어 매번 눌러 봐야 한다.
@@ -330,6 +343,7 @@ export function planDetail(plan) {
   if (plan.use_type === 'personal') return plan.vehicle_name ? shortVehicle(plan.vehicle_name) : ''
   const parts = [shortPlace(plan)]
   if (plan.vehicle_name) parts.push(shortVehicle(plan.vehicle_name))
+  if (carpoolMembers(plan).length) parts.push(`👥${carpoolMembers(plan).length}명`)
   // 사무실 내근은 이동이 없어 왕복을 따질 것이 없다
   if (plan.transport && plan.transport !== 'office') parts.push(plan.round_trip ? '왕복' : '편도')
   return parts.filter(Boolean).join(' · ')

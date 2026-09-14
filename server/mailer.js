@@ -172,6 +172,12 @@ function planLine(p) {
   }
   const car = [p.vehicle_name, p.vehicle_plate].filter(Boolean).join(' ')
   if (car) bits.push(car)
+  // 동승이면 «누구와» 를 함께 적는다 — 첫 사람이 대표(먼저 예약한 사람)다
+  const others = carpoolOthers(p)
+  if (others.length) {
+    const all = (p.carpool_members || []).map(x => x.worker_name).filter(Boolean)
+    bits.push(`동승 ${all.join('·')}`)
+  }
   bits.push(p.round_trip ? '왕복' : `편도${p.one_way_dir ? ' ' + p.one_way_dir : ''}`)
   if (p.est_distance_km) bits.push(`${Number(p.est_distance_km)}km`)
   return '  · ' + bits.join(' · ')
@@ -191,7 +197,14 @@ function fromOf({ sender, actorName, actorEmail }) {
   }
 }
 
-const TITLE = { create: '등록', update: '변경', delete: '취소' }
+const TITLE = { create: '등록', update: '변경', delete: '취소', carpool: '동승' }
+
+// 동승 묶음에서 «나 말고» 함께 타는 사람들. 둘 미만이면 동승이 아니다.
+function carpoolOthers(p) {
+  const m = Array.isArray(p?.carpool_members) ? p.carpool_members : []
+  if (m.length < 2) return []
+  return m.filter(x => Number(x.id) !== Number(p.id)).map(x => x.worker_name).filter(Boolean)
+}
 
 function build({ kind, actorName, actorEmail, plans, conflicts, sender }) {
   const c = cfg()
@@ -199,13 +212,22 @@ function build({ kind, actorName, actorEmail, plans, conflicts, sender }) {
   const who = first.worker_name || actorName || '누군가'
   const car = [first.vehicle_name, first.vehicle_plate].filter(Boolean).join(' ')
 
+  // 🔑 동승(2026-09-14 사용자 결정) — 먼저 잡힌 차에 «함께 타는» 등록은 겹침이 아니라
+  //    동승이다. 메일은 보내되 제목에 「동승」 을 달고, 겹침 경고 문구는 싣지 않는다.
+  const riding = plans.length > 0 && plans.every(p => p.carpool_rider && carpoolOthers(p).length > 0)
+  const title = (kind === 'create' && riding) || kind === 'carpool' ? TITLE.carpool : TITLE[kind]
+  const withWho = [...new Set(plans.flatMap(carpoolOthers))]
+
   // 제목 — 받는 쪽에서 «제목으로» 거를 수 있어야 한다 (주소는 하나뿐이라서).
   const many = plans.length > 1 ? ` 외 ${plans.length - 1}건` : ''
-  const subject = `[차량] ${TITLE[kind]} · ${who} · ${dayLabel(first.plan_date)}${many}`
+  const subject = `[차량] ${title} · ${who} · ${dayLabel(first.plan_date)}${many}`
     + (car ? ` · ${car}` : '')
+    + (title === TITLE.carpool && withWho.length ? ` · 함께: ${withWho.join('·')}` : '')
 
   const body = [
-    `${who} 님이 차량 예약을 ${TITLE[kind]}했습니다.`,
+    title === TITLE.carpool
+      ? `${who} 님이 이미 잡힌 차량에 함께 타기로 했습니다.`
+      : `${who} 님이 차량 예약을 ${TITLE[kind]}했습니다.`,
     '',
     ...plans.map(planLine),
     '',

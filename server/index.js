@@ -967,6 +967,21 @@ app.patch('/api/schedule/vehicles/:id', async (req, res) => {
   }
 })
 
+// ── 동승 (2026-09-14, 마이그레이션 039) ─────────────────────────
+// 🔑 같은 날 같은 차를 «함께 타는» 계획들은 carpool_group 이 같다. 묶음의 «대표» 는
+//    살아 있는 구성원 중 번호가 가장 작은 계획 — 먼저 예약한 사람이다 (사용자 결정).
+//    그 밖의 구성원(동승자)은 겹침으로 세지 않고, 차량 거리·하이패스에서도 빠진다.
+// ⚠ 날짜·차량이 같은 구성원만 센다. 묶음 번호만 같고 날짜가 다르면 이미 빠진 것이다.
+// ⚠ 계획이 없으면(alias 가 NULL) 첫 조건이 FALSE 라 «동승자 아님» 이 된다 — NULL 로
+//   떨어지지 않게 IS NOT NULL 로 연다 (UNIQUE·CHECK 에서 두 번 겪은 3값 논리 함정).
+const CARPOOL_RIDER_SQL = (p) => `(${p}.carpool_group IS NOT NULL AND EXISTS (
+    SELECT 1 FROM schedule_plans cq
+     WHERE cq.carpool_group = ${p}.carpool_group
+       AND cq.plan_date  = ${p}.plan_date
+       AND cq.vehicle_id = ${p}.vehicle_id
+       AND cq.status <> 'canceled'
+       AND cq.id < ${p}.id))`
+
 // ── 계획 ──
 // 달력이 한 번에 그려지도록 장소·차량·직원 이름을 함께 돌려준다.
 const PLAN_SELECT = `
@@ -975,13 +990,27 @@ const PLAN_SELECT = `
          fp.name AS from_place_name,
          v.name AS vehicle_name, v.plate AS vehicle_plate, v.kind AS vehicle_kind,
          v.assigned_worker_id AS vehicle_assigned_worker_id,
-         a.id AS actual_id, a.as_planned, a.distance_km AS actual_distance_km
+         a.id AS actual_id, a.as_planned, a.distance_km AS actual_distance_km,
+         -- 동승 — 함께 타는 사람들(번호순, 첫 사람이 대표)과 이 계획이 동승자인지
+         cp.members AS carpool_members,
+         ${CARPOOL_RIDER_SQL('p')} AS carpool_rider
     FROM schedule_plans p
     LEFT JOIN workers w          ON w.id  = p.worker_id
     LEFT JOIN schedule_places pl ON pl.id = p.place_id
     LEFT JOIN schedule_places fp ON fp.id = p.from_place_id
     LEFT JOIN schedule_vehicles v ON v.id = p.vehicle_id
-    LEFT JOIN schedule_actuals a  ON a.plan_id = p.id`
+    LEFT JOIN schedule_actuals a  ON a.plan_id = p.id
+    LEFT JOIN LATERAL (
+      SELECT json_agg(json_build_object('id', q.id, 'worker_id', q.worker_id,
+                                        'worker_name', qw.name) ORDER BY q.id) AS members
+        FROM schedule_plans q
+        LEFT JOIN workers qw ON qw.id = q.worker_id
+       WHERE p.carpool_group IS NOT NULL
+         AND q.carpool_group = p.carpool_group
+         AND q.plan_date  = p.plan_date
+         AND q.vehicle_id = p.vehicle_id
+         AND q.status <> 'canceled'
+    ) cp ON TRUE`
 
 app.get('/api/schedule/plans', async (req, res) => {
   const { from, to, worker_id, vehicle_id } = req.query
@@ -1100,14 +1129,35 @@ app.post('/api/schedule/plans', async (req, res) => {
     // 「이미 예약된 차량입니다」로 되묻는 것이 안내로도 맞지 않는다.
     const carErr = await ownCarError(b.vehicle_id, b.worker_id)
     if (carErr) return res.status(400).json({ error: carErr })
+    // 🔑 동승 (2026-09-14) — carpool_with 로 «그 계획의 차에 함께 탄다» 고 보내면 묶는다.
+    //    같은 날·같은 차·살아 있는 계획이어야 한다. 묶음 안의 사람은 겹침으로 세지 않는다.
+    //    ⚠ 묶음 «밖» 에 또 다른 예약이 겹치면 그것은 그대로 409 로 돌려준다.
+    let carpoolGroup = null
+    if (b.carpool_with) {
+      const { rows: tg } = await pool.query(
+        'SELECT id, plan_date, vehicle_id, status, carpool_group FROM schedule_plans WHERE id = $1',
+        [b.carpool_with])
+      const t = tg[0]
+      if (!t || t.status === 'canceled') {
+        return res.status(400).json({ error: '함께 탈 일정을 찾을 수 없습니다.' })
+      }
+      if (!b.vehicle_id || String(t.plan_date) !== String(b.plan_date)
+          || Number(t.vehicle_id) !== Number(b.vehicle_id)) {
+        return res.status(400).json({ error: '함께 타려면 날짜와 차량이 같아야 합니다.' })
+      }
+      carpoolGroup = t.carpool_group ?? t.id
+    }
     // 차량 겹침 검사 — 먼저 등록한 사람이 우선이고, 겹치면 경고만 한다.
     // force=true 로 다시 부르면 그대로 등록된다 (승인 절차를 두지 않는다)
     if (b.vehicle_id && !b.force) {
+      // carpool_group 은 화면이 «함께 타기» 를 고를 수 있게 돌려준다 — 겹친 상대가
+      // 한 묶음(또는 한 사람)이면 거기에 함께 탈 수 있다.
       const { rows: conflicts } = await pool.query(
-        `SELECT p.id, p.slot, p.worker_id, w.name AS worker_name
+        `SELECT p.id, p.slot, p.worker_id, p.carpool_group, w.name AS worker_name
            FROM schedule_plans p LEFT JOIN workers w ON w.id = p.worker_id
-          WHERE p.vehicle_id = $1 AND p.plan_date = $2 AND p.status <> 'canceled'`,
-        [b.vehicle_id, b.plan_date]
+          WHERE p.vehicle_id = $1 AND p.plan_date = $2 AND p.status <> 'canceled'
+            AND ($3::int IS NULL OR (p.carpool_group IS DISTINCT FROM $3::int AND p.id <> $3::int))`,
+        [b.vehicle_id, b.plan_date, carpoolGroup]
       )
       const hit = conflicts.filter(c => slotsOverlap(c.slot, b.slot || 'allday'))
       if (hit.length > 0) {
@@ -1140,8 +1190,9 @@ app.post('/api/schedule/plans', async (req, res) => {
          (worker_id, plan_date, slot, start_time, end_time, use_type,
           place_id, place_text, purpose, transport, vehicle_id,
           est_distance_km, est_travel_min, round_trip, vacation_type, one_way_dir,
-          approval, approved_at, approved_by_id, from_place_id, vacation_note, vacation_hours)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,
+          approval, approved_at, approved_by_id, from_place_id, vacation_note, vacation_hours,
+          carpool_group)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) RETURNING *`,
       [b.worker_id, b.plan_date, b.slot || 'allday', b.start_time || null, b.end_time || null,
        useType, placeId, placeText, purpose, b.transport || 'office', b.vehicle_id ?? null,
        b.est_distance_km ?? null, b.est_travel_min ?? null,
@@ -1150,8 +1201,14 @@ app.post('/api/schedule/plans', async (req, res) => {
        selfApprove ? req.session.uid : null,
        // 이동이 아니면 서버가 지운다 — 남으면 달력이 「A→B」 라고 거짓말을 한다
        keepPlace ? fromPlaceOf(roundTrip, b.one_way_dir, b.from_place_id) : null,
-       vacationNote, vacationHours]
+       vacationNote, vacationHours, carpoolGroup]
     )
+    // 처음 묶이는 것이면 «대표» 줄에도 묶음 번호를 단다. 대표의 일정 내용은 건드리지 않는다.
+    if (carpoolGroup) {
+      await pool.query(
+        'UPDATE schedule_plans SET carpool_group = $1 WHERE id = $1 AND carpool_group IS NULL',
+        [carpoolGroup])
+    }
     // 🔑 차량 알림 — 저장은 이미 끝났다. 메일은 «덤» 이라 await 하지 않는다.
     //    이름(차량·장소·직원)이 붙은 줄이 필요해 조회용 SELECT 로 한 번 더 읽는다.
     notifyVehicle('create', rows[0].id, req, b.batch_id, b.conflicts_ack)
@@ -1246,6 +1303,14 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
     if (carErr) return res.status(400).json({ error: carErr })
     const useType = b.use_type ?? cur[0].use_type
     const keepPlace = useType === 'business'
+    // 🔑 동승 (2026-09-14) — 날짜나 차량이 바뀌면 그 계획은 묶음에서 빠진다.
+    //    같은 차·같은 날이 아니면 함께 타는 것이 아니다. 남겨 두면 다른 날의 예약이
+    //    겹침 검사에서 조용히 빠진다.
+    //    ⚠ 차량 비교는 «실제로 저장될 값» 으로 한다(vehicle_id 는 비워 보내도 원래 값이 남는다).
+    const nextVehicle = b.vehicle_id ?? cur[0].vehicle_id
+    const leaveCarpool = cur[0].carpool_group != null && (
+      (b.plan_date && String(b.plan_date) !== String(cur[0].plan_date))
+      || Number(nextVehicle || 0) !== Number(cur[0].vehicle_id || 0))
     const { rowCount } = await pool.query(
       `UPDATE schedule_plans
           SET plan_date = COALESCE($1, plan_date), slot = COALESCE($2, slot),
@@ -1256,7 +1321,9 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
               round_trip = COALESCE($13, round_trip),
               status = COALESCE($14, status), vacation_type = $15,
               one_way_dir = $17, from_place_id = $18,
-              vacation_note = $19, vacation_hours = $20, updated_at = now()
+              vacation_note = $19, vacation_hours = $20,
+              carpool_group = CASE WHEN $21::boolean THEN NULL ELSE carpool_group END,
+              updated_at = now()
         WHERE id = $16`,
       [b.plan_date || null, b.slot || null, b.start_time || null, b.end_time || null, useType,
        keepPlace ? (b.place_id ?? cur[0].place_id) : null,
@@ -1294,11 +1361,91 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
                  start_time: b.start_time ?? cur[0].start_time,
                  end_time: b.end_time ?? cur[0].end_time,
                }))
-         : null]
+         : null,
+       leaveCarpool]
     )
     if (rowCount === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
     // 고친 뒤의 모습으로 알린다. 차량이 빠졌으면 mailer 가 알아서 거른다.
     notifyVehicle('update', req.params.id, req)
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ── 동승 묶기·풀기 (2026-09-14) ──────────────────────────────
+// 이미 넣은 계획을 나중에 «같은 날·같은 차» 의 다른 계획에 함께 타게 한다.
+// 🔑 판정은 «내 계획의 주인» 으로 한다. 상대 계획의 내용은 고치지 않는다 — 상대가 아직
+//    묶음이 없으면 상대 줄에 «묶음 번호» 만 단다. 그것은 일정을 바꾸는 것이 아니라
+//    이름표를 다는 것이라 상대의 권한을 묻지 않는다.
+// 🔴 잠긴 실적이 붙어 있으면 막는다 — 대표가 바뀌면 차량 거리·하이패스가 붙는 사람이
+//    바뀌어, 정산 안내가 나간 금액과 근거가 어긋난다. 판정은 lockedError 한 곳에서.
+async function carpoolLockError(planIds, session) {
+  const { rows } = await pool.query(
+    'SELECT locked, worker_id, work_date FROM schedule_actuals WHERE plan_id = ANY($1::int[])',
+    [planIds])
+  for (const r of rows) {
+    const err = await lockedError(r, session)
+    if (err) return err
+  }
+  return null
+}
+
+app.post('/api/schedule/plans/:id/carpool', async (req, res) => {
+  const id = Number(req.params.id)
+  const withId = Number(req.body?.with_plan_id)
+  if (!Number.isInteger(withId)) return res.status(400).json({ error: '함께 탈 일정을 골라 주세요.' })
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, worker_id, plan_date, vehicle_id, status, carpool_group
+         FROM schedule_plans WHERE id = ANY($1::int[])`, [[id, withId]])
+    const mine = rows.find(r => Number(r.id) === id)
+    const target = rows.find(r => Number(r.id) === withId)
+    if (!mine || !target) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
+    if (!canEditWorker(req.session, mine.worker_id)) return denyOther(res)
+    if (id === withId) return res.status(400).json({ error: '같은 일정입니다.' })
+    if (target.status === 'canceled') {
+      return res.status(400).json({ error: '취소된 일정에는 함께 탈 수 없습니다.' })
+    }
+    if (!mine.vehicle_id || String(mine.plan_date) !== String(target.plan_date)
+        || Number(mine.vehicle_id) !== Number(target.vehicle_id)) {
+      return res.status(400).json({ error: '함께 타려면 날짜와 차량이 같아야 합니다.' })
+    }
+    const lockErr = await carpoolLockError([id, withId], req.session)
+    if (lockErr) return res.status(409).json({ error: lockErr })
+
+    const group = target.carpool_group ?? target.id
+    await pool.query(
+      'UPDATE schedule_plans SET carpool_group = $1 WHERE id = $2 AND carpool_group IS NULL',
+      [group, target.id])
+    await pool.query(
+      'UPDATE schedule_plans SET carpool_group = $1, updated_at = now() WHERE id = $2',
+      [group, id])
+    // 동승 등록도 대표이사께 알린다 — 제목에 「동승」 (사용자 결정)
+    notifyVehicle('carpool', id, req)
+    res.json({ ok: true, carpool_group: group })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 풀기 — 그 계획만 묶음에서 뺀다. 남은 사람들은 묶음 그대로다(대표가 빠지면 다음 사람이 대표).
+// ⚠ 메일은 보내지 않는다. 풀고 나서 같은 차를 따로 쓰면 달력의 겹침 경고로 드러난다.
+app.delete('/api/schedule/plans/:id/carpool', async (req, res) => {
+  const id = Number(req.params.id)
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, worker_id, carpool_group FROM schedule_plans WHERE id = $1', [id])
+    if (!rows.length) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
+    if (!canEditWorker(req.session, rows[0].worker_id)) return denyOther(res)
+    if (rows[0].carpool_group == null) return res.json({ ok: true })
+    // 🔑 대표가 빠지면 남은 사람의 차량 거리·하이패스 주인이 바뀐다 — 묶음 전체를 본다
+    const { rows: members } = await pool.query(
+      'SELECT id FROM schedule_plans WHERE carpool_group = $1', [rows[0].carpool_group])
+    const lockErr = await carpoolLockError(members.map(m => Number(m.id)), req.session)
+    if (lockErr) return res.status(409).json({ error: lockErr })
+    await pool.query(
+      'UPDATE schedule_plans SET carpool_group = NULL, updated_at = now() WHERE id = $1', [id])
     res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -2375,10 +2522,13 @@ async function buildSettlement(ym) {
             v.kind AS vehicle_kind, v.name AS vehicle_name, v.plate AS vehicle_plate,
             v.rate_per_km, v.km_per_liter,
             -- 주 사용자가 «개인 카드» 로 통행료를 내는 차 (2026-09-05 지시)
-            v.hipass_personal_card, v.assigned_worker_id
+            v.hipass_personal_card, v.assigned_worker_id,
+            -- 동승자(2026-09-14) — 차량 주행거리는 대표만 센다 (사용자 결정)
+            ${CARPOOL_RIDER_SQL('cpl')} AS carpool_rider
        FROM schedule_actuals a
        LEFT JOIN workers w           ON w.id = a.worker_id
        LEFT JOIN schedule_vehicles v ON v.id = a.vehicle_id
+       LEFT JOIN schedule_plans cpl  ON cpl.id = a.plan_id
       WHERE a.work_date >= $1 AND a.work_date <= $2
       ORDER BY a.work_date ASC`, [from, to])
 
@@ -2441,10 +2591,14 @@ async function buildSettlement(ym) {
       distance_km: km, toll_fee: r.toll_fee, fuel_fee: r.fuel_fee,
       transit_fee: r.transit_fee, vehicle_name: r.vehicle_name,
       vehicle_kind: r.vehicle_kind, memo: r.memo, locked: r.locked,
+      carpool_rider: !!r.carpool_rider,
     })
 
     // ── 차량별 ──
-    if (r.vehicle_id) {
+    // 🔑 동승자(2026-09-14)는 차량 합계에서 뺀다 — 한 대가 한 번 달린 것을 사람 수만큼
+    //    세면 차량 주행거리가 부풀어 오른다. 사람별 업무 거리(business_km)는 그대로 둔다 —
+    //    그 사람이 실제로 다녀온 거리이기 때문이다 (사용자 결정: 차량 거리·하이패스는 대표만).
+    if (r.vehicle_id && !r.carpool_rider) {
       if (!byVehicle.has(r.vehicle_id)) {
         byVehicle.set(r.vehicle_id, {
           vehicle_id: r.vehicle_id, name: r.vehicle_name, plate: r.vehicle_plate,
@@ -2997,6 +3151,9 @@ const HIPASS_SELECT = `
         LEFT JOIN schedule_places fp2 ON fp2.id = pl2.from_place_id
        WHERE a2.vehicle_id = t.vehicle_id
          AND a2.work_date  = ${HIPASS_DATE}
+         -- 🔑 동승자(2026-09-14)는 후보에서 뺀다 — 한 차로 둘이 간 날 후보가 둘이 되면
+         --    자동 배정이 「애매」 로 남긴다. 하이패스는 대표(먼저 잡은 사람)에게 붙는다.
+         AND NOT ${CARPOOL_RIDER_SQL('pl2')}
     ) m ON TRUE`
 
 // 그날 «그 사람» 이 무엇을 했는지 (2026-09-06 지시 4번).

@@ -13,7 +13,7 @@ import { getPlaces, addPlace, updatePlace, hidePlace, getVehicles, addVehicle, u
          getPlans, getMailStatus, addPlan, updatePlan, removePlan, getActuals, addActual, updateActual,
          removeActual, login, logout, whoAmI, getSettlement, notifySettlement,
          completeSettlement, reopenSettlement, setApproval, getVacationSummary,
-         getPlaceDistance, savePlaceDistance } from './repositories/scheduleRepo'
+         getPlaceDistance, savePlaceDistance, joinCarpool, leaveCarpool } from './repositories/scheduleRepo'
 import { getHolidays, syncHolidays, addHoliday, setHolidayWorking, removeHoliday,
          restDaySet } from './repositories/holidayRepo'
 import { getPurchases, addPurchase, setPurchaseStatus,
@@ -40,7 +40,8 @@ import { OUT_TRANSPORTS, TRANSPORT_MAP, OFFICE_PLACE, SLOTS, SLOT_MAP, thS, tdS,
          ymd, today, dayName, mdLabel, addDays, calWeekDays,
          monthGridDays, isSameMonth, shiftMonth,
          workerColor, vehicleColor, VEHICLE_COLORS, GROUP_BYS, buildGroupRows,
-         planIcon, planState, placeLabel, POSITIONS } from './shared/schedule-core'
+         planIcon, planState, placeLabel, POSITIONS,
+         carUnits, carpoolMembers } from './shared/schedule-core'
 import { ScheduleMonth, ScheduleWeek, ScheduleDay } from './shared/ScheduleCalendar'
 import { Card } from './shared/ui'
 
@@ -1624,18 +1625,34 @@ function Dashboard({me,onLoggedOut}){
         try{ await addPlan(body); done++ }
         catch(e){
           if(e.status===409&&e.conflicts?.length){
-            conflicts.push({...body,_names:e.conflicts.map(c=>c.worker_name)})
+            conflicts.push({body,names:e.conflicts.map(c=>c.worker_name),target:carpoolTarget(e.conflicts)})
           }else throw e
         }
       }
-      // 겹친 칸은 모아서 한 번만 묻는다
+      // 겹친 칸은 모아서 한 번만 묻는다 — 🔑 함께 타기 / 따로 붙이기 / 취소 (2026-09-14)
+      let skipped=0
       if(conflicts.length>0){
-        const lines=conflicts.map(c=>`· ${c.plan_date} — ${c._names.join('·')}`).join('\n')
-        if(confirm(`아래 날짜는 그 차량이 이미 예약돼 있습니다.\n\n${lines}\n\n그래도 붙일까요?`)){
-          for(const c of conflicts){ await addPlan({...c,force:true}); done++ }
+        const lines=conflicts.map(c=>`· ${c.body.plan_date} — ${c.names.join('·')}`).join('\n')
+        const joinable=conflicts.filter(c=>c.target)
+        const pick=await askChoice({
+          title:'그 차량을 이미 잡은 사람이 있습니다',
+          message:`${lines}\n\n${CARPOOL_HINT}`,
+          choices:[
+            ...(joinable.length?[{value:'join',primary:true,
+              label:joinable.length<conflicts.length?`함께 타기 (${joinable.length}건)`:'함께 타기'}]:[]),
+            {label:'따로 붙이기',value:'force'},
+            {label:'취소',value:null},
+          ]})
+        if(pick==='join'){
+          for(const c of joinable){ await addPlan({...c.body,carpool_with:c.target}); done++ }
+          // 이미 둘 이상이 겹쳐 있는 날은 누구 차에 탈지 정할 수 없어 넣지 않는다
+          skipped=conflicts.length-joinable.length
+        }else if(pick==='force'){
+          for(const c of conflicts){ await addPlan({...c.body,force:true}); done++ }
         }
       }
-      showToast(done>0?`${done}곳에 붙였습니다`:'붙인 계획이 없습니다')
+      showToast((done>0?`${done}곳에 붙였습니다`:'붙인 계획이 없습니다')
+        +(skipped?` · 이미 여러 대가 겹친 ${skipped}곳은 넣지 않았습니다`:''))
       if(done>0){ await loadSchedule(); setSchedFocus(targets[0].date) }
     }catch(e){ showToast('붙이기 실패: '+e.message) }
     finally{ setClipboard(null) }
@@ -2668,7 +2685,8 @@ function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan
       const k=`${p.plan_date}_${p.vehicle_id}`
       ;(m[k]=m[k]||[]).push(p)
     })
-    return Object.entries(m).filter(([,v])=>v.length>1)
+    // 🔑 동승(2026-09-14)은 여럿이 타도 «한 번의 배차» 라 겹침이 아니다 — 배차 단위로 센다
+    return Object.entries(m).filter(([,v])=>carUnits(v)>1)
       .map(([k,v])=>({date:k.split('_')[0],vehicle:v[0].vehicle_name,plate:v[0].vehicle_plate,
                       // 같은 사람이 같은 차를 두 건 넣은 경우도 겹침이지만
                       // 이름을 두 번 적으면 「이건호 · 이건호」 처럼 읽기 이상하다
@@ -6241,6 +6259,61 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
   )
 }
 
+// ── 셋 중 하나를 고르는 확인 창 (2026-09-14 — 동승) ──────────────
+// 🔑 confirm() 은 두 갈래뿐이다. 「함께 타기 / 따로 등록 / 취소」 를 confirm 두 번으로 나누면
+//    «취소» 가 무엇을 취소하는지 흐려진다 — 휴가 창에서 이미 지적받은 종류다(2026-08-26).
+// ⚠ React 트리 밖에 잠깐 그렸다 지운다. 등록 흐름(async 함수) 한가운데서 답을 기다려야 해서다.
+//   글은 textContent 로만 넣는다(사람 이름이 들어간다).
+function askChoice({title,message,choices}){
+  return new Promise(resolve=>{
+    const wrap=document.createElement('div')
+    wrap.setAttribute('role','dialog')
+    wrap.dataset.choiceDialog='1'
+    wrap.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:10000;'
+      +'display:flex;align-items:center;justify-content:center;padding:16px'
+    const box=document.createElement('div')
+    box.style.cssText='background:#fff;border-radius:12px;max-width:480px;width:100%;padding:20px 22px;'
+      +'box-shadow:0 20px 50px rgba(0,0,0,.25);font-size:13px;color:#111827'
+    const h=document.createElement('div')
+    h.textContent=title
+    h.style.cssText='font-size:15px;font-weight:700;margin-bottom:10px'
+    const p=document.createElement('div')
+    p.textContent=message
+    p.style.cssText='white-space:pre-line;line-height:1.65;color:#374151;margin-bottom:16px'
+    const row=document.createElement('div')
+    row.style.cssText='display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap'
+    const onKey=e=>{ if(e.key==='Escape') done(null) }
+    function done(v){ document.removeEventListener('keydown',onKey); wrap.remove(); resolve(v) }
+    choices.forEach(c=>{
+      const b=document.createElement('button')
+      b.type='button'
+      b.textContent=c.label
+      b.style.cssText='padding:9px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:700;'
+        +`border:1px solid ${c.primary?'#1a56db':'#d1d5db'};`
+        +`background:${c.primary?'#1a56db':'#fff'};color:${c.primary?'#fff':'#374151'}`
+      b.onclick=()=>done(c.value)
+      row.appendChild(b)
+    })
+    wrap.onclick=e=>{ if(e.target===wrap) done(null) }
+    document.addEventListener('keydown',onKey)
+    box.append(h,p,row)
+    wrap.appendChild(box)
+    document.body.appendChild(wrap)
+    row.querySelector('button')?.focus()
+  })
+}
+
+// 겹친 상대들이 «한 묶음(또는 한 사람)» 이면 거기에 함께 탈 수 있다 — 그 대표의 번호를 준다.
+// 둘 이상의 배차가 이미 겹쳐 있으면 누구 차에 탈지 정할 수 없어 null 이다.
+function carpoolTarget(conflicts){
+  if(!conflicts?.length||carUnits(conflicts)!==1) return null
+  return Math.min(...conflicts.map(c=>Number(c.id)))
+}
+
+// 겹쳤을 때 묻는 말 — 등록·붙여넣기가 «같은 문구» 를 쓴다
+const CARPOOL_HINT='함께 타기 — 같은 차로 함께 갑니다. 겹침 경고가 사라지고, 차량 주행거리·하이패스는 '
+  +'먼저 잡은 분(대표) 앞으로 셉니다.\n따로 등록 — 겹친 채로 등록합니다(다른 차를 구할 때까지 잡아 둘 때).'
+
 // 계획 입력·확인 창.
 //   editing=null           새 계획
 //   editing=계획           기존 계획 — 실적이 없으면 그 자리에서 고칠 수 있다
@@ -6321,6 +6394,45 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   const [pairKmInput,setPairKmInput]=useState('')
   const [pairMinInput,setPairMinInput]=useState('')
   const [busy,setBusy]=useState(false)
+
+  // ── 동승 (2026-09-14) ──────────────────────────────────────
+  // 이미 넣은 계획이면 «같은 날 이 차를 잡은 다른 사람» 을 찾아 둔다. 달력이 겹침으로
+  // 보여 주던 것을 이 창에서 [함께 타기] 한 번으로 묶거나 [동승 풀기] 로 푼다.
+  const [sameCar,setSameCar]=useState([])
+  useEffect(()=>{
+    // 차량이 없는 계획은 찾을 것이 없다 — 처음 값([])이 그대로 맞다
+    if(!editing?.vehicle_id) return
+    let alive=true
+    getPlans(editing.plan_date,editing.plan_date,{vehicle_id:editing.vehicle_id})
+      .then(rows=>{ if(alive) setSameCar((rows||[]).filter(p=>p.id!==editing.id&&p.status!=='canceled')) })
+      .catch(()=>{ if(alive) setSameCar([]) })
+    return ()=>{ alive=false }
+  },[editing?.id,editing?.vehicle_id,editing?.plan_date])
+  const myCarpool=carpoolMembers(editing)
+  // 내 묶음 «밖» 에서 같은 차를 잡은 계획들 — 이것이 남아 있으면 여전히 겹친 것이다
+  const otherCarPlans=sameCar.filter(p=>!(editing?.carpool_group&&p.carpool_group===editing.carpool_group))
+  const joinTo=carpoolTarget(otherCarPlans)
+  async function doJoinCarpool(){
+    try{
+      setBusy(true)
+      await joinCarpool(editing.id,joinTo)
+      showToast('함께 타는 것으로 묶었습니다 — 겹침 경고가 사라집니다')
+      await onSaved({focusDate:editing.plan_date})
+      onClose()
+    }catch(e){ showToast('묶기 실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+  async function doLeaveCarpool(){
+    if(!confirm('이 일정을 동승에서 뺄까요?\n\n같은 차를 계속 쓰면 다시 겹침으로 보입니다.'))return
+    try{
+      setBusy(true)
+      await leaveCarpool(editing.id)
+      showToast('동승에서 뺐습니다')
+      await onSaved({focusDate:editing.plan_date})
+      onClose()
+    }catch(e){ showToast('풀기 실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
 
   const isWork=kind==='work'
   const isVehicleOnly=kind==='vehicle'
@@ -6524,15 +6636,37 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
           done++
         }catch(e){
           if(e.status===409&&e.conflicts?.length){
-            conflicts.push({date:d,names:e.conflicts.map(c=>c.worker_name)})
+            conflicts.push({date:d,names:e.conflicts.map(c=>c.worker_name),target:carpoolTarget(e.conflicts)})
           }else throw e
         }
       }
 
       // 겹친 날짜는 «모아서 한 번만» 물어본다. 날짜마다 확인창이 뜨면 쓰기 어렵다.
+      // 🔑 동승(2026-09-14) — 「그래도 등록?」 한 갈래였던 것을 셋으로 나눈다.
+      //    한 차로 함께 가는 날에 겹침 경고가 뜨던 것이 이 기능의 출발점이다.
+      let skipped=0
       if(conflicts.length>0){
         const lines=conflicts.map(c=>`· ${c.date} — ${c.names.join('·')}`).join('\n')
-        if(confirm(`아래 날짜는 그 차량이 이미 예약돼 있습니다.\n\n${lines}\n\n그래도 등록할까요?`)){
+        const joinable=conflicts.filter(c=>c.target)
+        const pick=await askChoice({
+          title:'그 차량을 이미 잡은 사람이 있습니다',
+          message:`${lines}\n\n${CARPOOL_HINT}`,
+          choices:[
+            ...(joinable.length?[{value:'join',primary:true,
+              label:joinable.length<conflicts.length?`함께 타기 (${joinable.length}건)`:'함께 타기'}]:[]),
+            {label:'따로 등록',value:'force'},
+            {label:'취소',value:null},
+          ]})
+        if(pick==='join'){
+          for(const c of joinable){
+            // 같은 묶음 번호(batch)로 보내 메일은 한 통 — 제목에 「동승」 이 달린다
+            await addPlan({...buildBody(c.date,usePlaceId,useKm,useMin),
+              batch_id:batchId, carpool_with:c.target})
+            done++
+          }
+          // 이미 둘 이상의 배차가 겹친 날은 누구 차에 탈지 정할 수 없어 넣지 않는다
+          skipped=conflicts.length-joinable.length
+        }else if(pick==='force'){
           for(const c of conflicts){
             // 겹친 줄도 같은 묶음이다. 겹쳤다는 사실은 메일에도 적힌다
             await addPlan({...buildBody(c.date,usePlaceId,useKm,useMin,true),
@@ -6543,6 +6677,7 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
         }
       }
 
+      if(skipped>0) showToast(`이미 여러 대가 겹친 ${skipped}일은 넣지 않았습니다 — 그 날은 따로 골라 주십시오`)
       if(done>0){
         showToast(done===1?`${targets[0]} 계획을 등록했습니다`:`${done}건을 등록했습니다 (${targets[0]} 외)`)
         await onSaved({focusDate:targets[0]})
@@ -6718,6 +6853,41 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
             marginBottom:14,fontSize:12,color:'#475569'}}>
             <strong>다른 분의 일정입니다</strong> — 내용만 보실 수 있습니다.
             고쳐야 할 것이 있으면 본인이나 관리자에게 말씀해 주십시오.
+          </div>
+        )}
+
+        {/* ── 동승 (2026-09-14) — 한 차로 함께 가는가 ── */}
+        {!isNew&&myCarpool.length>0&&(
+          <div data-carpool-box="member" style={{background:'#eff6ff',border:'1px solid #93c5fd',borderRadius:8,
+            padding:'8px 12px',marginBottom:14,fontSize:12,color:'#1e40af'}}>
+            <strong>👥 한 차로 함께 갑니다</strong> — {myCarpool.map((m,i)=>`${m.worker_name}${i===0?'(대표)':''}`).join(' · ')}
+            <br/>차량 주행거리·하이패스는 <strong>대표(먼저 잡은 분)</strong> 앞으로 셉니다.
+            {mine&&(
+              <div style={{marginTop:8}}>
+                <button onClick={doLeaveCarpool} disabled={busy}
+                  style={{padding:'6px 12px',borderRadius:7,border:'1px solid #93c5fd',
+                    background:'#fff',color:'#1e40af',cursor:'pointer',fontSize:12,fontWeight:700}}>
+                  동승 풀기
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+        {!isNew&&otherCarPlans.length>0&&(
+          <div data-carpool-box="conflict" style={{background:'#fef2f2',border:'1px solid #fca5a5',borderRadius:8,
+            padding:'8px 12px',marginBottom:14,fontSize:12,color:'#991b1b'}}>
+            <strong>⚠ 같은 날 이 차를 잡은 사람이 있습니다</strong>
+            {' '}— {[...new Set(otherCarPlans.map(p=>p.worker_name))].join(' · ')}
+            {mine&&myCarpool.length===0&&joinTo&&(
+              <div style={{marginTop:8,display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                <button onClick={doJoinCarpool} disabled={busy}
+                  style={{padding:'6px 12px',borderRadius:7,border:'none',
+                    background:'#1a56db',color:'#fff',cursor:'pointer',fontSize:12,fontWeight:700}}>
+                  👥 함께 타기
+                </button>
+                <span style={{color:'#7f1d1d'}}>같은 차로 함께 가면 눌러 주십시오 — 겹침 경고가 사라집니다.</span>
+              </div>
+            )}
           </div>
         )}
 

@@ -64,6 +64,11 @@ export const getVehicleUsage = (from, to) =>
 export const addPlan = (plan) => request('POST', '/plans', plan)
 export const updatePlan = (id, patch) => request('PATCH', `/plans/${id}`, patch)
 export const removePlan = (id) => request('DELETE', `/plans/${id}`)
+// 동승 (2026-09-14) — 이미 넣은 계획을 같은 날·같은 차의 다른 계획에 «함께 타기» 로 묶거나 푼다.
+// 새로 넣을 때는 addPlan 본문에 carpool_with(함께 탈 계획 번호)를 실어 보낸다.
+export const joinCarpool = (id, withPlanId) =>
+  request('POST', `/plans/${id}/carpool`, { with_plan_id: withPlanId })
+export const leaveCarpool = (id) => request('DELETE', `/plans/${id}/carpool`)
 
 // ── 휴가 승인 (2026-08-26 신설) ──
 // 승인·반려는 대표이사만 할 수 있다. 서버가 막으므로 화면은 단추를 감추기만 한다.
