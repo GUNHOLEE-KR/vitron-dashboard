@@ -1812,10 +1812,10 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),sel
   // 목록에서만 감춘다. 🔑 «지금 골라져 있는 값» 은 완료여도 남겨야 한다 —
   // 빼 버리면 과거 날짜를 조회했을 때 적어 둔 업무가 빈칸으로 보인다.
   const visible=(list,cur)=>list.filter(t=>showDone||!jiraDone.has(t)||t===cur)
-  // 표시 전용 이름. 🔴 저장되는 값(option 의 value)은 «원본 그대로» 여야 한다 —
-  // 화면 문구를 저장하면 상태가 바뀔 때마다 같은 업무가 두 종류로 갈라진다.
-  // 번호를 떼는 것도 여기까지다 — 목록에서만 감추고 저장은 `[VITRON-41] …` 그대로 간다.
-  const label=t=>(jiraDone.has(t)?'(완료) ':'')+(cleanName(t)||t)
+  // 🔴 화면에 보이는 것은 «번호를 뗀 이름» 이지만 저장되는 값은 `[VITRON-41] …`
+  //    원본 그대로다. 화면 문구를 저장하면 상태가 바뀔 때마다 같은 업무가 두
+  //    종류로 갈라진다. 되짚는 표가 아래 parentByName·subByName 이다.
+  //    (2026-09-24 이전에는 고르개였고, 그때는 option 의 value 가 그 구실을 했다)
 
   // 목록 차례. 번호가 붙어 있으면 «문자열» 정렬이라 10 → 100 → 11 → 119 처럼 뒤죽박죽이 된다.
   // 번호를 뗀 이름으로 세우고, 시작일순도 고를 수 있게 한다.
@@ -1861,36 +1861,106 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),sel
     setGrid(g=>{const n={...g};hours.forEach(sh=>{n[cellKey(sh,wid)]=val});return n})
   }
 
-  // ── 새 업무 만들기 (2026-09-24 신설) ─────────────────────────
+  // ── 고르개에 «적으면 그게 등록된다» (2026-09-24 지시) ─────────
   // 여태는 «고르기» 만 됐다. 목록에 없는 업무는 ③직접 입력으로 적을 수밖에 없었는데,
   // 그렇게 적은 것은 Jira 에 없어 상위·하위로 묶이지 않고 통계에서도 홀로 떠 있었다.
-  // 🔑 여기서 만든 것은 «Jira 에 실제로» 생긴다 — 설정 탭의 「고정업무」와 다르다.
-  const [addOpen,setAddOpen]=useState(false)
-  const [addKind,setAddKind]=useState('sub')   // 'top' = 상위업무(에픽) / 'sub' = 하위업무
-  const [addParent,setAddParent]=useState('')
-  const [addTitle,setAddTitle]=useState('')
-  const [addBusy,setAddBusy]=useState(false)
-  async function submitNewTask(){
-    const title=addTitle.trim()
-    if(!title){showToast?.('업무 제목을 적어 주십시오.');return}
-    if(addKind==='sub'&&!addParent){showToast?.('상위업무를 골라 주십시오.');return}
-    // ⚠ 두 번 눌리면 Jira 에 이슈가 «둘» 생긴다. 서버도 같은 이름을 막지만
-    //   여기서 먼저 막는 편이 낫다 — 저쪽은 이미 만들어진 뒤라야 알 수 있다.
-    if(addBusy)return
-    setAddBusy(true)
+  // 🔑 ①②에 «목록에 없는 이름» 을 적고 Enter 를 누르면 Jira 에 실제로 만들어진다.
+  //    ① → 상위업무(에픽) / ② → 고른 상위 아래 하위업무(작업).
+  //    ③직접 입력은 그대로 둔다 — Jira 에 올릴 것이 아닌 자유 기록 자리다.
+  //
+  // 🔑 화면에 보이는 것은 «이름» 뿐이고 저장되는 값은 `[VITRON-128] 이름` 이다
+  //    (사용자 선택 — 이름이 같은 업무는 없다고 확인받았다, 2026-09-24).
+  //    그래서 «이름 → 저장값» 을 되짚는 표가 필요하다.
+  const cleanOf=t=>cleanName(t)||t
+  const parentByName=useMemo(()=>{
+    const m={}
+    Object.keys(jiraTree).forEach(p=>{ if(m[cleanOf(p)]===undefined) m[cleanOf(p)]=p })
+    return m
+  },[jiraTree])
+  const subByName=pFull=>{
+    const m={}
+    ;(jiraTree[pFull]||[]).forEach(s=>{ if(m[cleanOf(s)]===undefined) m[cleanOf(s)]=s })
+    return m
+  }
+
+  // 적는 중인 글. 한 글자 칠 때마다 grid 에 넣으면 저장값이 반쪽짜리가 되므로
+  // 여기 따로 담아 두고, «확정될 때»(목록과 맞거나 Enter·포커스 아웃) 옮긴다.
+  const [draft,setDraft]=useState({})
+  const dKey=(kind,h,wid)=>`${kind}:${cellKey(h,wid)}`
+  const clearDraft=k=>setDraft(d=>{const n={...d};delete n[k];return n})
+  // ⚠ Enter 와 포커스 아웃이 «둘 다» 터진다. 만드는 중에 한 번 더 들어오면
+  //   Jira 에 이슈가 둘 생기므로 자물쇠를 둔다.
+  const committing=useRef(new Set())
+
+  // 목록에 없는 이름을 Jira 에 만든다. 돌려주는 것 = 저장값(full_text) 또는 null
+  async function askAndCreate(text,parentFull){
+    const what=parentFull?`「${cleanOf(parentFull)}」 아래 «하위업무(작업)»`:'«상위업무(에픽)»'
+    if(!window.confirm(
+      `「${text}」 는 목록에 없습니다.\n\nJira 에 ${what} 로 새로 만들까요?\n`
+      +'담당자는 본인으로 지정되며, 회사 Jira 에 실제로 등록됩니다.')) return null
     try{
-      const r=await createJiraIssue(title,addKind==='sub'?addParent:null)
+      const r=await createJiraIssue(text,parentFull||null)
       await reloadJira?.()
-      setAddTitle('')
-      setAddOpen(false)
-      // 🔑 만든 업무를 «바로 쓸 수 있게» 고르개 상태로 옮겨 둔다.
-      if(addKind==='top')setAddParent(r.full_text)
       showToast?.(`${r.key} 만들었습니다`+(r.assignee_found?'':' — Jira 계정을 못 찾아 담당자 없이'))
+      return r.full_text
     }catch(e){
       showToast?.('만들지 못했습니다 — '+e.message)
-    }finally{
-      setAddBusy(false)
+      return null
     }
+  }
+
+  // ① 상위업무 — 적는 중
+  function onParentType(h,wid,text){
+    const k=dKey('p',h,wid)
+    const hit=parentByName[text.trim()]
+    // 목록에서 고른 순간(이름이 정확히 맞는 순간) 바로 반영한다.
+    if(hit){ clearDraft(k); onParentChange(h,wid,hit); return }
+    setDraft(d=>({...d,[k]:text}))
+  }
+  // ① 상위업무 — 확정(Enter · 포커스 아웃)
+  async function commitParent(h,wid){
+    const k=dKey('p',h,wid)
+    if(draft[k]===undefined||committing.current.has(k))return
+    const text=draft[k].trim()
+    if(!text){ clearDraft(k); onParentChange(h,wid,''); return }
+    const hit=parentByName[text]
+    if(hit){ clearDraft(k); onParentChange(h,wid,hit); return }
+    committing.current.add(k)
+    try{
+      const full=await askAndCreate(text,null)
+      if(full){ clearDraft(k); onParentChange(h,wid,full) }
+      else clearDraft(k)          // 취소하면 원래 값으로 되돌린다
+    }finally{ committing.current.delete(k) }
+  }
+
+  // ② 하위업무 — 적는 중
+  function onSubType(h,wid,pFull,text){
+    const k=dKey('s',h,wid)
+    const hit=subByName(pFull)[text.trim()]
+    if(hit){ clearDraft(k); onSubChange(h,wid,hit); return }
+    setDraft(d=>({...d,[k]:text}))
+  }
+  // ② 하위업무 — 확정
+  async function commitSub(h,wid,pFull){
+    const k=dKey('s',h,wid)
+    if(draft[k]===undefined||committing.current.has(k))return
+    const text=draft[k].trim()
+    // 빈칸으로 지우면 «상위업무만 적은 것» 으로 되돌아간다(고르개 때와 같다).
+    if(!text){ clearDraft(k); onSubChange(h,wid,pFull); return }
+    const hit=subByName(pFull)[text]
+    if(hit){ clearDraft(k); onSubChange(h,wid,hit); return }
+    // 🔴 「고정업무」처럼 Jira 에 없는 상위 아래에는 만들 수 없다. 저장값이
+    //   `[KEY] …` 꼴이 아니면 그것이다 — 서버도 막지만 여기서 먼저 알린다.
+    if(!/^\s*\[/.test(pFull)){
+      showToast?.(`「${cleanOf(pFull)}」 는 Jira 에 없는 항목이라 그 아래에 만들 수 없습니다. 설정 탭의 「고정업무」로 추가해 주십시오.`)
+      clearDraft(k); return
+    }
+    committing.current.add(k)
+    try{
+      const full=await askAndCreate(text,pFull)
+      if(full){ clearDraft(k); onSubChange(h,wid,full) }
+      else clearDraft(k)
+    }finally{ committing.current.delete(k) }
   }
 
   return(
@@ -1921,14 +1991,6 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),sel
             <option value="date-asc">시작일 오래된 순</option>
             <option value="date-desc">시작일 최근 순</option>
           </select>
-          {/* 목록에 없는 업무를 그 자리에서 만든다. Jira 에 실제로 올라간다. */}
-          <button onClick={()=>setAddOpen(o=>!o)}
-            title="목록에 없는 업무를 Jira 에 새로 만듭니다"
-            style={{padding:'6px 12px',borderRadius:7,cursor:'pointer',fontSize:13,fontWeight:600,
-              border:`1px solid ${addOpen?'#7c3aed':'#c4b5fd'}`,
-              background:addOpen?'#7c3aed':'#f5f3ff',color:addOpen?'#fff':'#6d28d9'}}>
-            + 새 업무
-          </button>
         </div>
         <div style={{display:'flex',gap:8}}>
           <button onClick={()=>{if(!selWorker)return;const g={...grid};WORK_HOURS.forEach(h=>delete g[cellKey(h,selWorker.id)]);setGrid(g);const ps={...parentSel};WORK_HOURS.forEach(h=>delete ps[cellKey(h,selWorker.id)]);setParentSel(ps)}}
@@ -1938,57 +2000,6 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),sel
           </button>
         </div>
       </div>
-      {/* ── 새 업무 만들기 ─────────────────────────────────────
-          🔑 «Jira 에 실제로» 만든다. 설정 탭의 「고정업무」는 이 시스템 안에만
-             남는 것이라 서로 다르다 — 화면이 그 차이를 분명히 말해야 한다. */}
-      {addOpen&&(
-        <div style={{background:'#faf5ff',border:'1px solid #c4b5fd',borderRadius:10,padding:'14px 18px',marginBottom:16}}>
-          <div style={{fontSize:13,fontWeight:700,color:'#6d28d9',marginBottom:4}}>새 업무 만들기</div>
-          <div style={{fontSize:12,color:'#6b7280',marginBottom:10}}>
-            Jira <strong>VITRON</strong> 프로젝트에 <strong>실제로</strong> 만들어지고, 담당자는 <strong>본인</strong>이 됩니다.
-            만든 즉시 아래 목록에 나타납니다.
-          </div>
-          <div style={{display:'flex',gap:14,alignItems:'center',flexWrap:'wrap',marginBottom:10}}>
-            {[{v:'sub',t:'② 하위업무',d:'고른 상위업무 아래에 만듭니다'},
-              {v:'top',t:'① 상위업무',d:'Jira 의 «에픽» 으로 만듭니다'}].map(k=>(
-              <label key={k.v} title={k.d}
-                style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:13,cursor:'pointer',
-                  padding:'5px 12px',borderRadius:7,border:`1px solid ${addKind===k.v?'#7c3aed':'#e5e7eb'}`,
-                  background:addKind===k.v?'#ede9fe':'#fff',fontWeight:addKind===k.v?700:500,
-                  color:addKind===k.v?'#5b21b6':'#6b7280'}}>
-                <input type="radio" checked={addKind===k.v} onChange={()=>setAddKind(k.v)} style={{cursor:'pointer'}}/>
-                {k.t}
-              </label>
-            ))}
-          </div>
-          <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
-            {addKind==='sub'&&(
-              <select value={addParent} onChange={e=>setAddParent(e.target.value)}
-                style={{padding:'7px 10px',borderRadius:7,border:'1px solid #93c5fd',background:'#eff6ff',fontSize:13,minWidth:220}}>
-                <option value="">① 상위업무 선택</option>
-                {sortOpts(visible(jiraParents,addParent)).map(p=><option key={p} value={p}>{label(p)}</option>)}
-              </select>
-            )}
-            <input value={addTitle} onChange={e=>setAddTitle(e.target.value)}
-              onKeyDown={e=>{if(e.key==='Enter')submitNewTask()}}
-              placeholder={addKind==='top'?'새 상위업무 이름':'새 하위업무 이름'}
-              style={{padding:'7px 10px',borderRadius:7,border:'1px solid #e5e7eb',fontSize:13,minWidth:280,flex:1}}/>
-            <button onClick={submitNewTask} disabled={addBusy}
-              style={{padding:'7px 16px',borderRadius:7,border:'none',fontSize:13,fontWeight:600,
-                background:addBusy?'#c4b5fd':'#7c3aed',color:'#fff',cursor:addBusy?'wait':'pointer'}}>
-              {addBusy?'만드는 중…':'Jira 에 만들기'}
-            </button>
-            <button onClick={()=>setAddOpen(false)} disabled={addBusy}
-              style={{padding:'7px 14px',borderRadius:7,border:'1px solid #e5e7eb',background:'#fff',fontSize:13,cursor:'pointer'}}>
-              닫기
-            </button>
-          </div>
-          <div style={{fontSize:11,color:'#9ca3af',marginTop:8}}>
-            💡 Jira 에 넣기 애매한 반복 업무(주간회의 등)는 여기가 아니라
-            <strong> 설정 탭의 「고정업무」</strong>로 추가해 주십시오.
-          </div>
-        </div>
-      )}
       {/* 입력 대상 — 2026-08-21 부터 «로그인한 본인» 으로 고정된다.
           관리자만 남의 이름을 골라 대신 적어 줄 수 있다. */}
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'12px 16px',marginBottom:16}}>
@@ -2027,6 +2038,11 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),sel
           <span><span style={{background:'#dbeafe',padding:'1px 8px',borderRadius:4,marginRight:4}}>①</span>상위업무</span>
           <span><span style={{background:'#dcfce7',padding:'1px 8px',borderRadius:4,marginRight:4}}>②</span>하위업무</span>
           <span><span style={{background:'#fffbeb',padding:'1px 8px',borderRadius:4,marginRight:4}}>③</span>직접 입력</span>
+          {/* 적어도 된다는 사실을 모르면 아무도 쓰지 않는다 — 한 줄로 알린다. */}
+          <span style={{color:'#6d28d9'}}>
+            💡 ①② 는 <strong>고르기도 되고 적기도</strong> 됩니다 — 목록에 없는 이름을 적고
+            Enter 를 누르면 <strong>Jira 에 새로 만듭니다</strong>(확인 후).
+          </span>
         </div>
         {/* 선택 상태 안내 */}
         {selWorker&&selHours.size>0&&(
@@ -2060,18 +2076,33 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),sel
                   const key=cellKey(h,w.id),val=grid[key]||'',isMe=selWorkerId===w.id
                   const pVal=parentSel[key]||'',subs=pVal?(jiraTree[pVal]||[]):[]
                   const pOpts=sortOpts(visible(jiraParents,pVal)),sOpts=sortOpts(visible(subs,val))
+                  const ck=cellKey(h,w.id)
+                  const pDraft=draft[`p:${ck}`],sDraft=draft[`s:${ck}`]
                   return isMe?(
                     <td key={w.id} style={{border:'1px solid #e5e7eb',padding:4,verticalAlign:'top',minWidth:155}}>
                       <div style={{display:'flex',flexDirection:'column',gap:3}}>
-                        <select value={pVal} onChange={e=>onParentChange(h,w.id,e.target.value)} style={{width:'100%',fontSize:11,padding:'3px 5px',border:'1px solid #93c5fd',borderRadius:5,background:'#eff6ff'}}>
-                          <option value="">① 상위업무 선택</option>
-                          {pOpts.map(p=><option key={p} value={p}>{label(p)}</option>)}
-                        </select>
-                        <select value={subs.includes(val)?val:''} onChange={e=>onSubChange(h,w.id,e.target.value)} disabled={sOpts.length===0}
-                          style={{width:'100%',fontSize:11,padding:'3px 5px',borderRadius:5,border:'1px solid #6ee7b7',background:sOpts.length===0?'#f9fafb':'#f0fdf4',color:sOpts.length===0?'#9ca3af':'#111827'}}>
-                          <option value="">{sOpts.length===0?'② 하위업무 없음':'② 하위업무 선택'}</option>
-                          {sOpts.map(s=><option key={s} value={s}>{label(s)}</option>)}
-                        </select>
+                        {/* 🔑 고르기도 되고 «적기도» 된다. 목록에 없는 이름을 적고 Enter 를
+                            누르면 Jira 에 새로 만든다(확인 창을 한 번 거친다). */}
+                        <input list={`dl-p-${ck}`} value={pDraft!==undefined?pDraft:(pVal?cleanOf(pVal):'')}
+                          onChange={e=>onParentType(h,w.id,e.target.value)}
+                          onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();e.currentTarget.blur()}}}
+                          onBlur={()=>commitParent(h,w.id)}
+                          placeholder="① 상위업무 — 고르거나 적기"
+                          style={{width:'100%',fontSize:11,padding:'3px 5px',border:'1px solid #93c5fd',borderRadius:5,background:'#eff6ff'}}/>
+                        <datalist id={`dl-p-${ck}`}>
+                          {pOpts.map(p=><option key={p} value={cleanOf(p)}>{jiraDone.has(p)?'완료':''}</option>)}
+                        </datalist>
+                        <input list={`dl-s-${ck}`} value={sDraft!==undefined?sDraft:(subs.includes(val)?cleanOf(val):'')}
+                          onChange={e=>onSubType(h,w.id,pVal,e.target.value)}
+                          onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();e.currentTarget.blur()}}}
+                          onBlur={()=>commitSub(h,w.id,pVal)}
+                          disabled={!pVal}
+                          placeholder={pVal?'② 하위업무 — 고르거나 적기':'② 상위업무 먼저'}
+                          style={{width:'100%',fontSize:11,padding:'3px 5px',borderRadius:5,border:'1px solid #6ee7b7',
+                            background:!pVal?'#f9fafb':'#f0fdf4',color:!pVal?'#9ca3af':'#111827'}}/>
+                        <datalist id={`dl-s-${ck}`}>
+                          {sOpts.map(s=><option key={s} value={cleanOf(s)}>{jiraDone.has(s)?'완료':''}</option>)}
+                        </datalist>
                         <input value={(!pVal&&!subs.includes(val))?val:''} onChange={e=>onDirectInput(h,w.id,e.target.value)} placeholder="③ 직접 입력"
                           style={{width:'100%',fontSize:11,padding:'3px 5px',border:'1px dashed #fcd34d',borderRadius:5,background:'#fffbeb'}}/>
                         {val&&<div style={{fontSize:10,color:'#374151',background:'#f1f5f9',padding:'2px 6px',borderRadius:4}}>✓ {val}</div>}
