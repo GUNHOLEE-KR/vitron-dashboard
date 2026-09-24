@@ -7,6 +7,8 @@ import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates
 import { getMyMailSender, saveMyMailSender, removeMyMailSender,
          getMailAccount, saveMailAccount, removeMailAccount } from './repositories/mailSenderRepo'
 import { getAbsences, addAbsence, removeAbsence } from './repositories/absenceRepo'
+import { getVehicleCare, getVehicleDue, addVehicleEvent, removeVehicleEvent,
+         addVehicleInsurance, removeVehicleInsurance } from './repositories/vehicleCareRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
 import { getJiraTree, syncJira, addJiraIssue, createJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
 import { getPlaces, addPlace, updatePlace, hidePlace, getVehicles, addVehicle, updateVehicle,
@@ -41,7 +43,7 @@ import { OUT_TRANSPORTS, TRANSPORT_MAP, OFFICE_PLACE, SLOTS, SLOT_MAP, thS, tdS,
          monthGridDays, isSameMonth, shiftMonth,
          workerColor, vehicleColor, VEHICLE_COLORS, GROUP_BYS, buildGroupRows,
          planIcon, planState, placeLabel, POSITIONS,
-         carUnits, carpoolMembers } from './shared/schedule-core'
+         carUnits, carpoolMembers, transportFare } from './shared/schedule-core'
 import { ScheduleMonth, ScheduleWeek, ScheduleDay } from './shared/ScheduleCalendar'
 import { Card } from './shared/ui'
 
@@ -2870,7 +2872,7 @@ function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan
         {groupBy==='vehicle'&&
           <label style={{display:'flex',alignItems:'center',gap:5,fontSize:11,color:'#6b7280',
             cursor:'pointer',whiteSpace:'nowrap'}}
-            title="사무실 내근·대중교통·휴가처럼 차량이 걸리지 않은 일정도 함께 세웁니다">
+            title="사무실 내근·대중교통·도보처럼 차량이 걸리지 않은 일정과 휴가도 함께 세웁니다">
             <input type="checkbox" checked={showNoCar}
               onChange={e=>setShowNoCar(e.target.checked)} style={{cursor:'pointer'}}/>
             차량 없는 일정도
@@ -2966,6 +2968,7 @@ function TabSchedule({workers,places,vehicles,plans,loading,onOpenNew,onOpenPlan
         flexWrap:'wrap',background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,
         padding:'8px 12px'}}>
         <span>🏢 사무실</span><span>🚗 법인차량</span><span>🚙 자차</span><span>🚌 대중교통</span>
+        <span>🚕 택시</span><span>🚘 렌터카</span><span>🤝 타사 차량</span><span>🚶 도보</span><span>🧭 기타</span>
         <span>🌴 휴가</span><span>🏛 공가(예비군·건강검진 등)</span>
         <span style={{color:'#c2410c'}}>● 확인 필요(지난 날짜인데 실적 없음)</span>
         <span>↺ 계획과 달랐음</span>
@@ -5707,7 +5710,8 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
             {label:'주유 환급',value:Math.round(literTotal*100)/100,unit:'L',color:'#047857'},
             {label:'자차 하이패스 환급',value:won(ownTollTotal),unit:'원',color:'#047857'},
             {label:'하이패스 대납 지급',value:won(cardTollTotal),unit:'원',color:'#047857'},
-            {label:'대중교통 실비',value:won(transitTotal),unit:'원'},
+            // 🔑 대중교통만이 아니다 — 택시·렌터카·기타도 이 칸에 모인다 (2026-09-24)
+            {label:'이동 실비',value:won(transitTotal),unit:'원'},
             {label:'실적',value:data.actual_count,unit:'건'},
           ]}/>
 
@@ -5725,7 +5729,7 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
                   <th style={thS}>자차 하이패스</th>
                   {/* 주 사용자가 개인 카드로 대신 낸 통행료 (2026-09-05) */}
                   <th style={thS}>하이패스 대납</th>
-                  <th style={thS}>대중교통</th>
+                  <th style={thS} title="대중교통·택시·렌터카 등 본인이 낸 이동 비용">이동 실비</th>
                   <th style={{...thS,width:110}}>정산</th>
                 </tr></thead>
                 <tbody>
@@ -6100,7 +6104,10 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
   const personal=plan.use_type==='personal'
   const atOffice=plan.transport==='office'
   const usesVehicle=!!plan.vehicle_id
-  const isTransit=plan.transport==='transit'
+  // 🔑 「대중교통이면」 이 아니라 «돈 낼 칸이 있는 수단이면» 으로 판정한다 —
+  //    택시·렌터카를 더하면서 transport==='transit' 로 두면 금액을 적을 자리가
+  //    없어 그 돈이 조용히 사라진다 (2026-09-24).
+  const fareLabel=transportFare(plan.transport)
   const vehicle=vehicles.find(v=>v.id===plan.vehicle_id)
   // 개인 사용이면 그 자리에서 청구액을 보여 준다 — 월말에 놀라지 않게
   const rate=vehicle?.rate_per_km??null
@@ -6266,9 +6273,9 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
                   placeholder="0" style={inputS}/>
               </div>
             )}
-            {isTransit&&(
+            {fareLabel&&(
               <div style={{gridColumn:'1 / -1'}}>
-                <label style={labelS}>대중교통비 (원)</label>
+                <label style={labelS}>{fareLabel} (원)</label>
                 <input type="number" value={transit} onChange={e=>setTransit(e.target.value)}
                   placeholder="0" style={inputS}/>
               </div>
@@ -6929,8 +6936,11 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   // 「계획대로」 — 계획 내용을 그대로 실적으로 만든다.
   // 차량을 쓴 일정은 거리·비용을 받아야 정산이 되므로 실적 창을 연다.
   // ⚠ 보고 메일은 화면이 아니라 실적 API 에 걸려 있다 — 아래 두 갈래가 거기서 합쳐진다.
+  // 🔑 돈 낼 칸이 있는 수단(대중교통·택시·렌터카·기타)도 창을 연다. 실적 창의
+  //    판정과 «같은 함수» 를 쓴다 — 갈래가 어긋나면 창이 안 열려 금액을 적을
+  //    기회 자체가 사라진다 (2026-09-24).
   async function handleAsPlanned(){
-    if(editing.vehicle_id||editing.transport==='transit'){
+    if(editing.vehicle_id||transportFare(editing.transport)){
       // ⚠ 여기서는 묻지 않는다. 실적 창에서 저장할 때 물으므로 두 번 묻게 된다.
       onOpenActual&&onOpenActual(editing)
       onClose()
@@ -7247,14 +7257,16 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
         {needsTransport&&(
           <div style={rowS}>
             <label style={labelS}>이동 수단</label>
-            <div style={{display:'flex',gap:6}}>
+            {/* ⚠ 2026-09-24 에 셋에서 여덟으로 늘었다. 한 줄에 밀어 넣으면 글자가
+                뭉개져 무엇인지 못 읽는다 — 줄바꿈하고 최소 너비를 준다. */}
+            <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
               {OUT_TRANSPORTS.map(t=>(
                 // ⚠ 이동 수단을 바꾸면 차량을 «항상» 비운다.
                 //   법인차량 → 자차로 바꿀 때 비우지 않으면, 목록에 없는 법인차 id 가
                 //   그대로 남아 «자차인데 법인차» 로 저장된다(실제로 그렇게 들어간 기록이 있었다).
                 <button key={t.v} onClick={()=>{if(canEdit){setTransport(t.v);setVehicleId('')}}}
                   disabled={!canEdit}
-                  style={{flex:1,padding:'8px 4px',borderRadius:7,cursor:canEdit?'pointer':'default',fontSize:12,
+                  style={{flex:'1 1 96px',padding:'8px 4px',borderRadius:7,cursor:canEdit?'pointer':'default',fontSize:12,
                     fontWeight:transport===t.v?700:500,
                     border:'1px solid '+(transport===t.v?'#1a56db':'#e5e7eb'),
                     background:transport===t.v?'#eff6ff':'#fff',
@@ -8711,6 +8723,270 @@ function HipassUploader({ym,me,showToast}){
   )
 }
 
+// ── 차량 정비·보험 (설정 탭, 2026-09-24 신설 · 마이그레이션 041) ──
+// 여태 차량에는 «정산에 필요한 것» 만 있었다 — 단가·연비·하이패스 카드·색.
+// 정비를 언제 했는지, 보험이 언제 끝나는지를 적을 자리가 없어 아무도 모르고 있다가
+// 지나갔다.
+//
+// 🔑 «법인차량만» 이다 (사용자 결정) — 자차의 정비·보험은 회사가 관리할 일이 아니다.
+// 🔑 필수는 «차량과 날짜» 뿐이고 나머지는 자유 입력이다 (사용자 지시).
+//    적을 것이 마땅치 않아 «기록 자체를 안 남기는» 것이 가장 나쁘다.
+// 🔑 「다음 예정일」을 적어 두면 30일 전부터 여기와 메일이 알린다 —
+//    받는 사람은 대표이사와 그 차의 «주 사용자» 다.
+const CARE_KINDS=[
+  {v:'maintenance',label:'정비·수리',icon:'🔧'},
+  {v:'inspection', label:'정기검사', icon:'📋'},
+  {v:'fuel',       label:'주유·충전', icon:'⛽'},
+  {v:'wash',       label:'세차',     icon:'🫧'},
+  {v:'accident',   label:'사고',     icon:'💥'},
+  {v:'etc',        label:'기타',     icon:'📎'},
+]
+const CARE_KIND_MAP=Object.fromEntries(CARE_KINDS.map(k=>[k.v,k]))
+// 기한이 얼마나 급한가 — 지난 것 / 이레 안 / 그 밖. 색과 문구를 여기서만 정한다.
+function dueTone(n){
+  if(n<0)  return {color:'#b91c1c',bg:'#fef2f2',border:'#fecaca',text:`${-n}일 지남`}
+  if(n===0)return {color:'#b91c1c',bg:'#fef2f2',border:'#fecaca',text:'오늘'}
+  if(n<=7) return {color:'#b45309',bg:'#fffbeb',border:'#fde68a',text:`D-${n}`}
+  return     {color:'#0369a1',bg:'#eff6ff',border:'#bfdbfe',text:`D-${n}`}
+}
+
+function VehicleCare({vehicles,showToast}){
+  // 법인차량만. 숨긴 차는 보이지 않는다 — 처분한 차의 정비를 새로 적을 일은 없다.
+  const cars=vehicles.filter(v=>v.kind==='company'&&v.active!==false)
+  const [vid,setVid]=useState('')
+  const [data,setData]=useState(null)
+  const [due,setDue]=useState([])
+  const [busy,setBusy]=useState(false)
+  const [tab,setTab]=useState('event')     // event | insurance
+  const blankE={kind:'maintenance',event_date:today(),title:'',vendor:'',amount:'',odo_km:'',next_due_date:'',next_due_km:'',note:''}
+  const blankI={insurer:'',policy_no:'',start_date:'',end_date:'',premium:'',driver_scope:'',note:''}
+  const [fe,setFe]=useState(blankE)
+  const [fi,setFi]=useState(blankI)
+
+  // 🔑 고른 차를 «저장하지 않고 계산한다». 효과 안에서 기본값을 setState 하면
+  //    한 번 더 그려지고, 그사이에 목록이 바뀌면 없는 차를 고른 채로 남는다.
+  const cur=(vid&&cars.some(c=>String(c.id)===vid))?vid:(cars[0]?String(cars[0].id):'')
+  const loadDue=async()=>{ try{ setDue(await getVehicleDue()) }catch{ /* 띠만 안 뜬다 */ } }
+  const load=async()=>{
+    if(!cur) return
+    try{ setData(await getVehicleCare(cur)) }
+    catch(e){ showToast('불러오지 못했습니다 — '+e.message) }
+  }
+  // ⚠ 고른 차가 바뀌면 다시 읽는다. setState 는 await «뒤» 에만 일어난다 —
+  //   효과 안에서 곧바로 setState 하면 한 번 더 그려진다.
+  useEffect(()=>{ let alive=true
+    ;(async()=>{
+      if(!cur)return
+      try{ const d=await getVehicleCare(cur); if(alive)setData(d) }catch{ /* 「불러오는 중」 으로 남는다 */ }
+    })()
+    return()=>{alive=false}
+  },[cur])
+  useEffect(()=>{ let alive=true
+    ;(async()=>{ try{ const d=await getVehicleDue(); if(alive)setDue(d) }catch{ /* 띠만 안 뜬다 */ } })()
+    return()=>{alive=false}
+  },[])
+
+  const car=cars.find(c=>String(c.id)===String(cur))
+  const money=n=>n==null?'':Number(n).toLocaleString()
+
+  async function addEvent(){
+    if(!cur){showToast('차량을 골라 주십시오');return}
+    if(!fe.event_date){showToast('날짜를 적어 주십시오');return}
+    try{ setBusy(true)
+      await addVehicleEvent({...fe,vehicle_id:Number(cur)})
+      setFe({...blankE}); showToast('기록했습니다'); await load(); await loadDue()
+    }catch(e){ showToast('실패: '+e.message) } finally{ setBusy(false) }
+  }
+  async function delEvent(r){
+    if(!confirm(`${r.event_date} 「${r.title||CARE_KIND_MAP[r.kind]?.label}」 기록을 지울까요?`))return
+    try{ setBusy(true); await removeVehicleEvent(r.id); await load(); await loadDue() }
+    catch(e){ showToast('실패: '+e.message) } finally{ setBusy(false) }
+  }
+  async function addIns(){
+    if(!cur){showToast('차량을 골라 주십시오');return}
+    try{ setBusy(true)
+      await addVehicleInsurance({...fi,vehicle_id:Number(cur)})
+      setFi({...blankI}); showToast('보험을 등록했습니다'); await load(); await loadDue()
+    }catch(e){ showToast('실패: '+e.message) } finally{ setBusy(false) }
+  }
+  async function delIns(r){
+    if(!confirm(`${r.insurer||'보험'} (${r.start_date||'?'} ~ ${r.end_date||'?'}) 을 지울까요?`))return
+    try{ setBusy(true); await removeVehicleInsurance(r.id); await load(); await loadDue() }
+    catch(e){ showToast('실패: '+e.message) } finally{ setBusy(false) }
+  }
+
+  const inS={padding:'6px 8px',border:'1px solid #e5e7eb',borderRadius:6,fontSize:12,width:'100%'}
+  const lbS={fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:3,display:'block'}
+  const cell=(l,node)=><div><label style={lbS}>{l}</label>{node}</div>
+
+  return(
+    <Card title="차량 정비·보험" style={{flex:1,minWidth:360}}>
+      {/* 🔑 「곧 해야 할 것」 을 맨 위에 둔다 — 차를 고른 뒤라야 보이면 아무도 못 본다 */}
+      {due.length>0&&(
+        <div style={{marginBottom:12}}>
+          <div style={{fontSize:12,fontWeight:700,color:'#374151',marginBottom:6}}>
+            🔔 곧 해야 할 것 {due.length}건
+          </div>
+          <div style={{display:'flex',flexDirection:'column',gap:4}}>
+            {due.map(d=>{
+              const t=dueTone(d.days_left)
+              return(
+                <div key={d.src+d.id} style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',
+                  background:t.bg,border:`1px solid ${t.border}`,borderRadius:7,padding:'6px 10px',fontSize:12}}>
+                  <strong style={{color:t.color}}>{t.text}</strong>
+                  <span style={{fontWeight:600}}>{d.vehicle_name}</span>
+                  <span style={{color:'#6b7280'}}>{d.what}</span>
+                  <span style={{color:'#9ca3af'}}>{d.due_date}</span>
+                  {d.detail&&<span style={{color:'#6b7280'}}>· {d.detail}</span>}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+
+      {cars.length===0
+        ?<p style={{fontSize:12,color:'#9ca3af'}}>등록된 법인차량이 없습니다. 왼쪽 「차량 관리」에서 먼저 등록해 주십시오.</p>
+        :<>
+          <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:10,flexWrap:'wrap'}}>
+            <select value={cur} onChange={e=>setVid(e.target.value)}
+              style={{padding:'6px 10px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}>
+              {cars.map(c=><option key={c.id} value={c.id}>{c.name}{c.plate?` (${c.plate})`:''}</option>)}
+            </select>
+            {[{v:'event',t:'🔧 정비·검사 이력'},{v:'insurance',t:'🛡 보험'}].map(x=>(
+              <button key={x.v} onClick={()=>setTab(x.v)}
+                style={{padding:'6px 12px',borderRadius:7,cursor:'pointer',fontSize:12,
+                  fontWeight:tab===x.v?700:500,
+                  border:'1px solid '+(tab===x.v?'#0369a1':'#e5e7eb'),
+                  background:tab===x.v?'#eff6ff':'#fff',color:tab===x.v?'#0369a1':'#6b7280'}}>{x.t}</button>
+            ))}
+          </div>
+
+          {tab==='event'?(
+            <>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(110px,1fr))',gap:8,
+                background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,padding:10,marginBottom:10}}>
+                {cell('종류',
+                  <select value={fe.kind} onChange={e=>setFe({...fe,kind:e.target.value})} style={inS}>
+                    {CARE_KINDS.map(k=><option key={k.v} value={k.v}>{k.icon} {k.label}</option>)}
+                  </select>)}
+                {cell('날짜 *',<input type="date" value={fe.event_date} onChange={e=>setFe({...fe,event_date:e.target.value})} style={inS}/>)}
+                {cell('내용',<input value={fe.title} onChange={e=>setFe({...fe,title:e.target.value})} placeholder="엔진오일 교환" style={inS}/>)}
+                {cell('업체',<input value={fe.vendor} onChange={e=>setFe({...fe,vendor:e.target.value})} placeholder="○○정비" style={inS}/>)}
+                {cell('금액(원)',<input type="number" value={fe.amount} onChange={e=>setFe({...fe,amount:e.target.value})} placeholder="0" style={inS}/>)}
+                {cell('주행거리(km)',<input type="number" value={fe.odo_km} onChange={e=>setFe({...fe,odo_km:e.target.value})} placeholder="계기판" style={inS}/>)}
+                {cell('다음 예정일',<input type="date" value={fe.next_due_date} onChange={e=>setFe({...fe,next_due_date:e.target.value})} style={inS}/>)}
+                {cell('다음 예정 km',<input type="number" value={fe.next_due_km} onChange={e=>setFe({...fe,next_due_km:e.target.value})} placeholder="선택" style={inS}/>)}
+                <div style={{gridColumn:'1 / -1',display:'flex',gap:8,alignItems:'flex-end'}}>
+                  <div style={{flex:1}}>{cell('메모',<input value={fe.note} onChange={e=>setFe({...fe,note:e.target.value})} style={inS}/>)}</div>
+                  <button onClick={addEvent} disabled={busy}
+                    style={{padding:'7px 16px',borderRadius:7,border:'none',background:busy?'#93c5fd':'#0369a1',
+                      color:'#fff',cursor:busy?'wait':'pointer',fontSize:12,fontWeight:700,whiteSpace:'nowrap'}}>기록</button>
+                </div>
+              </div>
+              <div style={{fontSize:11,color:'#6b7280',marginBottom:6}}>
+                💡 <strong>날짜</strong> 말고는 모두 비워 두셔도 됩니다. <strong>다음 예정일</strong>을 적으면
+                30일 전부터 대표이사와 주 사용자에게 알립니다.
+              </div>
+              <div style={{maxHeight:260,overflowY:'auto'}}>
+                {!data?<p style={{fontSize:12,color:'#9ca3af'}}>불러오는 중…</p>
+                 :data.events.length===0?<p style={{fontSize:12,color:'#9ca3af'}}>아직 기록이 없습니다.</p>
+                 :<table style={{width:'100%',borderCollapse:'collapse'}}>
+                    <thead><tr>
+                      <th style={{...thS,width:80}}>날짜</th><th style={{...thS,width:84}}>종류</th>
+                      <th style={{...thS,textAlign:'left'}}>내용</th>
+                      <th style={{...thS,width:76}}>금액</th><th style={{...thS,width:80}}>다음</th>
+                      <th style={{...thS,width:34}}></th>
+                    </tr></thead>
+                    <tbody>
+                      {data.events.map(r=>(
+                        <tr key={r.id}>
+                          <td style={{...tdS,fontSize:11}}>{r.event_date}</td>
+                          <td style={{...tdS,fontSize:11}}>{CARE_KIND_MAP[r.kind]?.icon} {CARE_KIND_MAP[r.kind]?.label}</td>
+                          <td style={{...tdS,textAlign:'left',fontSize:11}}>
+                            {r.title||<span style={{color:'#9ca3af'}}>—</span>}
+                            {r.vendor&&<span style={{color:'#6b7280'}}> · {r.vendor}</span>}
+                            {r.odo_km!=null&&<span style={{color:'#9ca3af'}}> · {money(r.odo_km)}km</span>}
+                            {r.note&&<div style={{color:'#9ca3af',fontSize:10}}>{r.note}</div>}
+                          </td>
+                          <td style={{...tdS,fontSize:11}}>{r.amount!=null?money(r.amount):''}</td>
+                          <td style={{...tdS,fontSize:11}}>{r.next_due_date||''}</td>
+                          <td style={tdS}>
+                            <span onClick={()=>delEvent(r)} title="지우기"
+                              style={{cursor:'pointer',color:'#b91c1c',fontWeight:700}}>&times;</span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>}
+              </div>
+            </>
+          ):(
+            <>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(110px,1fr))',gap:8,
+                background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,padding:10,marginBottom:10}}>
+                {cell('보험사',<input value={fi.insurer} onChange={e=>setFi({...fi,insurer:e.target.value})} placeholder="○○화재" style={inS}/>)}
+                {cell('증권번호',<input value={fi.policy_no} onChange={e=>setFi({...fi,policy_no:e.target.value})} style={inS}/>)}
+                {cell('시작일',<input type="date" value={fi.start_date} onChange={e=>setFi({...fi,start_date:e.target.value})} style={inS}/>)}
+                {cell('만료일',<input type="date" value={fi.end_date} onChange={e=>setFi({...fi,end_date:e.target.value})} style={inS}/>)}
+                {cell('보험료(원)',<input type="number" value={fi.premium} onChange={e=>setFi({...fi,premium:e.target.value})} placeholder="0" style={inS}/>)}
+                {cell('운전자 범위',<input value={fi.driver_scope} onChange={e=>setFi({...fi,driver_scope:e.target.value})} placeholder="임직원 한정" style={inS}/>)}
+                <div style={{gridColumn:'1 / -1',display:'flex',gap:8,alignItems:'flex-end'}}>
+                  <div style={{flex:1}}>{cell('메모',<input value={fi.note} onChange={e=>setFi({...fi,note:e.target.value})} style={inS}/>)}</div>
+                  <button onClick={addIns} disabled={busy}
+                    style={{padding:'7px 16px',borderRadius:7,border:'none',background:busy?'#93c5fd':'#0369a1',
+                      color:'#fff',cursor:busy?'wait':'pointer',fontSize:12,fontWeight:700,whiteSpace:'nowrap'}}>등록</button>
+                </div>
+              </div>
+              <div style={{fontSize:11,color:'#6b7280',marginBottom:6}}>
+                💡 해마다 한 줄씩 쌓입니다. <strong>가장 늦은 만료일</strong>이 「지금 보험」이고,
+                그것만 알림 대상입니다 — 지난 해 것까지 알리지 않습니다.
+              </div>
+              <div style={{maxHeight:260,overflowY:'auto'}}>
+                {!data?<p style={{fontSize:12,color:'#9ca3af'}}>불러오는 중…</p>
+                 :data.insurances.length===0?<p style={{fontSize:12,color:'#9ca3af'}}>등록된 보험이 없습니다.</p>
+                 :<table style={{width:'100%',borderCollapse:'collapse'}}>
+                    <thead><tr>
+                      <th style={{...thS,textAlign:'left'}}>보험사 · 증권</th>
+                      <th style={{...thS,width:150}}>기간</th>
+                      <th style={{...thS,width:78}}>보험료</th>
+                      <th style={{...thS,width:34}}></th>
+                    </tr></thead>
+                    <tbody>
+                      {data.insurances.map((r,i)=>(
+                        <tr key={r.id} style={{background:i===0?'#f0fdf4':undefined}}>
+                          <td style={{...tdS,textAlign:'left',fontSize:11}}>
+                            {i===0&&<span style={{color:'#047857',fontWeight:700}}>지금 </span>}
+                            {r.insurer||<span style={{color:'#9ca3af'}}>—</span>}
+                            {r.policy_no&&<span style={{color:'#6b7280'}}> · {r.policy_no}</span>}
+                            {r.driver_scope&&<div style={{color:'#9ca3af',fontSize:10}}>{r.driver_scope}</div>}
+                            {r.note&&<div style={{color:'#9ca3af',fontSize:10}}>{r.note}</div>}
+                          </td>
+                          <td style={{...tdS,fontSize:11}}>{r.start_date||'?'} ~ {r.end_date||'?'}</td>
+                          <td style={{...tdS,fontSize:11}}>{r.premium!=null?money(r.premium):''}</td>
+                          <td style={tdS}>
+                            <span onClick={()=>delIns(r)} title="지우기"
+                              style={{cursor:'pointer',color:'#b91c1c',fontWeight:700}}>&times;</span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>}
+              </div>
+            </>
+          )}
+          {car&&!car.assigned_worker_id&&(
+            <div style={{marginTop:8,fontSize:11,color:'#92400e',background:'#fffbeb',
+              border:'1px solid #fde68a',borderRadius:7,padding:'6px 10px'}}>
+              ⚠ 「{car.name}」에 <strong>주 사용자</strong>가 없어 기한 알림이 <strong>대표이사에게만</strong> 갑니다.
+              왼쪽 「차량 관리」에서 지정해 주십시오.
+            </div>
+          )}
+        </>}
+    </Card>
+  )
+}
+
 function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
   const [adding,setAdding]=useState(false)
   const [form,setForm]=useState({owner_worker_id:'',name:'',plate:'',fuel_type:'가솔린',km_per_liter:''})
@@ -9700,6 +9976,7 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <VehicleManager vehicles={vehicles} workers={workers} dupNames={dupNames}
           onChanged={onVehiclesChanged} showToast={showToast}/>
+        <VehicleCare vehicles={vehicles} showToast={showToast}/>
       </div>
       <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:16}}>
         <AbsenceManager absences={absences} setAbsences={setAbsences} workers={workers}

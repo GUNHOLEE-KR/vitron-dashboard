@@ -1058,6 +1058,267 @@ app.patch('/api/schedule/vehicles/:id', async (req, res) => {
   }
 })
 
+// ── 차량 관리 — 정비·검사·보험 (2026-09-24, 마이그레이션 041) ──
+// 🔑 «법인차량만» 이다 (사용자 결정). 자차의 정비·보험은 회사가 관리할 일이 아니다.
+//    표에는 vehicle_id 만 있으므로 «여기서» 거른다 — 한 곳에서만 거르면 새 API 를
+//    더할 때 조용히 빠뜨린다. 그래서 검사 함수를 하나 두고 모두 그것을 쓴다.
+// 권한 = 로그인한 사람이면 누구나. 설정 탭의 다른 카드(직원·차량·장소)와 같은 규칙이다
+//    (2026-08-21 결정). 금액이 들어가지만 «결재» 가 아니라 «기록» 이라 같이 둔다.
+async function companyVehicleOr400(vehicleId, res) {
+  const id = Number(vehicleId)
+  if (!id) { res.status(400).json({ error: '차량을 골라 주십시오.' }); return null }
+  const { rows } = await pool.query(
+    'SELECT id, name, plate, kind, assigned_worker_id FROM schedule_vehicles WHERE id = $1', [id])
+  if (!rows.length) { res.status(404).json({ error: '해당 차량을 찾을 수 없습니다.' }); return null }
+  if (rows[0].kind !== 'company') {
+    res.status(400).json({ error: '정비·보험 기록은 법인차량에만 남깁니다.' }); return null
+  }
+  return rows[0]
+}
+
+const VEHICLE_EVENT_KINDS = ['maintenance', 'inspection', 'fuel', 'wash', 'accident', 'etc']
+// 「곧 해야 할 것」 으로 보는 기간. 보험 갱신·정기검사를 준비할 시간이 필요하다.
+const VEHICLE_DUE_DAYS = 30
+
+// 한 차의 이력 전부. vehicle_id 가 없으면 법인차량 «전체» 를 준다.
+app.get('/api/vehicle-care', requireLogin, async (req, res) => {
+  const vid = req.query.vehicle_id ? Number(req.query.vehicle_id) : null
+  try {
+    const { rows: events } = await pool.query(
+      `SELECT e.*, w.display_name AS created_by_name
+         FROM vehicle_events e
+         LEFT JOIN kpi_users w ON w.id = e.created_by
+         JOIN schedule_vehicles v ON v.id = e.vehicle_id AND v.kind = 'company'
+        WHERE ($1::int IS NULL OR e.vehicle_id = $1::int)
+        ORDER BY e.event_date DESC, e.id DESC`, [vid])
+    const { rows: insurances } = await pool.query(
+      `SELECT i.*
+         FROM vehicle_insurances i
+         JOIN schedule_vehicles v ON v.id = i.vehicle_id AND v.kind = 'company'
+        WHERE ($1::int IS NULL OR i.vehicle_id = $1::int)
+        -- 🔑 «지금 것» 이 맨 위로 온다. 끝나는 날이 없는 줄은 맨 아래.
+        ORDER BY (i.end_date IS NULL) ASC, i.end_date DESC, i.id DESC`, [vid])
+    res.json({ events, insurances })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 「곧 해야 할 것」 — 화면 띠와 설정 카드가 함께 쓴다. 메일도 이 조회를 쓴다.
+// 🔑 지난 것도 «함께» 준다(days_left 가 음수). 지나간 것이 사라지면 놓친 줄도 모른다.
+async function vehicleDueList(withinDays = VEHICLE_DUE_DAYS) {
+  const { rows } = await pool.query(
+    `SELECT * FROM (
+       SELECT 'insurance' AS src, i.id, i.vehicle_id, v.name AS vehicle_name, v.plate,
+              v.assigned_worker_id, '보험 만료' AS what,
+              coalesce(i.insurer, '') AS detail, i.end_date AS due_date,
+              i.alerted_for
+         FROM vehicle_insurances i
+         JOIN schedule_vehicles v ON v.id = i.vehicle_id AND v.kind = 'company' AND v.active
+        WHERE i.end_date IS NOT NULL
+          -- 🔑 그 차의 «가장 늦은» 보험만 본다. 작년 것까지 알리면 해마다 쌓여
+          --    「이미 갱신했는데 왜 또 알리나」 가 된다.
+          AND i.end_date = (SELECT max(x.end_date) FROM vehicle_insurances x
+                             WHERE x.vehicle_id = i.vehicle_id)
+       UNION ALL
+       SELECT 'event', e.id, e.vehicle_id, v.name, v.plate,
+              v.assigned_worker_id,
+              CASE e.kind WHEN 'inspection' THEN '정기검사' ELSE '정비 예정' END,
+              coalesce(e.title, ''), e.next_due_date, e.alerted_for
+         FROM vehicle_events e
+         JOIN schedule_vehicles v ON v.id = e.vehicle_id AND v.kind = 'company' AND v.active
+        WHERE e.next_due_date IS NOT NULL
+     ) d
+     WHERE d.due_date <= CURRENT_DATE + $1::int
+     ORDER BY d.due_date ASC`, [withinDays])
+  return rows.map(r => ({
+    ...r,
+    days_left: Math.round(
+      (new Date(r.due_date + 'T00:00:00') - new Date(todayLocal() + 'T00:00:00')) / 86400000),
+  }))
+}
+
+app.get('/api/vehicle-care/due', requireLogin, async (req, res) => {
+  try {
+    res.json(await vehicleDueList())
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ── 하루 1회 — 기한이 다가온 것을 알린다 ──────────────────────
+// 받는 사람 = 대표이사(can_approve_settlement 전원) + «그 차의 주 사용자» (사용자 지시).
+//
+// 🔑 알린 뒤에는 «그 기한» 을 적어 둔다(alerted_for). 날짜만 적으면 30일 내내 매일
+//    보내고, 「보냄」 표시만 두면 기한을 미뤘을 때 다시 알리지 못한다.
+//    IS DISTINCT FROM 으로 비교한다 — NULL 끼리도 제대로 갈린다(이 저장소가 =·IN 으로
+//    NULL 에 세 번 뚫린 뒤의 규칙).
+// ⚠ 메일이 실패해도 alerted_for 를 적는다. 안 적으면 메일 서버가 막힌 동안 날마다
+//   다시 시도하다가, 살아나는 순간 밀린 것이 한꺼번에 쏟아진다.
+//   못 보낸 사실은 화면의 띠가 대신 말해 준다 — 기한은 사라지지 않는다.
+const VEHICLE_DUE_CHECK_MS = 24 * 60 * 60 * 1000
+async function checkVehicleDue() {
+  const due = await vehicleDueList()
+  // 이미 «그 기한으로» 알린 것은 뺀다
+  const fresh = due.filter(d => String(d.alerted_for || '') !== String(d.due_date))
+  if (!fresh.length) return 0
+
+  const boss = await approverEmails()
+  // 주 사용자 주소 — 차마다 다르므로 «받는 사람별로» 묶어 한 통씩 보낸다
+  const { rows: ws } = await pool.query('SELECT id, email FROM workers WHERE email IS NOT NULL')
+  const emailOf = new Map(ws.map(w => [Number(w.id), w.email]))
+
+  const byTo = new Map()
+  for (const d of fresh) {
+    const tos = [boss, emailOf.get(Number(d.assigned_worker_id))].filter(Boolean)
+    const key = [...new Set(tos.join(', ').split(', ').filter(Boolean))].sort().join(', ')
+    if (!key) continue
+    if (!byTo.has(key)) byTo.set(key, [])
+    byTo.get(key).push(d)
+  }
+  for (const [to, items] of byTo) mailer.notifyVehicleDue({ items, to })
+
+  // 알린 자취를 남긴다 (표가 둘이라 나눠 적는다)
+  for (const src of ['insurance', 'event']) {
+    const ids = fresh.filter(d => d.src === src).map(d => d.id)
+    if (!ids.length) continue
+    await pool.query(
+      `UPDATE ${src === 'insurance' ? 'vehicle_insurances' : 'vehicle_events'}
+          SET alerted_for = ${src === 'insurance' ? 'end_date' : 'next_due_date'},
+              alerted_at = now()
+        WHERE id = ANY($1::int[])`, [ids])
+  }
+  console.log(`[vehicle] 기한 알림 ${fresh.length}건 · 수신 묶음 ${byTo.size}개`)
+  return fresh.length
+}
+
+// ── 이력 한 줄 ──────────────────────────────────────────────
+app.post('/api/vehicle-care/events', requireLogin, async (req, res) => {
+  const b = req.body || {}
+  const v = await companyVehicleOr400(b.vehicle_id, res)
+  if (!v) return
+  if (!b.event_date) return res.status(400).json({ error: '날짜를 적어 주십시오.' })
+  const kind = VEHICLE_EVENT_KINDS.includes(b.kind) ? b.kind : 'maintenance'
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO vehicle_events
+         (vehicle_id, kind, event_date, title, vendor, amount, odo_km,
+          next_due_date, next_due_km, note, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [v.id, kind, b.event_date,
+       String(b.title || '').slice(0, 200) || null,
+       String(b.vendor || '').slice(0, 200) || null,
+       b.amount === '' || b.amount == null ? null : Number(b.amount),
+       b.odo_km === '' || b.odo_km == null ? null : Number(b.odo_km),
+       b.next_due_date || null,
+       b.next_due_km === '' || b.next_due_km == null ? null : Number(b.next_due_km),
+       b.note || null, req.session.uid])
+    res.json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 고치기 — 보낸 칸만 바꾼다. 안 보낸 칸을 NULL 로 덮어쓰면 남이 적어 둔 것이 지워진다
+// (차량 PATCH 에서 실제로 겪은 사고, 2026-08-25).
+const VEHICLE_EVENT_COLS = ['kind', 'event_date', 'title', 'vendor', 'amount', 'odo_km',
+                            'next_due_date', 'next_due_km', 'note']
+app.patch('/api/vehicle-care/events/:id', requireLogin, async (req, res) => {
+  const b = req.body || {}
+  const sets = [], vals = []
+  for (const col of VEHICLE_EVENT_COLS) {
+    if (b[col] === undefined) continue
+    let v = b[col]
+    if (col === 'kind' && !VEHICLE_EVENT_KINDS.includes(v)) continue
+    if (['amount', 'odo_km', 'next_due_km'].includes(col)) v = (v === '' || v == null) ? null : Number(v)
+    else if (v === '') v = null
+    vals.push(v)
+    sets.push(`${col} = $${vals.length}`)
+  }
+  // 🔑 기한을 고치면 «다시 알려야» 한다 — 안 그러면 미룬 일이 영영 안 알려진다.
+  if (b.next_due_date !== undefined) sets.push('alerted_for = NULL')
+  if (!sets.length) return res.json({ ok: true })
+  vals.push(Number(req.params.id))
+  try {
+    const { rowCount } = await pool.query(
+      `UPDATE vehicle_events SET ${sets.join(', ')}, updated_at = now()
+        WHERE id = $${vals.length}`, vals)
+    if (!rowCount) return res.status(404).json({ error: '해당 기록을 찾을 수 없습니다.' })
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.delete('/api/vehicle-care/events/:id', requireLogin, async (req, res) => {
+  try {
+    const { rowCount } = await pool.query('DELETE FROM vehicle_events WHERE id = $1', [Number(req.params.id)])
+    if (!rowCount) return res.status(404).json({ error: '해당 기록을 찾을 수 없습니다.' })
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ── 보험 ────────────────────────────────────────────────────
+app.post('/api/vehicle-care/insurances', requireLogin, async (req, res) => {
+  const b = req.body || {}
+  const v = await companyVehicleOr400(b.vehicle_id, res)
+  if (!v) return
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO vehicle_insurances
+         (vehicle_id, insurer, policy_no, start_date, end_date, premium, driver_scope, note, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [v.id, String(b.insurer || '').slice(0, 100) || null,
+       String(b.policy_no || '').slice(0, 100) || null,
+       b.start_date || null, b.end_date || null,
+       b.premium === '' || b.premium == null ? null : Number(b.premium),
+       String(b.driver_scope || '').slice(0, 100) || null,
+       b.note || null, req.session.uid])
+    res.json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+const VEHICLE_INS_COLS = ['insurer', 'policy_no', 'start_date', 'end_date',
+                          'premium', 'driver_scope', 'note']
+app.patch('/api/vehicle-care/insurances/:id', requireLogin, async (req, res) => {
+  const b = req.body || {}
+  const sets = [], vals = []
+  for (const col of VEHICLE_INS_COLS) {
+    if (b[col] === undefined) continue
+    let v = b[col]
+    if (col === 'premium') v = (v === '' || v == null) ? null : Number(v)
+    else if (v === '') v = null
+    vals.push(v)
+    sets.push(`${col} = $${vals.length}`)
+  }
+  if (b.end_date !== undefined) sets.push('alerted_for = NULL')
+  if (!sets.length) return res.json({ ok: true })
+  vals.push(Number(req.params.id))
+  try {
+    const { rowCount } = await pool.query(
+      `UPDATE vehicle_insurances SET ${sets.join(', ')}, updated_at = now()
+        WHERE id = $${vals.length}`, vals)
+    if (!rowCount) return res.status(404).json({ error: '해당 보험을 찾을 수 없습니다.' })
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.delete('/api/vehicle-care/insurances/:id', requireLogin, async (req, res) => {
+  try {
+    const { rowCount } = await pool.query('DELETE FROM vehicle_insurances WHERE id = $1', [Number(req.params.id)])
+    if (!rowCount) return res.status(404).json({ error: '해당 보험을 찾을 수 없습니다.' })
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 // ── 동승 (2026-09-14, 마이그레이션 039) ─────────────────────────
 // 🔑 같은 날 같은 차를 «함께 타는» 계획들은 carpool_group 이 같다. 묶음의 «대표» 는
 //    살아 있는 구성원 중 번호가 가장 작은 계획 — 먼저 예약한 사람이다 (사용자 결정).
@@ -4811,4 +5072,10 @@ app.listen(PORT, () => {
   const run = () => syncHolidays().catch(e => console.warn('공휴일 동기화 실패:', e.message))
   run()
   setInterval(run, HOLIDAY_SYNC_MS)
+  // 차량 보험 만료·정기검사·정비 예정 — 기동할 때 한 번, 그 뒤 하루 1회.
+  // ⚠ 공휴일과 같은 원칙 — 실패해도 서버를 멈추지 않는다.
+  const vcheck = () => checkVehicleDue()
+    .catch(e => console.warn('[vehicle] 기한 점검 실패:', e.message))
+  vcheck()
+  setInterval(vcheck, VEHICLE_DUE_CHECK_MS)
 })

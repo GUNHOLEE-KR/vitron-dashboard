@@ -296,7 +296,7 @@ function buildDone({ actorName, actorEmail, a, sender }) {
   if (a.distance_km != null) spent.push(`  이동 거리 : ${Number(a.distance_km)} km`)
   if (Number(a.toll_fee))    spent.push(`  하이패스  : ${won(a.toll_fee)} 원`)
   if (Number(a.fuel_fee))    spent.push(`  주유비    : ${won(a.fuel_fee)} 원`)
-  if (Number(a.transit_fee)) spent.push(`  대중교통  : ${won(a.transit_fee)} 원`)
+  if (Number(a.transit_fee)) spent.push(`  이동 실비 : ${won(a.transit_fee)} 원`)
   if (spent.length) body.push('실제', ...spent, '')
 
   // 메모도 개인 사용이면 싣지 않는다 — 위와 같은 이유다
@@ -461,7 +461,7 @@ function buildSettlement({ ym, row, actorName, actorEmail, sender }) {
     : liter > 0 ? `주유 환급 ${liter}L`
       : Number(row.card_toll_amount || 0) > 0
         ? `하이패스 대납 ${won(row.card_toll_amount)}원`
-        : transit > 0 ? `대중교통 ${won(transit)}원`
+        : transit > 0 ? `이동 실비 ${won(transit)}원`
           : '정산 내역 없음'
   const subject = `[정산] ${label} · ${row.worker_name} · ${head}`
 
@@ -491,7 +491,8 @@ function buildSettlement({ ym, row, actorName, actorEmail, sender }) {
       '    본인이 다녀온 것뿐 아니라 다른 분이 그 차로 다녀온 통행도 포함됩니다.', '')
   }
   if (transit > 0) {
-    body.push('■ 대중교통 실비 (회사 → 본인)', `    ${won(transit)}원`, '')
+    // 🔑 대중교통만이 아니다 — 택시·렌터카·기타도 이 칸에 모인다 (2026-09-24)
+    body.push('■ 이동 실비 (회사 → 본인)', `    ${won(transit)}원`, '')
   }
   if (charge === 0 && liter === 0 && transit === 0 && ownToll === 0 && cardToll === 0) {
     body.push('이달에는 청구하거나 환급할 금액이 없습니다.', '')
@@ -833,6 +834,50 @@ function notifyPurchase({ kind, actor, purchase, to, reason, sender, onSenderFai
   }
 }
 
+// ── 차량 보험 만료·정기검사·정비 예정 알림 (2026-09-24 신설) ──
+// 🔑 받는 사람은 «부르는 쪽» 이 정한다 — mailer 는 DB 를 모른다는 원칙 그대로다.
+//    대표이사 + 그 차의 주 사용자가 받는다 (사용자 지시).
+// 🔑 한 통에 «그 사람이 알아야 할 것 전부» 를 담는다. 건마다 보내면 보험 갱신 철에
+//    하루 다섯 통이 와서 아무도 안 읽는다.
+// ⚠ 부르는 쪽은 await 하지 않아도 된다. 메일이 실패해도 화면의 띠는 그대로 뜬다.
+function notifyVehicleDue({ items, to }) {
+  try {
+    if (!isEnabled()) return
+    const list = (items || []).filter(Boolean)
+    if (!list.length || !to) return
+    const c = cfg()
+
+    // 제목은 «가장 급한 것» 을 말한다 — 목록 제목으로는 열어 볼 까닭이 안 생긴다.
+    const first = list[0]
+    const dLabel = n => (n < 0 ? `${-n}일 지남` : n === 0 ? '오늘' : `D-${n}`)
+    const head = `${first.vehicle_name} ${first.what} ${dLabel(first.days_left)}`
+    const subject = list.length > 1
+      ? `[차량] ${head} 외 ${list.length - 1}건`
+      : `[차량] ${head}`
+
+    const body = ['법인차량에서 곧 처리해야 할 것이 있습니다.', '']
+    for (const it of list) {
+      const car = it.plate ? `${it.vehicle_name} (${it.plate})` : it.vehicle_name
+      body.push(`■ ${car} — ${it.what}`)
+      body.push(`    기한 : ${it.due_date} (${dLabel(it.days_left)})`)
+      if (it.detail) body.push(`    내용 : ${it.detail}`)
+      body.push('')
+    }
+    body.push('설정 탭의 「차량 정비·보험」 에서 기록을 고치거나 새로 적을 수 있습니다.',
+      '', 'http://vitron-nas:8082', '', '— 바이트론 이앤에스 업무 현황 대시보드')
+
+    send({
+      ...fromOf({ sender: null, actorName: '차량', actorEmail: null }),
+      // 🔴 시험 중이면 전부 시험 주소로 돌린다 (다른 알림과 같은 규칙)
+      to: c.testTo || to,
+      subject,
+      text: body.join('\n'),
+    })
+  } catch (e) {
+    console.error(`[mail] notifyVehicleDue error :: ${e.message}`)
+  }
+}
+
 module.exports = { notify, notifyDone, notifyVacation, notifyPurchase, notifySettlement,
-  notifyHipass,
+  notifyHipass, notifyVehicleDue,
   isEnabled, lastResult, isVehiclePlan, vacDays, vacHours, verifyLogin, setAccount }

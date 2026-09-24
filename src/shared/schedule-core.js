@@ -11,16 +11,34 @@
 // ── 이동 수단 ───────────────────────────────────────────────
 // 표시용에는 사무실과 «이동 없음» 도 필요하다(달력 배지·일 뷰).
 // none 을 빼 두면 휴가 배지가 fallback 으로 🏢(사무실) 처럼 보인다.
+// 🔑 «차 없이 가는 출장» 을 적을 자리 (2026-09-24 지시). 여태 셋뿐이라 도보·택시·
+//    렌터카·남의 차를 얻어 탄 날을 셋 중 하나로 밀어 넣거나 내근으로 적어야 했다.
+// 🔑 fare = «본인이 돈을 낸 이동» 의 칸 이름. 이 값이 있는 수단만 실적 창에
+//    금액 칸을 내고, 그 금액은 정산에서 «이동 실비» 로 모인다.
+//    🔴 fare 를 빠뜨리면 돈을 적을 자리가 없어 «조용히 사라진다» — 수단을
+//       더할 때 반드시 함께 정할 것.
+// ⚠ needsVehicle 인 것만 배차 겹침 검사에 걸린다. 렌터카·타사 차량은 회사 차가
+//   아니므로 false 다 — true 로 두면 있지도 않은 겹침 경고가 뜬다.
 export const OUT_TRANSPORTS = [
   { v: 'company_car', label: '법인차량', icon: '🚗', needsVehicle: true },
   { v: 'own_car', label: '자차', icon: '🚙', needsVehicle: true },
-  { v: 'transit', label: '대중교통', icon: '🚌', needsVehicle: false },
+  { v: 'transit', label: '대중교통', icon: '🚌', needsVehicle: false, fare: '대중교통비' },
+  { v: 'taxi', label: '택시', icon: '🚕', needsVehicle: false, fare: '택시비' },
+  { v: 'rental', label: '렌터카', icon: '🚘', needsVehicle: false, fare: '렌터카 비용' },
+  { v: 'other_car', label: '타사 차량 동승', icon: '🤝', needsVehicle: false },
+  { v: 'walk', label: '도보', icon: '🚶', needsVehicle: false },
+  { v: 'etc', label: '기타', icon: '🧭', needsVehicle: false, fare: '이동 비용' },
 ]
 export const TRANSPORT_MAP = Object.fromEntries([
   ...OUT_TRANSPORTS,
   { v: 'office', label: '사무실', icon: '🏢', needsVehicle: false },
   { v: 'none', label: '이동 없음', icon: '🌴', needsVehicle: false },
 ].map(t => [t.v, t]))
+
+// 이 수단으로 다녀오면 «본인이 낸 돈» 을 적을 칸이 있는가. 있으면 그 칸 이름.
+// 🔑 한 곳에서만 정한다 — 화면(실적 창)과 「계획대로 완료」가 갈래를 달리 판정하면
+//    창이 안 열려 돈을 적을 기회 자체가 사라진다.
+export const transportFare = t => (TRANSPORT_MAP[t] || {}).fare || null
 
 // 장소 목록 맨 위의 고정 항목. 장소 목록(DB)에 넣지 않는다 —
 // 사무실은 회사 자체이고 거리가 0 이라 관리 대상을 늘릴 이유가 없다.
@@ -255,7 +273,7 @@ export function buildGroupRows(groupBy, workers, places, vehicles, plans, opts =
   //    정작 배차가 묻힌다 (2026-08-25 지적). 기본으로 감추고, 체크 한 번으로 꺼낸다.
   if (opts.showNoCar) {
     rows.push({
-      key: 'nocar', label: '차량 없음', sub: '사무실·대중교통·휴가', color: '#94a3b8',
+      key: 'nocar', label: '차량 없음', sub: '사무실·차 없는 이동·휴가', color: '#94a3b8',
       match: p => !p.vehicle_id, cellDefaults: {},
     })
   }
