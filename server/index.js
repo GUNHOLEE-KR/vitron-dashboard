@@ -2325,6 +2325,130 @@ app.get('/api/expenses/summary', requireLogin, async (req, res) => {
   }
 })
 
+// ── 프로젝트 손익 (2026-09-25 신설, 마이그레이션 044) ────────────
+// 대표이사 전용. 손익 = 계약금액(공급가) − (인건비 + 경비 + 이동 + 구매).
+// 1단계 = 계약금액 이력 · 사람별 시간당 단가 이력.
+//
+// 🔴 막는 기준은 «직책 대표이사» 다 (isBossUser). can_approve_settlement 로 막으면
+//    안 된다 — 지금 그 값이 참인 사람이 둘이라(임시 승인 권한을 받은 이건호)
+//    «전 직원의 시간당 단가» 가 대표이사가 아닌 사람에게 새어 나간다.
+// 🔑 화면에서 탭을 숨기는 것과 «별개로» 서버가 응답 자체를 거절한다. 주소를 직접
+//    쳐서 부르는 길이 있기 때문이다.
+async function requireBoss(req, res, next) {
+  try {
+    if (!await isBossUser(req.session?.uid)) {
+      return res.status(403).json({ error: '대표이사만 볼 수 있는 화면입니다.' })
+    }
+    next()
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+}
+
+// 공급가 — 부가세 포함이면 ÷1.1 을 «원 단위 반올림». 한 곳에서만 계산한다.
+const supplyOf = (amount, vatIncluded) =>
+  vatIncluded ? Math.round(Number(amount) / 1.1) : Math.round(Number(amount))
+
+// ── 계약금액 — 고치지 않고 «쌓는다» (사용자 지시: 이력 포함) ──
+app.get('/api/profit/contracts', requireLogin, requireBoss, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT c.*, u.display_name AS created_by_name
+         FROM project_contracts c LEFT JOIN kpi_users u ON u.id = c.created_by
+        ORDER BY coalesce(c.parent_key, c.parent_text), c.contract_date DESC, c.id DESC`)
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/profit/contracts', requireLogin, requireBoss, async (req, res) => {
+  const b = req.body || {}
+  const parentText = String(b.parent_text || '').trim().slice(0, 200)
+  if (!parentText) return res.status(400).json({ error: '프로젝트를 골라 주십시오.' })
+  const amount = Math.round(Number(b.amount))
+  if (!Number.isFinite(amount) || amount < 0) {
+    return res.status(400).json({ error: '계약금액을 0 이상 숫자로 적어 주십시오.' })
+  }
+  const vat = !!b.vat_included
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO project_contracts
+         (parent_key, parent_text, amount, vat_included, supply_amount,
+          contract_date, kind, note, created_by)
+       VALUES ($1,$2,$3,$4,$5, coalesce($6::date, CURRENT_DATE), $7,$8,$9)
+       RETURNING *`,
+      [String(b.parent_key || '').slice(0, 40) || null, parentText,
+       amount, vat, supplyOf(amount, vat),
+       b.contract_date || null,
+       b.kind === 'change' ? 'change' : 'initial',
+       String(b.note || '').trim() || null,
+       req.session.uid])
+    res.json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 지우기는 «잘못 넣은 줄» 을 걷어 내는 용도다. 계약이 바뀐 것은 지우지 말고 새 줄을 넣는다.
+app.delete('/api/profit/contracts/:id', requireLogin, requireBoss, async (req, res) => {
+  try {
+    const r = await pool.query('DELETE FROM project_contracts WHERE id = $1', [Number(req.params.id)])
+    if (!r.rowCount) return res.status(404).json({ error: '해당 계약 기록을 찾을 수 없습니다.' })
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ── 인건비 단가 — 사람별 «시간당», 적용 시작일 이력 ──
+app.get('/api/profit/rates', requireLogin, requireBoss, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT r.*, w.name AS worker_name, w.position, w.active
+         FROM worker_hourly_rates r LEFT JOIN workers w ON w.id = r.worker_id
+        ORDER BY r.worker_id, r.effective_from DESC`)
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 같은 사람·같은 시작일이면 «덮어쓴다» — 같은 날 두 단가가 있으면 어느 것이 맞는지 모른다.
+app.post('/api/profit/rates', requireLogin, requireBoss, async (req, res) => {
+  const b = req.body || {}
+  const workerId = Number(b.worker_id)
+  if (!workerId) return res.status(400).json({ error: '사람을 골라 주십시오.' })
+  if (!b.effective_from) return res.status(400).json({ error: '적용 시작일을 적어 주십시오.' })
+  const rate = Math.round(Number(b.hourly_rate))
+  if (!Number.isFinite(rate) || rate < 0) {
+    return res.status(400).json({ error: '시간당 단가를 0 이상 숫자로 적어 주십시오.' })
+  }
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO worker_hourly_rates (worker_id, hourly_rate, effective_from, note, created_by)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (worker_id, effective_from)
+       DO UPDATE SET hourly_rate = EXCLUDED.hourly_rate, note = EXCLUDED.note,
+                     created_by = EXCLUDED.created_by, created_at = now()
+       RETURNING *`,
+      [workerId, rate, b.effective_from, String(b.note || '').trim() || null, req.session.uid])
+    res.json(rows[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.delete('/api/profit/rates/:id', requireLogin, requireBoss, async (req, res) => {
+  try {
+    const r = await pool.query('DELETE FROM worker_hourly_rates WHERE id = $1', [Number(req.params.id)])
+    if (!r.rowCount) return res.status(404).json({ error: '해당 단가 기록을 찾을 수 없습니다.' })
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 // ── 구매 요청 (2026-08-26 신설) ──────────────────────────────
 // 승인된 것이 곧 «구매 이력» 이다. 표를 따로 두지 않는 이유는, 요청과 이력을 나누면
 // 같은 건이 두 곳에 생겨 어느 쪽이 맞는지 알 수 없게 되기 때문이다.
@@ -3141,6 +3265,9 @@ app.get('/api/auth/me', async (req, res) => {
       role: session.role, worker_id: session.workerId,
       must_change_password: session.mustChange,
       can_approve: await canApprove(session.uid),
+      // 「손익」 탭을 띄울지. 🔑 직책으로 판정한다 — can_approve 와 다르다(requireBoss 참고).
+      //   ⚠ 화면에서 탭을 숨기는 «편의» 일 뿐이다. 막는 것은 서버(requireBoss)가 한다.
+      is_boss: await isBossUser(session.uid),
       // ⚠ 세션 쿠키에 담지 않고 «매번 DB 를 본다». 등록을 마치면 새로고침만으로
       //   게이트가 풀려야 하는데, 쿠키에 넣으면 다시 로그인할 때까지 남는다.
       need_mail_password: await needsMailPassword(session.uid),

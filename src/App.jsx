@@ -9,6 +9,8 @@ import { getMyMailSender, saveMyMailSender, removeMyMailSender,
 import { getAbsences, addAbsence, removeAbsence } from './repositories/absenceRepo'
 import { getExpenses, getExpenseSummary, addExpense, updateExpense,
          removeExpense, receiptUrl } from './repositories/expenseRepo'
+import { getContracts, addContract, removeContract,
+         getRates, addRate, removeRate } from './repositories/profitRepo'
 import { getVehicleCare, getVehicleDue, addVehicleEvent, removeVehicleEvent,
          addVehicleInsurance, removeVehicleInsurance } from './repositories/vehicleCareRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
@@ -103,7 +105,10 @@ const FIXED_PARENT='고정업무'
 // 값 80 = 배경의 위아래 여백 40+40 (여백이 다른 팝업은 제 값을 따로 쓴다).
 const MODAL_MAX_H='calc(100vh - 80px)'
 
-const TABS=['today','daily','weekly','monthly','yearly','schedule','agenda','purchase','expense','settings']
+// ⚠ 'profit'(손익)은 «대표이사에게만» 보인다 — Dashboard 의 canTab 이 거른다.
+//   다른 사람이 #profit 으로 들어와도 첫 탭으로 돌려보내고, 서버도 403 으로 막는다.
+const TABS=['today','daily','weekly','monthly','yearly','schedule','agenda','purchase','expense','profit','settings']
+const canTabFor=(t,isBoss)=>t!=='profit'||!!isBoss
 // ── 주소로 탭을 연다 (2026-08-26 신설) ──────────────────────
 // 사내 포털의 타일이 «탭까지» 열어야 한다는 지시. 그전에는 # 를 아무도 읽지 않아
 // 링크에 #schedule 을 붙여 두어도 늘 첫 탭이 열렸다.
@@ -127,7 +132,7 @@ const hashFor=(tab,view)=>
 // ⚠ 탭 «키» 는 agenda 그대로 둔다 — 주소(#agenda)를 사내 포털 타일이 가리키고 있다.
 //   표기만 「회의록」으로 바꾼다 (2026-09-05 지시 — 안건을 회의 아래로 묶었다).
 const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'월간',yearly:'연간',
-  schedule:'스케줄',agenda:'회의록',purchase:'구매',expense:'경비',settings:'설정'}
+  schedule:'스케줄',agenda:'회의록',purchase:'구매',expense:'경비',profit:'손익',settings:'설정'}
 
 // 안건 상태 — 완료는 «두 단계» 다 (2026-09-04 지시).
 //   done      담당자가 「했다」 고 표시
@@ -1390,8 +1395,16 @@ function NeedMailPasswordScreen({me,onDone,onSkip,onBack}){
 function Dashboard({me,onLoggedOut}){
   // 우측 아래 💬 의견 보내기. 로그인한 뒤라 이름이 자동으로 채워진다.
   useFeedbackWidget('업무 현황 대시보드', me?.name)
+  // 「손익」 탭은 대표이사에게만 (2026-09-25). 🔑 직책으로 판정한 값(me.is_boss)이다 —
+  //   승인 권한(can_approve)으로 가르면 대표이사가 아닌 사람에게도 단가가 보인다.
+  //   ⚠ 여기서 숨기는 것은 편의이고, 막는 것은 서버(requireBoss)다.
+  const isBoss=!!me?.is_boss
+  const canTab=t=>canTabFor(t,isBoss)
   // 주소에 적힌 탭으로 연다. 없으면 늘 보던 「오늘 업무」.
-  const [tab,setTab]=useState(()=>parseHash()?.tab||'today')
+  const [tab,setTab]=useState(()=>{
+    const t=parseHash()?.tab
+    return t&&canTab(t)?t:'today'
+  })
   // 스케줄 탭 «안의 보기» — 포털의 「휴가」 타일이 #schedule/vac 으로 들어온다
   const [schedView,setSchedView]=useState(()=>parseHash()?.view||'week')
 
@@ -1401,7 +1414,8 @@ function Dashboard({me,onLoggedOut}){
       const h=parseHash()
       // 모르는 주소면 화면은 그대로 두고 «주소만» 되돌린다.
       // 그냥 두면 «설정 화면인데 주소는 #nosuchtab» 처럼 어긋난 채로 남는다.
-      if(!h){ window.history.replaceState(null,'',hashFor(tab,schedView)); return }
+      // 볼 수 없는 탭(대표이사가 아닌데 #profit)도 «모르는 주소» 와 똑같이 되돌린다.
+      if(!h||!canTabFor(h.tab,isBoss)){ window.history.replaceState(null,'',hashFor(tab,schedView)); return }
       setTab(h.tab)
       // 🔑 뒤가 없으면 «기본 보기» 로 되돌린다. 안 그러면 #schedule 로 들어와도
       //    앞서 보던 휴가 화면이 그대로 남는다(실제로 그랬다).
@@ -1411,7 +1425,7 @@ function Dashboard({me,onLoggedOut}){
     return ()=>window.removeEventListener('hashchange',on)
     // ⚠ tab·schedView 를 함께 본다 — 듣는 함수가 «지금 화면» 을 알아야 모르는 주소를
     //   제자리로 되돌릴 수 있다. 한 번만 등록하면 처음 값에 묶여 늘 「오늘 업무」가 된다.
-  },[tab,schedView])
+  },[tab,schedView,isBoss])
 
   // 탭을 옮기면 주소도 따라간다 — 그래야 지금 화면을 그대로 즐겨찾기할 수 있다.
   // ⚠ pushState 가 아니라 replaceState 다. 탭을 옮길 때마다 방문 기록이 쌓이면
@@ -1723,7 +1737,7 @@ function Dashboard({me,onLoggedOut}){
         </div>
       </header>
       <nav style={{background:'#fff',borderBottom:'1px solid #e5e7eb',display:'flex',padding:'0 20px',overflowX:'auto'}}>
-        {TABS.map(t=>(
+        {TABS.filter(canTab).map(t=>(
           <button key={t} onClick={()=>setTab(t)}
             style={{padding:'10px 16px',fontSize:13,fontWeight:tab===t?700:500,
               color:tab===t?'#1a56db':'#6b7280',background:'none',border:'none',
@@ -1772,6 +1786,8 @@ function Dashboard({me,onLoggedOut}){
         {tab==='expense'&&<TabExpense workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
           jiraTree={jiraTree} jiraDone={jiraDone}
           me={me} canEditOthers={canEditOthers} showToast={showToast}/>}
+        {tab==='profit'&&canTab('profit')&&<TabProfit workers={workers} dupNames={dupNames}
+          jiraTree={jiraTree} jiraDone={jiraDone} showToast={showToast}/>}
         {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers} dupNames={dupNames}
           holidays={holidays} setHolidays={setHolidays}
           jiraTree={jiraTree} jiraDone={jiraDone} reloadJira={reloadJira} showToast={showToast} tokenStatus={tokenStatus}
@@ -5125,6 +5141,355 @@ function TabExpense({workers:allWorkers,jiraTree,jiraDone=new Set(),me,canEditOt
         <div style={{fontSize:11,color:'#9ca3af',marginTop:8}}>
           💡 <strong>내 것만</strong> 고칠 수 있습니다 (관리자는 대신 고칠 수 있습니다).
           남의 기록도 <strong>보이는 것</strong>은 프로젝트별 합계를 함께 보기 위해서입니다.
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+// ── 프로젝트 손익 탭 (2026-09-25 신설 · 마이그레이션 044) ─────
+// 대표이사 전용. 손익 = 계약금액(공급가) − (인건비 + 경비 + 이동 + 구매).
+// 🔑 금액 기준은 «공급가(부가세 뺀 금액)» 다 (사용자 지시). 계약금액은 부가세 포함
+//    여부를 체크로 받아 공급가로 바꿔 둔다.
+// 🔴 이 탭은 서버가 직책으로 막는다(requireBoss). 여기 들어왔다는 것 자체가 대표이사라는 뜻이지만,
+//    403 이 오면 그대로 보여 준다 — 조용히 빈 표를 보이면 「왜 비었지」가 된다.
+const CONTRACT_KINDS={initial:'최초',change:'변경'}
+const supplyOf=(amount,vat)=>vat?Math.round(Number(amount)/1.1):Math.round(Number(amount))
+
+function TabProfit({workers,dupNames,jiraTree,jiraDone=new Set(),showToast}){
+  const today0=today()
+  const [contracts,setContracts]=useState(null)
+  const [rates,setRates]=useState(null)
+  const [err,setErr]=useState('')
+  const [busy,setBusy]=useState(false)
+  const [openKey,setOpenKey]=useState(null)        // 이력을 펼친 프로젝트
+  const [openWorker,setOpenWorker]=useState(null)  // 이력을 펼친 사람
+
+  const blankC={parent_text:'',amount:'',vat_included:false,contract_date:today0,kind:'initial',note:''}
+  const [cForm,setCForm]=useState(blankC)
+  const blankR={worker_id:'',hourly_rate:'',effective_from:today0,note:''}
+  const [rForm,setRForm]=useState(blankR)
+
+  async function fetchAll(){
+    const [c,r]=await Promise.all([getContracts(),getRates()])
+    return {c,r}
+  }
+  async function reload(){
+    try{ const {c,r}=await fetchAll(); setContracts(c); setRates(r); setErr('') }
+    catch(e){ setErr(e.message); setContracts([]); setRates([]) }
+  }
+  useEffect(()=>{ let alive=true
+    ;(async()=>{
+      try{ const {c,r}=await fetchAll(); if(alive){ setContracts(c); setRates(r); setErr('') } }
+      catch(e){ if(alive){ setErr(e.message); setContracts([]); setRates([]) } }
+    })()
+    return()=>{alive=false}
+  },[])
+
+  const won=n=>Number(n||0).toLocaleString()
+  // 프로젝트 = 업무 입력과 «같은 목록»(Jira 상위업무).
+  // ⚠ 계약은 «끝난 프로젝트» 에도 붙는다 — 완료된 것도 목록에 두고 (완료) 로 표시한다.
+  const projects=Object.keys(jiraTree||{})
+  const projKeyOf=full=>{ const m=String(full||'').match(/^\s*\[([^\]]+)\]/); return m?m[1]:null }
+  // 「프로젝트 하나」 를 가르는 열쇠 — 서버·DB 인덱스와 같은 규칙(coalesce(key, text))
+  const pkey=c=>c.parent_key||c.parent_text
+
+  // ── 계약금액: 프로젝트마다 묶는다. 서버가 «최근 먼저» 로 주므로 첫 줄이 지금 계약이다.
+  const contractGroups=useMemo(()=>{
+    const m=new Map()
+    for(const c of contracts||[]){
+      const k=pkey(c)
+      if(!m.has(k)) m.set(k,[])
+      m.get(k).push(c)
+    }
+    return [...m.entries()].map(([k,list])=>({key:k,current:list[0],history:list}))
+      .sort((a,b)=>(cleanName(a.current.parent_text)||'').localeCompare(cleanName(b.current.parent_text)||'','ko'))
+  },[contracts])
+  const hasContract=full=>{
+    const k=projKeyOf(full)||full
+    return contractGroups.some(g=>g.key===k)
+  }
+
+  function pickProject(full){
+    // 이미 계약이 있는 프로젝트를 고르면 «변경» 으로 미리 맞춰 둔다 — 최초 계약이 둘이 되면 헷갈린다
+    setCForm(f=>({...f,parent_text:full,kind:full&&hasContract(full)?'change':'initial'}))
+  }
+
+  async function submitContract(){
+    if(!cForm.parent_text){ showToast('프로젝트를 골라 주십시오'); return }
+    if(cForm.amount===''||!(Number(cForm.amount)>=0)){ showToast('계약금액을 적어 주십시오'); return }
+    const sup=supplyOf(cForm.amount,cForm.vat_included)
+    if(!await askConfirm(
+      `${cleanName(cForm.parent_text)||cForm.parent_text}\n`
+      +`입력 ${won(cForm.amount)}원 (${cForm.vat_included?'부가세 포함':'부가세 별도'})\n`
+      +`→ 공급가 ${won(sup)}원 으로 손익을 계산합니다.`,
+      {title:`${CONTRACT_KINDS[cForm.kind]} 계약을 기록할까요?`,ok:'계약 기록하기'})) return
+    try{
+      setBusy(true)
+      await addContract({
+        parent_text:cForm.parent_text, parent_key:projKeyOf(cForm.parent_text),
+        amount:Number(cForm.amount), vat_included:cForm.vat_included,
+        contract_date:cForm.contract_date||null, kind:cForm.kind, note:cForm.note||null,
+      })
+      showToast('계약금액을 기록했습니다')
+      setCForm({...blankC}); await reload()
+    }catch(e){ showToast('실패: '+e.message,5000) }
+    finally{ setBusy(false) }
+  }
+  async function deleteContract(c){
+    if(!await askConfirm(
+      `${cleanName(c.parent_text)||c.parent_text} · ${c.contract_date} · ${won(c.amount)}원\n`
+      +'잘못 넣은 줄을 걷어 낼 때만 지우십시오. 계약이 바뀐 것은 «변경» 으로 새 줄을 넣습니다.',
+      {title:'이 계약 기록을 지울까요?',ok:'기록 지우기'})) return
+    try{ setBusy(true); await removeContract(c.id); showToast('지웠습니다'); await reload() }
+    catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
+  // ── 인건비 단가: 사람마다. 서버가 «시작일 늦은 것 먼저» 로 준다.
+  //    지금 단가 = 오늘 이전(같은 날 포함) 가운데 가장 늦게 시작한 줄.
+  const rateByWorker=useMemo(()=>{
+    const m=new Map()
+    for(const r of rates||[]){
+      if(!m.has(r.worker_id)) m.set(r.worker_id,[])
+      m.get(r.worker_id).push(r)
+    }
+    return m
+  },[rates])
+  // 재직자 + (퇴사했어도) 단가 기록이 있는 사람 — 지난 인건비 계산에 필요하다
+  const rateWorkers=(workers||[]).filter(w=>w.active||rateByWorker.has(w.id))
+  const nowRate=list=>(list||[]).find(r=>r.effective_from<=today0)||null
+  const nextRate=list=>(list||[]).filter(r=>r.effective_from>today0).slice(-1)[0]||null
+
+  async function submitRate(){
+    if(!rForm.worker_id){ showToast('사람을 골라 주십시오'); return }
+    if(rForm.hourly_rate===''||!(Number(rForm.hourly_rate)>=0)){ showToast('시간당 단가를 적어 주십시오'); return }
+    if(!rForm.effective_from){ showToast('적용 시작일을 적어 주십시오'); return }
+    const wid=Number(rForm.worker_id)
+    const same=(rateByWorker.get(wid)||[]).find(r=>r.effective_from===rForm.effective_from)
+    if(same&&!await askConfirm(
+      `${rForm.effective_from} 에 이미 ${won(same.hourly_rate)}원/시간 이 있습니다.\n→ ${won(rForm.hourly_rate)}원/시간 으로 바꿉니다.`,
+      {title:'같은 날 단가를 덮어쓸까요?',ok:'덮어쓰기'})) return
+    try{
+      setBusy(true)
+      await addRate({worker_id:wid,hourly_rate:Number(rForm.hourly_rate),
+        effective_from:rForm.effective_from,note:rForm.note||null})
+      showToast('단가를 저장했습니다')
+      setRForm({...blankR}); await reload()
+    }catch(e){ showToast('실패: '+e.message,5000) }
+    finally{ setBusy(false) }
+  }
+  async function deleteRate(r,name){
+    if(!await askConfirm(`${name} · ${r.effective_from} 부터 ${won(r.hourly_rate)}원/시간`,
+      {title:'이 단가 기록을 지울까요?',ok:'기록 지우기'})) return
+    try{ setBusy(true); await removeRate(r.id); showToast('지웠습니다'); await reload() }
+    catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
+  const inS={padding:'7px 9px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,width:'100%'}
+  const lbS={fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:3,display:'block'}
+  const cell=(l,node)=><div><label style={lbS}>{l}</label>{node}</div>
+  const thS={background:'#f9fafb',padding:'6px 8px',fontSize:11,fontWeight:700,color:'#6b7280',
+    borderBottom:'1px solid #e5e7eb',textAlign:'center',whiteSpace:'nowrap'}
+  const tdS={padding:'6px 8px',fontSize:12,borderBottom:'1px solid #f3f4f6',textAlign:'center',verticalAlign:'middle'}
+  const btnS={padding:'7px 14px',borderRadius:7,border:'none',background:'#1a56db',color:'#fff',
+    fontSize:13,fontWeight:700,cursor:busy?'wait':'pointer',opacity:busy?.6:1}
+  const nameOf=w=>workerLabel(w,dupNames)
+
+  return(
+    <div>
+      <div style={{background:'#fef3c7',border:'1px solid #fcd34d',borderRadius:8,
+        padding:'10px 12px',fontSize:12,color:'#92400e',marginBottom:14}}>
+        🔒 <strong>대표이사만 보는 화면</strong>입니다. 다른 직원에게는 탭이 보이지 않고, 주소를 직접 쳐도 서버가 막습니다.<br/>
+        💰 손익은 <strong>공급가(부가세 뺀 금액)</strong> 기준입니다. 계약금액은 부가세 포함 여부를 체크하면 공급가로 바꿔 계산합니다.
+      </div>
+      {err&&<div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,
+        padding:'10px 12px',fontSize:12,color:'#991b1b',marginBottom:14}}>⚠ {err}</div>}
+
+      {/* ── 계약금액 ── */}
+      <Card title="📄 프로젝트 계약금액">
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:9,
+          background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,padding:12,marginBottom:14}}>
+          <div style={{gridColumn:'span 2',minWidth:0}}>
+            {cell('프로젝트 *',
+              <select value={cForm.parent_text} onChange={e=>pickProject(e.target.value)} style={inS}>
+                <option value="">— 프로젝트 고르기 —</option>
+                {projects.map(p=>
+                  <option key={p} value={p}>{jiraDone.has(p)?'(완료) ':''}{cleanName(p)||p}{hasContract(p)?'  · 계약 있음':''}</option>)}
+              </select>)}
+          </div>
+          {cell('계약금액(원) *',<input type="number" value={cForm.amount}
+            onChange={e=>setCForm({...cForm,amount:e.target.value})} placeholder="0" style={inS}/>)}
+          {cell('부가세',
+            <label style={{display:'flex',alignItems:'center',gap:6,fontSize:13,padding:'7px 0',cursor:'pointer'}}>
+              <input type="checkbox" checked={cForm.vat_included}
+                onChange={e=>setCForm({...cForm,vat_included:e.target.checked})}/>
+              위 금액에 부가세 포함
+            </label>)}
+          {cell('계약일',<input type="date" value={cForm.contract_date}
+            onChange={e=>setCForm({...cForm,contract_date:e.target.value})} style={inS}/>)}
+          {cell('구분',
+            <select value={cForm.kind} onChange={e=>setCForm({...cForm,kind:e.target.value})} style={inS}>
+              <option value="initial">최초 계약</option>
+              <option value="change">변경 계약</option>
+            </select>)}
+          <div style={{gridColumn:'1 / -1',display:'flex',gap:9,alignItems:'flex-end',flexWrap:'wrap'}}>
+            <div style={{flex:2,minWidth:200}}>
+              {cell('메모',<input value={cForm.note}
+                onChange={e=>setCForm({...cForm,note:e.target.value})} placeholder="발주처 · 변경 사유 등" style={inS}/>)}
+            </div>
+            {/* 🔑 공급가를 «입력하는 자리에서» 바로 보인다 — 저장한 뒤에야 알면 체크를 잘못한 것을 놓친다 */}
+            <div style={{fontSize:12,color:'#374151',padding:'7px 4px'}}>
+              {cForm.amount!==''&&Number(cForm.amount)>=0
+                ?<>공급가 <strong style={{color:'#1a56db'}}>{won(supplyOf(cForm.amount,cForm.vat_included))}</strong>원
+                  {cForm.vat_included&&<span style={{color:'#9ca3af'}}> (부가세 {won(Number(cForm.amount)-supplyOf(cForm.amount,true))}원 뺌)</span>}</>
+                :<span style={{color:'#9ca3af'}}>금액을 적으면 공급가가 여기 나옵니다</span>}
+            </div>
+            <button onClick={submitContract} disabled={busy} style={btnS}>계약 기록</button>
+          </div>
+        </div>
+
+        {!contracts?<p style={{fontSize:12,color:'#9ca3af'}}>불러오는 중…</p>
+         :contractGroups.length===0?<p style={{fontSize:12,color:'#9ca3af'}}>아직 기록한 계약이 없습니다.</p>
+         :<div style={{overflowX:'auto'}}>
+            <table style={{width:'100%',borderCollapse:'collapse',minWidth:760}}>
+              <thead><tr>
+                <th style={{...thS,textAlign:'left'}}>프로젝트</th>
+                <th style={thS}>지금 계약 (공급가)</th>
+                <th style={thS}>입력 금액</th>
+                <th style={thS}>부가세</th>
+                <th style={thS}>계약일</th>
+                <th style={thS}>이력</th>
+              </tr></thead>
+              <tbody>
+                {contractGroups.map(g=>{
+                  const c=g.current, open=openKey===g.key
+                  return(<Fragment key={g.key}>
+                    <tr>
+                      <td style={{...tdS,textAlign:'left',fontWeight:600}}>
+                        {jiraDone.has(c.parent_text)&&<span style={{color:'#9ca3af',fontWeight:400}}>(완료) </span>}
+                        {cleanName(c.parent_text)||c.parent_text}
+                        {c.parent_key&&<span style={{color:'#9ca3af',fontWeight:400,fontSize:11}}> {c.parent_key}</span>}
+                      </td>
+                      <td style={{...tdS,fontWeight:700,color:'#1a56db'}}>{won(c.supply_amount)}</td>
+                      <td style={tdS}>{won(c.amount)}</td>
+                      <td style={tdS}>{c.vat_included?'포함':'별도'}</td>
+                      <td style={tdS}>{c.contract_date}</td>
+                      <td style={tdS}>
+                        <span onClick={()=>setOpenKey(open?null:g.key)}
+                          style={{cursor:'pointer',color:'#0369a1',fontWeight:600}}>
+                          {g.history.length>1?`변경 ${g.history.length-1}회`:'최초만'} {open?'▴':'▾'}
+                        </span>
+                      </td>
+                    </tr>
+                    {open&&g.history.map((h,i)=>(
+                      <tr key={h.id} style={{background:'#f9fafb'}}>
+                        <td style={{...tdS,textAlign:'left',paddingLeft:24,color:'#6b7280'}}>
+                          {i===0?'▶ 지금':'　'} {CONTRACT_KINDS[h.kind]||h.kind}
+                          {h.note&&<span style={{marginLeft:6,color:'#9ca3af'}}>· {h.note}</span>}
+                        </td>
+                        <td style={tdS}>{won(h.supply_amount)}</td>
+                        <td style={tdS}>{won(h.amount)}</td>
+                        <td style={tdS}>{h.vat_included?'포함':'별도'}</td>
+                        <td style={tdS}>{h.contract_date}</td>
+                        <td style={tdS}>
+                          <span onClick={()=>deleteContract(h)} title="잘못 넣은 줄 지우기"
+                            style={{cursor:'pointer',color:'#b91c1c',fontWeight:700}}>&times;</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </Fragment>)
+                })}
+              </tbody>
+            </table>
+          </div>}
+        <div style={{fontSize:11,color:'#9ca3af',marginTop:8}}>
+          💡 계약이 바뀌면 <strong>「변경 계약」으로 새 줄</strong>을 넣습니다 — 가장 최근 줄이 지금 계약이고, 지난 줄은 이력으로 남습니다.
+          × 는 <strong>잘못 넣은 줄</strong>을 걷어 낼 때만 쓰십시오.
+        </div>
+      </Card>
+
+      {/* ── 인건비 단가 ── */}
+      <Card title="👤 인건비 단가 — 사람별 시간당">
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:9,
+          background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,padding:12,marginBottom:14}}>
+          {cell('사람 *',
+            <select value={rForm.worker_id} onChange={e=>setRForm({...rForm,worker_id:e.target.value})} style={inS}>
+              <option value="">— 고르기 —</option>
+              {rateWorkers.map(w=><option key={w.id} value={w.id}>{nameOf(w)}{w.active?'':' (퇴사)'}</option>)}
+            </select>)}
+          {cell('시간당 단가(원) *',<input type="number" value={rForm.hourly_rate}
+            onChange={e=>setRForm({...rForm,hourly_rate:e.target.value})} placeholder="0" style={inS}/>)}
+          {cell('적용 시작일 *',<input type="date" value={rForm.effective_from}
+            onChange={e=>setRForm({...rForm,effective_from:e.target.value})} style={inS}/>)}
+          {cell('메모',<input value={rForm.note}
+            onChange={e=>setRForm({...rForm,note:e.target.value})} placeholder="연봉 조정 등" style={inS}/>)}
+          <div style={{display:'flex',alignItems:'flex-end'}}>
+            <button onClick={submitRate} disabled={busy} style={btnS}>단가 저장</button>
+          </div>
+        </div>
+
+        {!rates?<p style={{fontSize:12,color:'#9ca3af'}}>불러오는 중…</p>
+         :<div style={{overflowX:'auto'}}>
+            <table style={{width:'100%',borderCollapse:'collapse',minWidth:640}}>
+              <thead><tr>
+                <th style={{...thS,textAlign:'left'}}>사람</th>
+                <th style={thS}>직책</th>
+                <th style={thS}>지금 단가 (원/시간)</th>
+                <th style={thS}>적용 시작</th>
+                <th style={thS}>예정</th>
+                <th style={thS}>이력</th>
+              </tr></thead>
+              <tbody>
+                {rateWorkers.map(w=>{
+                  const list=rateByWorker.get(w.id)||[]
+                  const cur=nowRate(list), nxt=nextRate(list), open=openWorker===w.id
+                  return(<Fragment key={w.id}>
+                    <tr>
+                      <td style={{...tdS,textAlign:'left',fontWeight:600}}>
+                        {nameOf(w)}{!w.active&&<span style={{color:'#9ca3af',fontWeight:400}}> (퇴사)</span>}
+                      </td>
+                      <td style={tdS}>{w.position||'—'}</td>
+                      <td style={{...tdS,fontWeight:700,color:cur?'#1a56db':'#b91c1c'}}>
+                        {cur?won(cur.hourly_rate):'미입력'}
+                      </td>
+                      <td style={tdS}>{cur?.effective_from||'—'}</td>
+                      <td style={{...tdS,color:'#b45309'}}>
+                        {nxt?`${nxt.effective_from} 부터 ${won(nxt.hourly_rate)}`:'—'}
+                      </td>
+                      <td style={tdS}>
+                        {list.length
+                          ?<span onClick={()=>setOpenWorker(open?null:w.id)}
+                              style={{cursor:'pointer',color:'#0369a1',fontWeight:600}}>
+                              {list.length}건 {open?'▴':'▾'}
+                            </span>
+                          :<span style={{color:'#d1d5db'}}>—</span>}
+                      </td>
+                    </tr>
+                    {open&&list.map(r=>(
+                      <tr key={r.id} style={{background:'#f9fafb'}}>
+                        <td style={{...tdS,textAlign:'left',paddingLeft:24,color:'#6b7280'}} colSpan={2}>
+                          {r===cur?'▶ 지금':r.effective_from>today0?'⏳ 예정':'　지난'}
+                          {r.note&&<span style={{marginLeft:6,color:'#9ca3af'}}>· {r.note}</span>}
+                        </td>
+                        <td style={tdS}>{won(r.hourly_rate)}</td>
+                        <td style={tdS}>{r.effective_from}</td>
+                        <td style={tdS}></td>
+                        <td style={tdS}>
+                          <span onClick={()=>deleteRate(r,nameOf(w))} title="지우기"
+                            style={{cursor:'pointer',color:'#b91c1c',fontWeight:700}}>&times;</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </Fragment>)
+                })}
+              </tbody>
+            </table>
+          </div>}
+        <div style={{fontSize:11,color:'#9ca3af',marginTop:8}}>
+          💡 단가가 바뀌면 <strong>새 적용 시작일로 한 줄 더</strong> 넣습니다. 지난 달 인건비는 <strong>그때 단가</strong>로 계산되어 소급해 달라지지 않습니다.
+          「미입력」인 사람의 시간은 손익에서 <strong>인건비 0원</strong>으로 잡히므로 꼭 채워 주십시오.
         </div>
       </Card>
     </div>
