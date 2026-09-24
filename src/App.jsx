@@ -3079,7 +3079,8 @@ function PlacePicker({places,onPick,onClose,onChanged,showToast}){
   }
 
   async function hide(p){
-    if(!confirm(`「${p.name}」을 목록에서 숨길까요?\n\n지난 계획·실적은 그대로 남습니다.`))return
+    if(!await askConfirm('지난 계획·실적은 그대로 남습니다.',
+      {title:`「${p.name}」을 목록에서 숨길까요?`,ok:'숨기기'}))return
     try{ setBusy(true); await hidePlace(p.id); showToast('숨겼습니다'); await onChanged() }
     catch(e){ showToast('실패: '+e.message) }
     finally{ setBusy(false) }
@@ -3095,7 +3096,10 @@ function PlacePicker({places,onPick,onClose,onChanged,showToast}){
     }catch(e){
       if(e.status===409&&e.similar?.length&&!force){
         const names=e.similar.map(s=>`· ${s.name}${s.distance_km!=null?` (${s.distance_km}km)`:''}`).join('\n')
-        if(confirm(`비슷한 이름의 장소가 이미 있습니다.\n\n${names}\n\n같은 곳이면 「취소」를 누르고 위 장소를 골라 주세요.\n다른 곳이면 「확인」을 눌러 새로 등록합니다.`)){
+        // 🔑 단추에 «무엇을 하는지» 적으니 안내 문구가 짧아졌다 —
+        //    「확인/취소」가 무엇을 뜻하는지 글로 설명할 필요가 없어졌다.
+        if(await askConfirm(`${names}\n\n같은 곳이면 「취소」를 누르고 위 장소를 골라 주세요.`,
+          {title:'비슷한 이름의 장소가 이미 있습니다',ok:'다른 곳 — 새로 등록'})){
           await addNew(true)
         }
       }else showToast('등록 실패: '+e.message)
@@ -3263,10 +3267,12 @@ function VehicleRates({canApprove,showToast}){
     if(on&&!v.assigned_worker_id){
       showToast('주 사용자를 먼저 정해 주십시오 — [설정] 탭 차량 관리에서 고릅니다',5000); return
     }
-    if(on&&!confirm(`「${v.plate||v.name}」의 하이패스를 «${v.assigned_worker_name||'주 사용자'}» 님 개인 카드로 두시겠습니까?\n\n`
-      +'· 이 차의 통행료를 회사가 그분에게 지급합니다\n'
+    if(on&&!await askConfirm(
+      '· 이 차의 통행료를 회사가 그분에게 지급합니다\n'
       +'· 본인이 다녀온 것뿐 아니라 «다른 분이 그 차로 다녀온 통행» 도 포함됩니다\n'
-      +'· 그 차를 개인 사용한 분에게는 그것대로 청구됩니다'))return
+      +'· 그 차를 개인 사용한 분에게는 그것대로 청구됩니다',
+      {title:`「${v.plate||v.name}」의 하이패스를 «${v.assigned_worker_name||'주 사용자'}» 님 개인 카드로 두시겠습니까?`,
+       ok:'개인 카드로 두기'}))return
     try{
       setBusy(true)
       await updateVehicle(v.id,{hipass_personal_card:on})   // ⚠ 이 칸만 보낸다
@@ -3719,11 +3725,12 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
   }
   async function deleteMeeting(m){
     // 🔴 안건은 함께 지워지지 «않는다». 그 사실을 지우기 전에 말해 준다.
-    if(!confirm(`회의록 「${m.title}」을 지울까요?\n\n`
-      +(m.agenda_count>0
+    if(!await askConfirm(
+      (m.agenda_count>0
         ?`⚠ 이 회의의 안건 ${m.agenda_count}건은 «지워지지 않고» 「회의 없는 안건」으로 남습니다.\n`
          +'  (기한·담당·Jira 가 걸려 있어 함께 지우지 않습니다)\n\n':'')
-      +'회의 내용(본문)은 되살릴 수 없습니다.'))return
+      +'회의 내용(본문)은 되살릴 수 없습니다.',
+      {title:`회의록 「${m.title}」을 지울까요?`,ok:'회의록 지우기'}))return
     try{
       setMBusy(true)
       const r=await removeMeeting(m.id)
@@ -3786,8 +3793,8 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
       const m=meetings.find(x=>String(x.id)===String(meetingId))
       const clash=(m?.notes||[]).find(n=>Number(n.worker_id)===Number(workerId)
         &&(n.parent_text||'')===(newText||'')&&n!==orig)
-      if(clash&&!confirm(`「${projLabel(clash)}」로 이미 적어 두신 것이 있습니다.\n\n`
-        +'그 내용을 이번 것으로 덮어쓸까요?'))return
+      if(clash&&!await askConfirm('그 내용을 이번 것으로 덮어쓸까요?',
+        {title:`「${projLabel(clash)}」로 이미 적어 두신 것이 있습니다`,ok:'덮어쓰기'}))return
     }
     try{
       setNoteBusy(true)
@@ -3851,9 +3858,10 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
   }
 
   async function confirm_(a){
-    if(!confirm(`「${a.title}」을 확인 처리할까요?\n\n`
-      +(a.jira_key?`· Jira ${a.jira_key} 도 «완료» 로 넘어갑니다\n`:'')
-      +'· 확인 뒤에는 목록 아래로 내려갑니다'))return
+    if(!await askConfirm(
+      (a.jira_key?`· Jira ${a.jira_key} 도 «완료» 로 넘어갑니다\n`:'')
+      +'· 확인 뒤에는 목록 아래로 내려갑니다',
+      {title:`「${a.title}」을 확인 처리할까요?`,ok:'확인 처리'}))return
     try{
       setBusy(a.id)
       const r=await confirmAgenda(a.id)
@@ -3870,12 +3878,13 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
 
   async function toJira(a){
     const manual=String(a.parent_key||'').startsWith('MANUAL-')
-    if(!confirm(`「${a.title}」을 Jira 에 「작업」으로 올릴까요?\n\n`
-      +(a.due_date?`· 기한 ${a.due_date}\n`:'')
+    if(!await askConfirm(
+      (a.due_date?`· 기한 ${a.due_date}\n`:'')
       +(a.owner_name?`· 담당 ${a.owner_name}\n`:'')
       // 보고자는 Jira 필드가 아니라 «제목 뒤 _이름» 으로 붙는다 — 그 사실을 미리 알린다
       +(a.reporter_name?`· 제목 뒤에 «_${a.reporter_name}» 이 붙습니다 (보고자)\n`:'')
-      +(manual?'\n⚠ 고른 상위업무는 Jira 에 없는 항목이라 «상위 없이» 올라갑니다.':'')))return
+      +(manual?'\n⚠ 고른 상위업무는 Jira 에 없는 항목이라 «상위 없이» 올라갑니다.':''),
+      {title:`「${a.title}」을 Jira 에 「작업」으로 올릴까요?`,ok:'Jira 에 올리기'}))return
     try{
       setBusy(a.id)
       const r=await agendaToJira(a.id)
@@ -3888,8 +3897,10 @@ function TabAgenda({workers,dupNames,jiraTree,jiraDone=new Set(),me,canEditOther
   }
 
   async function remove(a){
-    if(!confirm(`「${a.title}」을 지울까요?\n\n`
-      +(a.jira_key?`⚠ Jira ${a.jira_key} 는 «그대로 남습니다» — 저쪽에서 이미 쓰고 있을 수 있습니다.`:'')))return
+    if(!await askConfirm(
+      (a.jira_key?`⚠ Jira ${a.jira_key} 는 «그대로 남습니다» — 저쪽에서 이미 쓰고 있을 수 있습니다.`
+                 :'지운 뒤에는 되돌릴 수 없습니다.'),
+      {title:`「${a.title}」을 지울까요?`,ok:'안건 지우기'}))return
     try{ setBusy(a.id); await removeAgenda(a.id); reload(); showToast('지웠습니다') }
     catch(e){ showToast('실패: '+e.message) }
     finally{ setBusy(0) }
@@ -4855,9 +4866,10 @@ function TabPurchase({workers:allWorkers,me,canEditOthers,showToast}){
     if(!(Number(qty)>0)){ showToast('수량은 0보다 커야 합니다'); return }
     if(!(Number(unitPrice)>=0)){ showToast('단가를 적어 주세요'); return }
     // 🔑 대표이사에게 결재가 올라가는 일이라 «오눌림» 을 그대로 통과시키지 않는다.
-    if(!confirm(
-      `아래 구매를 요청할까요?\n\n· ${itemName.trim()}\n· 수량 ${Number(qty)} × 단가 ${wonFmt(unitPrice)}원\n`
-      +`· 금액 ${wonFmt(amount)}원\n\n대표이사에게 승인 요청 메일이 갑니다.`
+    if(!await askConfirm(
+      `· ${itemName.trim()}\n· 수량 ${Number(qty)} × 단가 ${wonFmt(unitPrice)}원\n`
+      +`· 금액 ${wonFmt(amount)}원\n\n대표이사에게 승인 요청 메일이 갑니다.`,
+      {title:'아래 구매를 요청할까요?',ok:'구매 요청'}
     ))return
     try{
       setBusy(-1)
@@ -4879,7 +4891,8 @@ function TabPurchase({workers:allWorkers,me,canEditOthers,showToast}){
       if(reason===null)return
       if(!reason.trim()){ showToast('반려 사유를 적어 주세요'); return }
     }else{
-      if(!confirm(`「${p.item_name}」 ${wonFmt(p.amount)}원을 승인할까요?\n\n요청자에게 승인 메일이 갑니다.`))return
+      if(!await askConfirm('요청자에게 승인 메일이 갑니다.',
+        {title:`「${p.item_name}」 ${wonFmt(p.amount)}원을 승인할까요?`,ok:'승인'}))return
     }
     try{
       setBusy(p.id)
@@ -4891,7 +4904,8 @@ function TabPurchase({workers:allWorkers,me,canEditOthers,showToast}){
   }
 
   async function remove(p){
-    if(!confirm(`「${p.item_name}」 요청을 지울까요?`))return
+    if(!await askConfirm('지운 뒤에는 되돌릴 수 없습니다.',
+      {title:`「${p.item_name}」 요청을 지울까요?`,ok:'요청 지우기'}))return
     try{
       setBusy(p.id)
       await removePurchase(p.id)
@@ -5260,7 +5274,8 @@ function ScheduleVacation({showToast,onOpenPlan}){
       if(reason===null)return
       if(!reason.trim()){ showToast('반려 사유를 적어 주세요'); return }
     }else{
-      if(!confirm(`${p.worker_name} 님의 ${mdLabel(p.plan_date)} ${p.vacation_type||'휴가'}를 승인할까요?\n\n신청자에게 승인 메일이 갑니다.`))return
+      if(!await askConfirm('신청자에게 승인 메일이 갑니다.',
+        {title:`${p.worker_name} 님의 ${mdLabel(p.plan_date)} ${p.vacation_type||'휴가'}를 승인할까요?`,ok:'승인'}))return
     }
     try{
       setBusy(p.id)
@@ -5498,7 +5513,10 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
       }
     }catch{ /* 못 읽어도 정산까지 막지는 않는다 */ }
     const who=workerId?`${workerName} 님의 ${ym} 정산`:`${ym} 정산 (아직 안 보낸 ${openCount}명)`
-    if(!confirm(`${warn}${who} 1차 안내를 보낼까요?\n\n· 금액이 이 시점 값으로 저장됩니다\n· 그 실적은 잠깁니다 (대표이사는 그대로 고칠 수 있습니다)\n· 각 직원에게 «자기 정산 내역» 메일이 갑니다\n\n입금할 금액이 없는 분은 그 자리에서 완료됩니다.`))return
+    if(!await askConfirm(
+      `${warn}· 금액이 이 시점 값으로 저장됩니다\n· 그 실적은 잠깁니다 (대표이사는 그대로 고칠 수 있습니다)\n`
+      +'· 각 직원에게 «자기 정산 내역» 메일이 갑니다\n\n입금할 금액이 없는 분은 그 자리에서 완료됩니다.',
+      {title:`${who} 1차 안내를 보낼까요?`,ok:'1차 안내 보내기'}))return
     try{ setBusy(true); const r=await notifySettlement(ym,workerId)
       const closed=r.closed?.length?` · 입금액 없어 바로 완료: ${r.closed.join(', ')}`:''
       showToast(`1차 안내 — ${r.names?.join(', ')||`${r.workers}명`} · 실적 ${r.locked}건 잠금${closed}`)
@@ -5510,7 +5528,10 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
   // 2차 — 입금을 확인하고 완료로 넘긴다. 메일은 나가지 않는다.
   async function complete(workerId,workerName){
     const who=workerId?`${workerName} 님`:`입금 대기 ${notifiedCount}명 전원`
-    if(!confirm(`${who}의 입금을 확인하고 «완료» 로 넘길까요?\n\n· 통장에 실제로 들어온 것을 보신 뒤에 눌러 주십시오\n· 완료 뒤에는 잠금을 해제해야 실적을 고칠 수 있습니다`))return
+    if(!await askConfirm(
+      '· 통장에 실제로 들어온 것을 보신 뒤에 눌러 주십시오\n'
+      +'· 완료 뒤에는 잠금을 해제해야 실적을 고칠 수 있습니다',
+      {title:`${who}의 입금을 확인하고 «완료» 로 넘길까요?`,ok:'입금 확인 · 완료'}))return
     try{ setBusy(true); const r=await completeSettlement(ym,workerId)
       showToast(`정산 완료 — ${r.workers}명`); await load(ym)
     }catch(e){ showToast('완료 처리 실패: '+e.message) }
@@ -5520,7 +5541,8 @@ function ScheduleSettlement({me,onLogout,onOpenActual,showToast}){
   async function reopen(workerId,workerName){
     const who=workerId?`${workerName} 님의 ${ym} 정산`
       :`${ym} 정산 (손댄 ${notifiedCount+settledCount}명 전원)`
-    if(!confirm(`${who} 잠금을 해제할까요?\n\n실적을 다시 고칠 수 있게 되며, 정정 후 다시 확정해야 합니다.`))return
+    if(!await askConfirm('실적을 다시 고칠 수 있게 되며, 정정 후 다시 확정해야 합니다.',
+      {title:`${who} 잠금을 해제할까요?`,ok:'잠금 해제'}))return
     try{ setBusy(true); const r=await reopenSettlement(ym,workerId)
       showToast(`잠금 해제 — 실적 ${r.unlocked}건`); await load(ym)
     }catch(e){ showToast('해제 실패: '+e.message) }
@@ -7879,10 +7901,11 @@ function HipassTable({ym,me,showToast,onChanged,refresh}){
   async function removePicked(){
     if(picked.size===0){ showToast('지울 줄을 골라 주세요'); return }
     const attached=pickedRows.filter(r=>r.actual_id).length
-    if(!confirm(`고른 ${picked.size}건을 지울까요?\n\n`
-      +(attached?`⚠ 그 가운데 ${attached}건은 «실적에 붙어 있어» 지워지지 않습니다.\n`
+    if(!await askConfirm(
+      (attached?`⚠ 그 가운데 ${attached}건은 «실적에 붙어 있어» 지워지지 않습니다.\n`
                   +'  (그 실적의 주인이 실적 창에서 체크를 풀어야 합니다)\n\n':'')
-      +'같은 파일을 다시 올리면 지운 줄은 다시 들어옵니다.'))return
+      +'같은 파일을 다시 올리면 지운 줄은 다시 들어옵니다.',
+      {title:`고른 ${picked.size}건을 지울까요?`,ok:'지우기'}))return
     try{
       setBusy(true)
       const r=await bulkRemoveHipass([...picked])
@@ -8101,11 +8124,12 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
     const names=[...new Set(pickedRows.map(t=>t.claimed_worker_name).filter(Boolean))]
     const already=pickedRows.filter(t=>t.notified_at).length
     const noOwner=pickedRows.filter(t=>!t.claimed_worker_id).length
-    if(!confirm(`고른 ${picked.size}건 · ${won(pickedSum)}원을\n`
-      +`${names.join(', ')||'해당 직원'} 님께 메일로 보낼까요?\n\n`
-      +'· 사람마다 한 통씩 갑니다\n'
+    if(!await askConfirm(
+      '· 사람마다 한 통씩 갑니다\n'
       +(already?`⚠ 그 가운데 ${already}건은 «이미 보낸» 것입니다 — 다시 갑니다\n`:'')
-      +(noOwner?`⚠ ${noOwner}건은 실적에 붙지 않아 보낼 수 없습니다\n`:'')))return
+      +(noOwner?`⚠ ${noOwner}건은 실적에 붙지 않아 보낼 수 없습니다\n`:''),
+      {title:`고른 ${picked.size}건 · ${won(pickedSum)}원을 ${names.join(', ')||'해당 직원'} 님께 메일로 보낼까요?`,
+       ok:'메일 보내기'}))return
     try{
       setBusy(true)
       const r=await notifyHipassTolls([...picked])
@@ -8125,12 +8149,13 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
     if(picked.size===0){ showToast('처리할 통행을 골라 주세요'); return }
     const word={confirmed:'확정',rejected:'반려',pending:'되돌리기'}[state]
     const attached=pickedRows.filter(t=>t.actual_id).length
-    if(!confirm(`고른 ${picked.size}건 · ${won(pickedSum)}원을 «${word}» 할까요?\n\n`
+    if(!await askConfirm(
       // 🔴 반려는 «실적에서도 뗀다» — 안 떼면 「빼라고 했는데 금액엔 남는」 상태가 된다
-      +(state==='rejected'
+      (state==='rejected'
         ?`🔴 반려하면 실적에서도 떼어 냅니다 (${attached}건).\n`
          +'   그만큼 그 직원의 정산 금액이 줄어듭니다.\n'
-        :'')))return
+        :'되돌릴 수 있습니다.'),
+      {title:`고른 ${picked.size}건 · ${won(pickedSum)}원을 «${word}» 할까요?`,ok:word}))return
     try{
       setBusy(true)
       const r=await finalizeHipass([...picked],state)
@@ -8190,7 +8215,8 @@ function HipassRoster({ym,showToast,onChanged,refresh}){
         +'· 기록과 근거는 그대로 남습니다 (지우는 것이 아닙니다)\n'
         +'· 금액 합산에서만 빠집니다\n\n까닭을 적어 주십시오 (선택)')??null)
       if(reason===null) return
-    }else if(!confirm(`고른 ${picked.size}건의 «정산 제외» 를 풀까요?\n\n다시 금액에 잡힙니다.`))return
+    }else if(!await askConfirm('다시 금액에 잡힙니다.',
+      {title:`고른 ${picked.size}건의 «정산 제외» 를 풀까요?`,ok:'제외 풀기'}))return
     try{
       setBusy(true)
       const r=await excludeHipass([...picked],on,reason||'')
@@ -8624,9 +8650,11 @@ function HipassUploader({ym,me,showToast}){
   useEffect(()=>{ loadSum() },[ym])
 
   async function dropUpload(u){
-    if(!confirm(`올린 파일을 지울까요?\n\n· ${u.filename||'(이름 없음)'}\n· ${u.vehicle_name} · ${u.rows_inserted}건\n\n`
+    if(!await askConfirm(
+      `· ${u.filename||'(이름 없음)'}\n· ${u.vehicle_name} · ${u.rows_inserted}건\n\n`
       +'이 파일에서 온 통행 가운데 «실적에 붙지 않은 것» 도 함께 지워집니다.\n'
-      +'붙어 있는 것이 하나라도 있으면 지워지지 않습니다 — 정산 근거이기 때문입니다.'))return
+      +'붙어 있는 것이 하나라도 있으면 지워지지 않습니다 — 정산 근거이기 때문입니다.',
+      {title:'올린 파일을 지울까요?',ok:'파일 지우기'}))return
     try{
       setBusy(true)
       const r=await removeHipassUpload(u.id)
@@ -8890,7 +8918,8 @@ function VehicleCare({vehicles,showToast}){
     }catch(e){ showToast('실패: '+e.message) } finally{ setBusy(false) }
   }
   async function delEvent(r){
-    if(!confirm(`${r.event_date} 「${r.title||CARE_KIND_MAP[r.kind]?.label}」 기록을 지울까요?`))return
+    if(!await askConfirm('지운 뒤에는 되돌릴 수 없습니다.',
+      {title:`${r.event_date} 「${r.title||CARE_KIND_MAP[r.kind]?.label}」 기록을 지울까요?`,ok:'기록 지우기'}))return
     try{ setBusy(true); await removeVehicleEvent(r.id); await load(); await loadDue() }
     catch(e){ showToast('실패: '+e.message) } finally{ setBusy(false) }
   }
@@ -8902,7 +8931,8 @@ function VehicleCare({vehicles,showToast}){
     }catch(e){ showToast('실패: '+e.message) } finally{ setBusy(false) }
   }
   async function delIns(r){
-    if(!confirm(`${r.insurer||'보험'} (${r.start_date||'?'} ~ ${r.end_date||'?'}) 을 지울까요?`))return
+    if(!await askConfirm('지운 뒤에는 되돌릴 수 없습니다.',
+      {title:`${r.insurer||'보험'} (${r.start_date||'?'} ~ ${r.end_date||'?'}) 을 지울까요?`,ok:'보험 지우기'}))return
     try{ setBusy(true); await removeVehicleInsurance(r.id); await load(); await loadDue() }
     catch(e){ showToast('실패: '+e.message) } finally{ setBusy(false) }
   }
@@ -9161,7 +9191,8 @@ function VehicleManager({vehicles,workers,dupNames,onChanged,showToast}){
   }
 
   async function hide(v){
-    if(!confirm(`「${v.name}」을 목록에서 숨길까요?\n\n지난 계획·실적은 그대로 남습니다.`))return
+    if(!await askConfirm('지난 계획·실적은 그대로 남습니다.',
+      {title:`「${v.name}」을 목록에서 숨길까요?`,ok:'숨기기'}))return
     try{ setBusy(true); await updateVehicle(v.id,{active:false}); showToast('숨겼습니다'); await onChanged() }
     catch(e){ showToast('실패: '+e.message) }
     finally{ setBusy(false) }
@@ -9461,7 +9492,8 @@ function MyMailSenderCard(){
     finally{ setBusy(false) }
   }
   async function drop(){
-    if(!confirm('등록을 지울까요?\n\n지우면 메일이 다시 «공용 주소» 로 나갑니다.\n(보고가 멈추지는 않습니다)'))return
+    if(!await askConfirm('지우면 메일이 다시 «공용 주소» 로 나갑니다.\n(보고가 멈추지는 않습니다)',
+      {title:'등록을 지울까요?',ok:'등록 지우기'}))return
     setErr(''); setMsg(''); setBusy(true)
     try{ await removeMyMailSender(); setMsg('지웠습니다.'); await reload() }
     catch(e){ setErr(e.message) }
@@ -9618,7 +9650,8 @@ function MailAccountCard({onChanged}){
     finally{ setBusy(false) }
   }
   async function drop(){
-    if(!confirm('등록을 지울까요?\n\n지우면 서버 설정(.env)의 값으로 되돌아갑니다.'))return
+    if(!await askConfirm('지우면 서버 설정(.env)의 값으로 되돌아갑니다.',
+      {title:'등록을 지울까요?',ok:'등록 지우기'}))return
     setErr(''); setBusy(true)
     try{ await removeMailAccount(); setMsg('지웠습니다. 서버 설정 값으로 되돌아갑니다.'); await reload(); onChanged&&onChanged() }
     catch(e){ setErr(e.message) }
@@ -9744,12 +9777,14 @@ function HolidayManager({holidays,setHolidays,showToast}){
   }
   async function handleToggle(h){
     const next=!h.is_working
-    if(next&&!confirm(`${h.date} ${h.name} — 그날 «근무했다» 로 둘까요?\n가동일에 다시 들어가고 휴일 근무로 세지 않습니다.`))return
+    if(next&&!await askConfirm('가동일에 다시 들어가고 휴일 근무로 세지 않습니다.',
+      {title:`${h.date} ${h.name} — 그날 «근무했다» 로 둘까요?`,ok:'근무했다로 두기'}))return
     try{ await setHolidayWorking(h.date,next); await reload() }
     catch(e){showToast('실패: '+e.message,4000)}
   }
   async function handleDel(h){
-    if(!confirm(`${h.date} ${h.name} 을 목록에서 지울까요?`))return
+    if(!await askConfirm('지우면 다음 동기화에 다시 들어올 수 있습니다.',
+      {title:`${h.date} ${h.name} 을 목록에서 지울까요?`,ok:'지우기'}))return
     try{ await removeHoliday(h.date); await reload(); showToast('삭제 완료') }
     catch(e){showToast(e.message,5000)}
   }
@@ -9854,7 +9889,8 @@ function AbsenceManager({absences,setAbsences,workers,dupNames,showToast}){
     finally{setBusy(false)}
   }
   async function handleDel(a){
-    if(!confirm(`${a.worker_name} 의 ${a.kind}(${a.from_date}~${a.to_date||'진행 중'}) 기록을 지울까요?\n지우면 그 기간이 다시 집계에 들어갑니다.`))return
+    if(!await askConfirm('지우면 그 기간이 다시 집계에 들어갑니다.',
+      {title:`${a.worker_name} 의 ${a.kind}(${a.from_date}~${a.to_date||'진행 중'}) 기록을 지울까요?`,ok:'기록 지우기'}))return
     try{await removeAbsence(a.id);setAbsences(absences.filter(x=>x.id!==a.id));showToast('삭제 완료')}
     catch(e){showToast('삭제 실패: '+e.message,4000)}
   }
@@ -10026,7 +10062,8 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
 
   async function handleDelWorker(w){
     const label=workerLabel(w,dupNames)
-    if(!confirm(label+' 완전 삭제합니까?\n(업무 기록은 그대로 남습니다)'))return
+    if(!await askConfirm('업무 기록은 그대로 남습니다.',
+      {title:label+' 완전 삭제합니까?',ok:'완전 삭제'}))return
     try{await removeWorker(w.id);setWorkers(workers.filter(x=>x.id!==w.id));showToast(label+' 삭제 완료')}
     catch(e){showToast('삭제 실패: '+e.message)}
   }
