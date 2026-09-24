@@ -71,6 +71,25 @@ export async function addJiraIssue(fullText, parentText) {
   if (!res.ok) throw new Error(await res.text())
 }
 
+// Jira 에 «새 업무» 를 만든다 (2026-09-24).
+//   parentText 없음 → 상위업무(에픽)
+//   parentText 있음 → 그 에픽 아래 하위업무
+// ⚠ addJiraIssue 와 다른 것이다. 저쪽은 MANUAL-… 로 «이 시스템 안에만» 남기고,
+//   이것은 Jira 에 실제로 만든 뒤 그 키를 받아 온다.
+export async function createJiraIssue(summary, parentText) {
+  const res = await fetch(`${BASE}/jira-issues/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ summary, parent_text: parentText || null })
+  })
+  const text = await res.text()
+  let data = null
+  try { data = JSON.parse(text) } catch { /* 프록시 오류면 JSON 이 아닐 수 있다 */ }
+  if (!res.ok) throw new Error(data?.error || `서버 오류 HTTP ${res.status} — ${text.slice(0, 120)}`)
+  if (!data) throw new Error(`서버가 JSON 이 아닌 응답을 반환했습니다 — ${text.slice(0, 120)}`)
+  return data
+}
+
 export async function removeJiraIssue(fullText) {
   const res = await fetch(`${BASE}/jira-issues`, {
     method: 'DELETE',

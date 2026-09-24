@@ -414,6 +414,97 @@ app.post('/api/jira-issues', async (req, res) => {
   }
 })
 
+// ── Jira 에 «새 업무» 를 만든다 (2026-09-24 신설) ─────────────
+// 여태 업무 입력 화면은 «고르기» 만 됐다. 새로 만드는 길은 설정 탭의 「고정업무」
+// 하나였는데 그것은 MANUAL-… 로 «이 시스템 안에만» 남아 Jira 에는 올라가지 않는다.
+//
+// 🔑 상위·하위의 «단위» 는 동기화 JQL 이 정한 것을 그대로 따른다(사용자 지시) —
+//      상위 = issuetype = Epic   /   하위 = Epic 이 아니면서 parent 가 있는 것
+//    그래서 상위는 «에픽», 하위는 «그 에픽 밑의 일반 작업» 으로 만든다.
+//    여기가 어긋나면 만들어 놓고도 업무 입력 목록에 나타나지 않는다.
+// 🔑 만든 즉시 jira_issues 에 넣는다. 동기화를 기다리게 하면 방금 만든 업무를
+//    그 자리에서 고를 수 없어 만든 보람이 없다.
+// 권한 = 로그인한 사람이면 «누구나» (2026-09-24 지시).
+app.post('/api/jira-issues/create', requireLogin, async (req, res) => {
+  const j = jiraAuth()
+  if (!j) return res.status(500).json({ error: 'Jira 환경변수가 설정되지 않았습니다.' })
+
+  // 손으로 적는 곳이라 공백이 겹치기 가장 쉽다 — 저장·조회와 «같은 규칙» 으로 누른다.
+  const summary = normalizeWorkText(req.body?.summary).slice(0, 200)
+  const parentText = normalizeWorkText(req.body?.parent_text)
+  if (!summary) return res.status(400).json({ error: '업무 제목을 적어 주십시오.' })
+
+  try {
+    // 상위업무를 골랐으면 그 이름의 Jira 키를 찾는다.
+    let parentKey = null
+    if (parentText) {
+      const { rows } = await pool.query(
+        'SELECT jira_key FROM jira_issues WHERE full_text = $1', [parentText])
+      parentKey = rows[0]?.jira_key ?? null
+      if (!parentKey) {
+        return res.status(404).json({ error: `상위업무 「${parentText}」 를 찾을 수 없습니다.` })
+      }
+      // 🔴 「고정업무」처럼 Jira 에 없는 항목은 상위가 될 수 없다. 안건 올리기는
+      //    «상위 없이» 올리지만 여기서는 막는다 — 상위를 골라 하위를 만들겠다고
+      //    한 것인데 상위 없이 만들어지면 고른 자리에 나타나지 않는다.
+      if (String(parentKey).startsWith('MANUAL-')) {
+        return res.status(400).json({
+          error: `「${parentText}」 는 이 시스템에만 있는 항목이라 Jira 의 상위업무가 될 수 없습니다. `
+               + '설정 탭의 「고정업무」로 추가해 주십시오.',
+        })
+      }
+    }
+
+    // 같은 자리에 같은 이름이 이미 있으면 막는다. 손이 미끄러져 두 번 눌리면
+    // Jira 에 이슈가 둘 생기는데, 지우는 것은 사람이 Jira 에 들어가 해야 한다.
+    // ⚠ 3값 논리 — parent_key 가 NULL 이면 `= $2` 는 FALSE 가 아니라 NULL 이라
+    //   상위 없는 업무끼리는 «영영 같지 않아» 겹침을 못 잡는다. coalesce 로 잠근다.
+    const { rows: dup } = await pool.query(
+      `SELECT jira_key FROM jira_issues
+        WHERE summary = $1 AND coalesce(parent_key, '') = coalesce($2::text, '')`,
+      [summary, parentKey])
+    if (dup.length) {
+      return res.status(409).json({ error: `같은 이름의 업무가 이미 있습니다 (${dup[0].jira_key}).` })
+    }
+
+    // 담당자 = «만든 사람». 계정을 못 찾으면 담당자 없이 만든다(안건과 같은 규칙).
+    const { rows: meRows } = await pool.query(
+      'SELECT email FROM workers WHERE id = $1', [req.session.workerId || 0])
+
+    const created = await createJiraIssue(j, {
+      summary,
+      parentKey,
+      assigneeEmail: meRows[0]?.email || null,
+      description: '(업무 대시보드 「오늘 업무」 입력 화면에서 만듦)',
+      epic: !parentKey,          // 상위를 안 골랐으면 «상위업무» = 에픽
+    })
+
+    // 🔑 full_text 는 동기화와 «같은 규칙» 으로 만든다. 다르면 다음 동기화가
+    //    덮어쓸 때 이름이 바뀌어 이미 적어 둔 업무 기록과 이어지지 않는다.
+    // ⚠ 상태는 비워 둔다 — 방금 만든 것이 «완료» 일 수는 없고, 다음 동기화가 채운다.
+    const fullText = normalizeWorkText(`[${created.key}] ${summary}`)
+    await pool.query(
+      `INSERT INTO jira_issues (jira_key, summary, parent_key, full_text)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (jira_key) DO UPDATE
+          SET summary = EXCLUDED.summary, parent_key = EXCLUDED.parent_key,
+              full_text = EXCLUDED.full_text`,
+      [created.key, summary, parentKey, fullText])
+
+    console.log(`[jira] 새 ${parentKey ? '하위' : '상위'}업무 :: ${created.key} "${summary}"`
+      + `${parentKey ? ` (상위 ${parentKey})` : ''} by ${req.session.name}`)
+
+    res.json({
+      key: created.key,
+      full_text: fullText,
+      parent_text: parentText || null,
+      assignee_found: !!created.accountId,
+    })
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
 app.delete('/api/jira-issues', async (req, res) => {
   const { full_text } = req.body
   try {
@@ -4219,6 +4310,99 @@ function jiraAuth() {
   return { base: `https://${host}`, auth: 'Basic ' + Buffer.from(`${email}:${token}`).toString('base64') }
 }
 
+// ── Jira 에 이슈를 «만드는» 한 곳 (2026-09-24) ───────────────
+// 안건 올리기와 업무 입력의 [+ 새 업무] 가 «같은 코드» 를 쓴다. 두 벌이 되면
+// 한쪽만 고쳐져 조용히 어긋난다 — 이 저장소가 여러 번 겪은 일이다.
+const JIRA_PROJECT = 'VITRON'
+
+// 🔴 이슈 «유형 이름» 으로 찍으면 안 된다. 이 인스턴스는 한국어라 에픽의 이름이
+//    「Epic」이 아니라 «에픽» 이다(2026-09-24 실측). 이름으로 보내면 400 이 나는데
+//    그때 증상은 「새 업무가 안 만들어진다」 뿐이라 원인을 찾기 어렵다.
+//    그래서 createmeta 로 골라 «id» 로 보낸다.
+//
+// 🔴 계층만 보면 «엉뚱한 것» 이 걸린다 — VITRON 의 hierarchyLevel 0 은
+//    Feature · 작업 · 버그 · 개선 «넷» 이고, 목록 차례가 Feature 가 먼저다.
+//    그래서 계층으로만 찾으면 하위업무가 「작업」이 아니라 Feature 로 만들어진다.
+//    → 먼저 «이름(번역 전 이름 포함)» 으로 정확히 찾고, 못 찾을 때만 계층으로 떨어진다.
+//      상위 = Epic(에픽, 계층 1)  /  하위 = Task(작업, 계층 0·subtask 아님)
+// ⚠ 캐시한다. 이슈 유형은 거의 바뀌지 않는데 만들 때마다 물으면 왕복이 두 번이 된다.
+const jiraTypeNamed = (list, names, fallback) =>
+  list.find(t => names.includes(t.untranslatedName) || names.includes(t.name)) ||
+  list.find(fallback) || null
+
+let jiraTypeCache = null
+async function jiraIssueTypes(j) {
+  if (jiraTypeCache) return jiraTypeCache
+  try {
+    const r = await fetch(`${j.base}/rest/api/3/issue/createmeta/${JIRA_PROJECT}/issuetypes`, {
+      headers: { Authorization: j.auth, Accept: 'application/json' },
+      signal: AbortSignal.timeout(JIRA_TIMEOUT_MS),
+    })
+    if (!r.ok) return null
+    const data = await r.json()
+    const list = data?.issueTypes || data?.values || []
+    if (!list.length) return null
+    const epic = jiraTypeNamed(list, ['Epic', '에픽'], t => t.hierarchyLevel === 1)
+    const task = jiraTypeNamed(list, ['Task', '작업'], t => t.hierarchyLevel === 0 && !t.subtask)
+    if (!epic && !task) return null
+    jiraTypeCache = { epic, task }
+    return jiraTypeCache
+  } catch {
+    return null   // 못 물어보면 아래에서 «이름» 으로 떨어진다
+  }
+}
+
+// 이슈 하나를 만든다. 돌려주는 것 = { key, accountId }
+// ⚠ 실패는 던진다. Jira 가 거절한 것은 `status=400` 을 달아 «사용자 잘못» 과
+//   «서버 사정» 을 부르는 쪽이 구분할 수 있게 한다.
+async function createJiraIssue(j, { summary, parentKey, assigneeEmail, description, dueDate, epic = false }) {
+  // 담당자 — Jira 계정을 이메일로 찾는다. 못 찾으면 «담당자 없이» 올린다.
+  // ⚠ 여기서 막으면 Jira 계정이 없는 직원은 영영 못 만든다.
+  let accountId = null
+  if (assigneeEmail) {
+    try {
+      const u = await fetch(`${j.base}/rest/api/3/user/search?query=${encodeURIComponent(assigneeEmail)}`,
+        { headers: { Authorization: j.auth, Accept: 'application/json' }, signal: AbortSignal.timeout(JIRA_TIMEOUT_MS) })
+      if (u.ok) accountId = (await u.json())[0]?.accountId || null
+    } catch { /* 못 찾으면 담당자 없이 간다 */ }
+  }
+
+  const types = await jiraIssueTypes(j)
+  const picked = epic ? types?.epic : types?.task
+  const fields = {
+    project: { key: JIRA_PROJECT },
+    // createmeta 를 못 물어봤을 때만 이름으로 간다. 🔑 이름은 «이 인스턴스에서
+    // 실제로 쓰는 것»(2026-09-24 실측) — 「Epic」이 아니라 「에픽」이다.
+    issuetype: picked ? { id: picked.id } : { name: epic ? '에픽' : '작업' },
+    summary,
+  }
+  if (parentKey) fields.parent = { key: parentKey }
+  if (dueDate) fields.duedate = String(dueDate).slice(0, 10)
+  if (accountId) fields.assignee = { id: accountId }
+  if (description) {
+    // Jira Cloud v3 는 본문이 ADF 다. 문단 하나씩 담는다.
+    fields.description = {
+      type: 'doc', version: 1,
+      content: description.split('\n\n').map(t => ({ type: 'paragraph', content: [{ type: 'text', text: t }] })),
+    }
+  }
+
+  const r = await fetch(`${j.base}/rest/api/3/issue`, {
+    method: 'POST',
+    headers: { Authorization: j.auth, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields }),
+    signal: AbortSignal.timeout(JIRA_TIMEOUT_MS),
+  })
+  const out = await r.json().catch(() => ({}))
+  if (!r.ok) {
+    const why = out?.errorMessages?.join(' ') || JSON.stringify(out?.errors || {})
+    const err = new Error(`Jira 등록에 실패했습니다 — ${why || `HTTP ${r.status}`}`)
+    err.status = 400
+    throw err
+  }
+  return { key: out.key, accountId }
+}
+
 app.get('/api/agenda', requireLogin, async (req, res) => {
   try {
     const { status, owner_id, parent_key, meeting_id } = req.query
@@ -4431,63 +4615,34 @@ app.post('/api/agenda/:id/to-jira', requireLogin, async (req, res) => {
     const a = cur[0]
     if (a.jira_key) return res.status(409).json({ error: `이미 ${a.jira_key} 로 올라가 있습니다.` })
 
-    // 담당자 — Jira 계정을 이메일로 찾는다. 못 찾으면 «담당자 없이» 올린다.
-    // ⚠ 여기서 막으면 Jira 계정이 없는 직원의 안건은 영영 못 올린다.
-    let accountId = null
-    if (a.owner_email) {
-      try {
-        const u = await fetch(`${j.base}/rest/api/3/user/search?query=${encodeURIComponent(a.owner_email)}`,
-          { headers: { Authorization: j.auth, Accept: 'application/json' }, signal: AbortSignal.timeout(JIRA_TIMEOUT_MS) })
-        if (u.ok) accountId = (await u.json())[0]?.accountId || null
-      } catch { /* 못 찾으면 담당자 없이 간다 */ }
-    }
-
     // 🔑 «보고자» 는 Jira 필드가 아니라 «제목 뒤 _이름» 으로 붙인다 (2026-09-07 결정).
     //    Jira 의 보고자 필드를 채우려면 계정 매핑이 필요한데, 그 품이 얻는 것보다 크다.
     //    제목에 붙이면 Jira 목록에서 «누가 보고할 것인가» 가 바로 보인다.
     // ⚠ 두 번 붙이지 않는다 — 이미 「_이름」 으로 끝나면 그대로 둔다.
     const suffix = a.reporter_name ? `_${a.reporter_name}` : ''
     const summary = suffix && !a.title.endsWith(suffix) ? `${a.title}${suffix}` : a.title
-    const fields = {
-      project: { key: 'VITRON' },
-      issuetype: { name: '작업' },
-      summary,
-    }
+
     // 🔴 「고정업무」처럼 Jira 에 없는 항목(MANUAL-…)은 상위로 쓸 수 없다.
     //    넣으면 400 이 나므로 아예 빼고, 화면이 그 사실을 알린다.
-    if (a.parent_key && !String(a.parent_key).startsWith('MANUAL-')) {
-      fields.parent = { key: a.parent_key }
-    }
-    if (a.due_date) fields.duedate = String(a.due_date).slice(0, 10)
-    if (accountId) fields.assignee = { id: accountId }
+    const parentSkipped = !!(a.parent_key && String(a.parent_key).startsWith('MANUAL-'))
     const body = [a.detail, a.source ? `출처: ${a.source}` : null, '(업무 대시보드 「안건」에서 올림)']
       .filter(Boolean).join('\n\n')
-    if (body) {
-      // Jira Cloud v3 는 본문이 ADF 다. 문단 하나로 담는다.
-      fields.description = {
-        type: 'doc', version: 1,
-        content: body.split('\n\n').map(t => ({ type: 'paragraph', content: [{ type: 'text', text: t }] })),
-      }
-    }
 
-    const r = await fetch(`${j.base}/rest/api/3/issue`, {
-      method: 'POST',
-      headers: { Authorization: j.auth, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fields }),
-      signal: AbortSignal.timeout(JIRA_TIMEOUT_MS),
+    const created = await createJiraIssue(j, {
+      summary,
+      parentKey: parentSkipped ? null : (a.parent_key || null),
+      assigneeEmail: a.owner_email || null,
+      description: body || null,
+      dueDate: a.due_date || null,
     })
-    const out = await r.json().catch(() => ({}))
-    if (!r.ok) {
-      const why = out?.errorMessages?.join(' ') || JSON.stringify(out?.errors || {})
-      return res.status(400).json({ error: `Jira 등록에 실패했습니다 — ${why || `HTTP ${r.status}`}` })
-    }
+
     await pool.query(
       'UPDATE agenda_items SET jira_key=$1, jira_synced_at=now(), updated_at=now() WHERE id=$2',
-      [out.key, Number(req.params.id)])
+      [created.key, Number(req.params.id)])
     const { rows: full } = await pool.query(`${AGENDA_SELECT} WHERE a.id = $1`, [Number(req.params.id)])
-    res.json({ ...full[0], assignee_found: !!accountId, parent_skipped: !!(a.parent_key && String(a.parent_key).startsWith('MANUAL-')) })
+    res.json({ ...full[0], assignee_found: !!created.accountId, parent_skipped: parentSkipped })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    res.status(e.status || 500).json({ error: e.message })
   }
 })
 

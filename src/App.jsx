@@ -8,7 +8,7 @@ import { getMyMailSender, saveMyMailSender, removeMyMailSender,
          getMailAccount, saveMailAccount, removeMailAccount } from './repositories/mailSenderRepo'
 import { getAbsences, addAbsence, removeAbsence } from './repositories/absenceRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
-import { getJiraTree, syncJira, addJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
+import { getJiraTree, syncJira, addJiraIssue, createJiraIssue, removeJiraIssue, getJiraTokenStatus } from './repositories/jiraRepo'
 import { getPlaces, addPlace, updatePlace, hidePlace, getVehicles, addVehicle, updateVehicle,
          getPlans, getMailStatus, addPlan, updatePlan, removePlan, getActuals, addActual, updateActual,
          removeActual, login, logout, whoAmI, getSettlement, notifySettlement,
@@ -1741,7 +1741,8 @@ function Dashboard({me,onLoggedOut}){
         {tab==='today'   &&<TabToday   workers={inputWorkers} dupNames={dupNames} grid={grid} setGrid={setGrid}
           jiraTree={jiraTree} jiraDone={jiraDone} selWorkerId={selWorkerId} setSelWorkerId={setSelWorkerId}
           onSave={handleSave} onLoadDate={handleLoadDate} parentSel={parentSel} setParentSel={setParentSel}
-          history={historyForStats} me={me} canEditOthers={canEditOthers} stickyTop={topH}/>}
+          history={historyForStats} me={me} canEditOthers={canEditOthers} stickyTop={topH}
+          reloadJira={reloadJira} showToast={showToast}/>}
         {tab==='daily'   &&<TabDaily   history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} holidayMap={holidayMap} plans={plans} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
         {tab==='weekly'  &&<TabWeekly  history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} holidayMap={holidayMap} plans={plans} viewDate={viewDate} setViewDate={setViewDate} jiraTree={jiraTree}/>}
         {tab==='monthly' &&<TabMonthly history={historyForStats} workers={workersLabeled} absences={absences} restDays={restDays} holidayMap={holidayMap} plans={plans} viewMonth={viewMonth} setViewMonth={setViewMonth} jiraTree={jiraTree}/>}
@@ -1802,7 +1803,7 @@ function Dashboard({me,onLoggedOut}){
 }
 
 // ── 오늘 업무 탭 ─────────────────────────────────────────
-function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),selWorkerId,setSelWorkerId,onSave,onLoadDate,parentSel,setParentSel,history=[],me,canEditOthers=false,stickyTop=0}){
+function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),selWorkerId,setSelWorkerId,onSave,onLoadDate,parentSel,setParentSel,history=[],me,canEditOthers=false,stickyTop=0,reloadJira,showToast}){
   const [ldDate,setLdDate]=useState(today())
   // 끝난 업무는 기본으로 감춘다. 다만 «완료 처리한 뒤에도 보완 작업이 이어지는» 경우가
   // 실제로 있어(최근 30일에도 완료 업무에 76건이 적혔다) 체크 한 번으로 꺼낼 수 있게 둔다.
@@ -1859,6 +1860,39 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),sel
     setParentSel(p=>{const n={...p};hours.forEach(sh=>{n[cellKey(sh,wid)]=''});return n})
     setGrid(g=>{const n={...g};hours.forEach(sh=>{n[cellKey(sh,wid)]=val});return n})
   }
+
+  // ── 새 업무 만들기 (2026-09-24 신설) ─────────────────────────
+  // 여태는 «고르기» 만 됐다. 목록에 없는 업무는 ③직접 입력으로 적을 수밖에 없었는데,
+  // 그렇게 적은 것은 Jira 에 없어 상위·하위로 묶이지 않고 통계에서도 홀로 떠 있었다.
+  // 🔑 여기서 만든 것은 «Jira 에 실제로» 생긴다 — 설정 탭의 「고정업무」와 다르다.
+  const [addOpen,setAddOpen]=useState(false)
+  const [addKind,setAddKind]=useState('sub')   // 'top' = 상위업무(에픽) / 'sub' = 하위업무
+  const [addParent,setAddParent]=useState('')
+  const [addTitle,setAddTitle]=useState('')
+  const [addBusy,setAddBusy]=useState(false)
+  async function submitNewTask(){
+    const title=addTitle.trim()
+    if(!title){showToast?.('업무 제목을 적어 주십시오.');return}
+    if(addKind==='sub'&&!addParent){showToast?.('상위업무를 골라 주십시오.');return}
+    // ⚠ 두 번 눌리면 Jira 에 이슈가 «둘» 생긴다. 서버도 같은 이름을 막지만
+    //   여기서 먼저 막는 편이 낫다 — 저쪽은 이미 만들어진 뒤라야 알 수 있다.
+    if(addBusy)return
+    setAddBusy(true)
+    try{
+      const r=await createJiraIssue(title,addKind==='sub'?addParent:null)
+      await reloadJira?.()
+      setAddTitle('')
+      setAddOpen(false)
+      // 🔑 만든 업무를 «바로 쓸 수 있게» 고르개 상태로 옮겨 둔다.
+      if(addKind==='top')setAddParent(r.full_text)
+      showToast?.(`${r.key} 만들었습니다`+(r.assignee_found?'':' — Jira 계정을 못 찾아 담당자 없이'))
+    }catch(e){
+      showToast?.('만들지 못했습니다 — '+e.message)
+    }finally{
+      setAddBusy(false)
+    }
+  }
+
   return(
     <div>
       {/* 🔑 날짜·조회·저장 줄은 «머리글 바로 아래에 붙여» 고정한다 (2026-09-04 지시).
@@ -1887,6 +1921,14 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),sel
             <option value="date-asc">시작일 오래된 순</option>
             <option value="date-desc">시작일 최근 순</option>
           </select>
+          {/* 목록에 없는 업무를 그 자리에서 만든다. Jira 에 실제로 올라간다. */}
+          <button onClick={()=>setAddOpen(o=>!o)}
+            title="목록에 없는 업무를 Jira 에 새로 만듭니다"
+            style={{padding:'6px 12px',borderRadius:7,cursor:'pointer',fontSize:13,fontWeight:600,
+              border:`1px solid ${addOpen?'#7c3aed':'#c4b5fd'}`,
+              background:addOpen?'#7c3aed':'#f5f3ff',color:addOpen?'#fff':'#6d28d9'}}>
+            + 새 업무
+          </button>
         </div>
         <div style={{display:'flex',gap:8}}>
           <button onClick={()=>{if(!selWorker)return;const g={...grid};WORK_HOURS.forEach(h=>delete g[cellKey(h,selWorker.id)]);setGrid(g);const ps={...parentSel};WORK_HOURS.forEach(h=>delete ps[cellKey(h,selWorker.id)]);setParentSel(ps)}}
@@ -1896,6 +1938,57 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),sel
           </button>
         </div>
       </div>
+      {/* ── 새 업무 만들기 ─────────────────────────────────────
+          🔑 «Jira 에 실제로» 만든다. 설정 탭의 「고정업무」는 이 시스템 안에만
+             남는 것이라 서로 다르다 — 화면이 그 차이를 분명히 말해야 한다. */}
+      {addOpen&&(
+        <div style={{background:'#faf5ff',border:'1px solid #c4b5fd',borderRadius:10,padding:'14px 18px',marginBottom:16}}>
+          <div style={{fontSize:13,fontWeight:700,color:'#6d28d9',marginBottom:4}}>새 업무 만들기</div>
+          <div style={{fontSize:12,color:'#6b7280',marginBottom:10}}>
+            Jira <strong>VITRON</strong> 프로젝트에 <strong>실제로</strong> 만들어지고, 담당자는 <strong>본인</strong>이 됩니다.
+            만든 즉시 아래 목록에 나타납니다.
+          </div>
+          <div style={{display:'flex',gap:14,alignItems:'center',flexWrap:'wrap',marginBottom:10}}>
+            {[{v:'sub',t:'② 하위업무',d:'고른 상위업무 아래에 만듭니다'},
+              {v:'top',t:'① 상위업무',d:'Jira 의 «에픽» 으로 만듭니다'}].map(k=>(
+              <label key={k.v} title={k.d}
+                style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:13,cursor:'pointer',
+                  padding:'5px 12px',borderRadius:7,border:`1px solid ${addKind===k.v?'#7c3aed':'#e5e7eb'}`,
+                  background:addKind===k.v?'#ede9fe':'#fff',fontWeight:addKind===k.v?700:500,
+                  color:addKind===k.v?'#5b21b6':'#6b7280'}}>
+                <input type="radio" checked={addKind===k.v} onChange={()=>setAddKind(k.v)} style={{cursor:'pointer'}}/>
+                {k.t}
+              </label>
+            ))}
+          </div>
+          <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+            {addKind==='sub'&&(
+              <select value={addParent} onChange={e=>setAddParent(e.target.value)}
+                style={{padding:'7px 10px',borderRadius:7,border:'1px solid #93c5fd',background:'#eff6ff',fontSize:13,minWidth:220}}>
+                <option value="">① 상위업무 선택</option>
+                {sortOpts(visible(jiraParents,addParent)).map(p=><option key={p} value={p}>{label(p)}</option>)}
+              </select>
+            )}
+            <input value={addTitle} onChange={e=>setAddTitle(e.target.value)}
+              onKeyDown={e=>{if(e.key==='Enter')submitNewTask()}}
+              placeholder={addKind==='top'?'새 상위업무 이름':'새 하위업무 이름'}
+              style={{padding:'7px 10px',borderRadius:7,border:'1px solid #e5e7eb',fontSize:13,minWidth:280,flex:1}}/>
+            <button onClick={submitNewTask} disabled={addBusy}
+              style={{padding:'7px 16px',borderRadius:7,border:'none',fontSize:13,fontWeight:600,
+                background:addBusy?'#c4b5fd':'#7c3aed',color:'#fff',cursor:addBusy?'wait':'pointer'}}>
+              {addBusy?'만드는 중…':'Jira 에 만들기'}
+            </button>
+            <button onClick={()=>setAddOpen(false)} disabled={addBusy}
+              style={{padding:'7px 14px',borderRadius:7,border:'1px solid #e5e7eb',background:'#fff',fontSize:13,cursor:'pointer'}}>
+              닫기
+            </button>
+          </div>
+          <div style={{fontSize:11,color:'#9ca3af',marginTop:8}}>
+            💡 Jira 에 넣기 애매한 반복 업무(주간회의 등)는 여기가 아니라
+            <strong> 설정 탭의 「고정업무」</strong>로 추가해 주십시오.
+          </div>
+        </div>
+      )}
       {/* 입력 대상 — 2026-08-21 부터 «로그인한 본인» 으로 고정된다.
           관리자만 남의 이름을 골라 대신 적어 줄 수 있다. */}
       <div style={{background:'#fff',border:'1px solid #e5e7eb',borderRadius:10,padding:'12px 16px',marginBottom:16}}>
