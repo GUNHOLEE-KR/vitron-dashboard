@@ -1893,11 +1893,24 @@ function TabToday({workers,dupNames,grid,setGrid,jiraTree,jiraDone=new Set(),sel
   const committing=useRef(new Set())
 
   // 목록에 없는 이름을 Jira 에 만든다. 돌려주는 것 = 저장값(full_text) 또는 null
+  // 🔑 확인은 «화면 안 상자»(askChoice)로 한다 — confirm() 이 아니다.
+  //    ① 저장소가 이미 그 방식이고(동승), 확인 창이 두 종류로 갈리면 안 된다
+  //    ② 단추에 «무엇을 하는지» 적을 수 있다(「확인」보다 「Jira 에 만들기」가 분명하다)
+  //    🔴 ③ 브라우저에 따라 confirm() 이 아예 안 뜨고 «취소» 로 떨어진다(2026-09-24 실측).
+  //       그러면 적어 넣어도 조용히 아무 일도 일어나지 않아 원인을 알 수 없다.
   async function askAndCreate(text,parentFull){
     const what=parentFull?`「${cleanOf(parentFull)}」 아래 «하위업무(작업)»`:'«상위업무(에픽)»'
-    if(!window.confirm(
-      `「${text}」 는 목록에 없습니다.\n\nJira 에 ${what} 로 새로 만들까요?\n`
-      +'담당자는 본인으로 지정되며, 회사 Jira 에 실제로 등록됩니다.')) return null
+    const pick=await askChoice({
+      title:'목록에 없는 업무입니다',
+      message:`「${text}」 를 Jira 에 ${what} 로 새로 만들까요?\n\n`
+        +'담당자는 본인으로 지정되며, 회사 Jira 에 실제로 등록됩니다.\n'
+        +'Jira 에 올릴 것이 아니면 ③직접 입력 칸에 적어 주십시오.',
+      choices:[
+        {label:'Jira 에 만들기',value:'create',primary:true},
+        {label:'취소',value:null},
+      ],
+    })
+    if(pick!=='create')return null
     try{
       const r=await createJiraIssue(text,parentFull||null)
       await reloadJira?.()
