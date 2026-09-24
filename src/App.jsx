@@ -6147,9 +6147,9 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
     const where=placeLabel(plan)
     const car=[plan.vehicle_name,plan.vehicle_plate].filter(Boolean).join(' ')
     const bits=[mdLabel(plan.plan_date),where,personal?null:plan.purpose,car].filter(Boolean)
-    return confirm(
-      `아래 일정을 완료로 기록할까요?\n\n· ${bits.join(' · ')}\n\n`
-      +reportNotice(plan.plan_date)
+    return askConfirm(
+      `· ${bits.join(' · ')}\n\n`+reportNotice(plan.plan_date),
+      {title:'이 일정을 완료로 기록할까요?',ok:'완료로 기록'}
     )
   }
 
@@ -6158,7 +6158,7 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
     if(usesVehicle&&(distance===''||Number(distance)<0)){
       showToast('주행거리를 입력해 주세요');return
     }
-    if(isNew&&!confirmReport())return
+    if(isNew&&!await confirmReport())return
     const body={
       as_planned:asPlanned,
       distance_km:(atOffice||vacation)?null:num(distance),
@@ -6189,7 +6189,8 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
   }
 
   async function remove(){
-    if(!confirm('이 실적을 지울까요?\n\n계획은 남고 「확인 필요」 상태로 돌아갑니다.'))return
+    if(!await askConfirm('계획은 남고 「확인 필요」 상태로 돌아갑니다.',
+      {title:'이 실적을 지울까요?',ok:'실적 지우기'}))return
     try{
       setBusy(true)
       await removeActual(actual.id)
@@ -6461,6 +6462,19 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
 //    «취소» 가 무엇을 취소하는지 흐려진다 — 휴가 창에서 이미 지적받은 종류다(2026-08-26).
 // ⚠ React 트리 밖에 잠깐 그렸다 지운다. 등록 흐름(async 함수) 한가운데서 답을 기다려야 해서다.
 //   글은 textContent 로만 넣는다(사람 이름이 들어간다).
+// 두 갈래 확인 — confirm() 대신 쓴다 (2026-09-24).
+// 🔴 왜 바꾸는가: confirm() 은 «브라우저가 막으면 곧장 취소로 떨어진다». 그러면
+//    직원이 단추를 눌러도 아무 일이 일어나지 않고 «이유도 보이지 않는다».
+//    실측으로 두 번 밟았다 — 업무 입력의 새 업무 만들기, 실적 기록 저장.
+//    화면 안 상자는 그런 일이 없고, 단추에 «무엇을 하는지» 를 적을 수 있다.
+// ⚠ 부르는 쪽이 async 여야 한다. confirm() 과 달리 답을 «기다려야» 한다.
+function askConfirm(message,{title='확인',ok='확인',cancel='취소'}={}){
+  return askChoice({
+    title, message,
+    choices:[{label:ok,value:'ok',primary:true},{label:cancel,value:null}],
+  }).then(v=>v==='ok')
+}
+
 function askChoice({title,message,choices}){
   return new Promise(resolve=>{
     const wrap=document.createElement('div')
@@ -6625,7 +6639,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
     finally{ setBusy(false) }
   }
   async function doLeaveCarpool(){
-    if(!confirm('이 일정을 동승에서 뺄까요?\n\n같은 차를 계속 쓰면 다시 겹침으로 보입니다.'))return
+    if(!await askConfirm('같은 차를 계속 쓰면 다시 겹침으로 보입니다.',
+      {title:'이 일정을 동승에서 뺄까요?',ok:'동승 풀기'}))return
     try{
       setBusy(true)
       await leaveCarpool(editing.id)
@@ -6825,12 +6840,14 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
               ?`지난 날짜라 «정리 기록» 으로 넣습니다 — 메일이 가지 않고 바로 승인됩니다.`
               :`지난 날짜 ${past.length}건은 «정리 기록» 이라 메일 없이 바로 승인되고,\n`
                +`나머지 ${future.length}건만 승인권자에게 신청 메일이 갑니다.`
-        if(!confirm(
-          `아래 ${isOfficial?'공가':'휴가'}를 ${past.length&&!future.length?'넣을까요':'신청할까요'}?`
-          +`\n\n· ${days.join('\n· ')}\n\n`
+        const isBackfill=past.length&&!future.length
+        if(!await askConfirm(
+          `· ${days.join('\n· ')}\n\n`
           +`합계 ${totalH}시간 (${Math.round(totalH/VAC_HOURS_PER_DAY*10)/10}일)`
           +(vk.type==='연차'?'':` — ${vk.label}는 연차에서 깎이지 않습니다`)+'\n\n'
-          +mailLine
+          +mailLine,
+          {title:`아래 ${isOfficial?'공가':'휴가'}를 ${isBackfill?'넣을까요':'신청할까요'}?`,
+           ok:isBackfill?'정리 기록으로 넣기':'신청'}
         ))return
       }
 
@@ -6961,12 +6978,12 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
     // 휴가를 지우는 것은 «신청을 물린다» 는 뜻이라 대표이사에게 취소 메일이 간다.
     // 지우기 전에 그 사실을 알려 준다 — 지운 뒤에 알려 봐야 늦다.
     // ⚠ 이미 반려된 건은 메일이 가지 않는다(서버가 거른다). 문구도 그렇게 가른다.
-    const msg=editing.use_type==='vacation'
+    const ask=editing.use_type==='vacation'
       ? (editing.approval==='rejected'
-          ? '반려된 휴가 신청을 지울까요?\n\n이미 반려된 건이라 메일은 가지 않습니다.'
-          : '이 휴가 신청을 취소할까요?\n\n대표이사에게 취소 메일이 갑니다.')
-      : '이 계획을 삭제할까요?'
-    if(!confirm(msg))return
+          ? {title:'반려된 휴가 신청을 지울까요?',msg:'이미 반려된 건이라 메일은 가지 않습니다.',ok:'지우기'}
+          : {title:'이 휴가 신청을 취소할까요?',msg:'대표이사에게 취소 메일이 갑니다.',ok:'신청 취소'})
+      : {title:'이 계획을 삭제할까요?',msg:'지운 뒤에는 되돌릴 수 없습니다.',ok:'삭제'}
+    if(!await askConfirm(ask.msg,{title:ask.title,ok:ask.ok}))return
     try{
       setBusy(true)
       await removePlan(editing.id)
@@ -6987,9 +7004,9 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
     const where = placeLabel(p)
     const car = [p.vehicle_name,p.vehicle_plate].filter(Boolean).join(' ')
     const bits = [mdLabel(p.plan_date), where, personal?null:p.purpose, car].filter(Boolean)
-    return confirm(
-      `아래 일정을 「계획대로 완료」로 처리할까요?\n\n· ${bits.join(' · ')}\n\n`
-      + reportNotice(p.plan_date)
+    return askConfirm(
+      `· ${bits.join(' · ')}\n\n` + reportNotice(p.plan_date),
+      {title:'이 일정을 「계획대로 완료」로 처리할까요?',ok:'계획대로 완료'}
     )
   }
 
@@ -7007,7 +7024,7 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
       onClose()
       return
     }
-    if(!confirmDone())return
+    if(!await confirmDone())return
     try{
       setBusy(true)
       await addActual({plan_id:editing.id,as_planned:true})
