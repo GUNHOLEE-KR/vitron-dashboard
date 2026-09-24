@@ -296,7 +296,16 @@ function buildDone({ actorName, actorEmail, a, sender }) {
   if (a.distance_km != null) spent.push(`  이동 거리 : ${Number(a.distance_km)} km`)
   if (Number(a.toll_fee))    spent.push(`  하이패스  : ${won(a.toll_fee)} 원`)
   if (Number(a.fuel_fee))    spent.push(`  주유비    : ${won(a.fuel_fee)} 원`)
-  if (Number(a.transit_fee)) spent.push(`  이동 실비 : ${won(a.transit_fee)} 원`)
+  if (Number(a.transit_fee)) {
+    spent.push(`  이동 실비 : ${won(a.transit_fee)} 원`)
+    // 🔑 내역이 있으면 «무엇에 썼나» 를 함께 적는다 (2026-09-24). 합계만 보내면
+    //    받는 쪽이 「35,100원이 뭐지」 를 물어보려고 사람을 찾아야 한다.
+    const items = Array.isArray(a.transit_items) ? a.transit_items : []
+    for (const it of items) {
+      if (!Number(it?.amount)) continue
+      spent.push(`    · ${it.label || '항목 없음'} : ${won(it.amount)} 원`)
+    }
+  }
   if (spent.length) body.push('실제', ...spent, '')
 
   // 메모도 개인 사용이면 싣지 않는다 — 위와 같은 이유다

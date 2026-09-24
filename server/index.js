@@ -1543,8 +1543,8 @@ app.post('/api/schedule/plans', async (req, res) => {
           place_id, place_text, purpose, transport, vehicle_id,
           est_distance_km, est_travel_min, round_trip, vacation_type, one_way_dir,
           approval, approved_at, approved_by_id, from_place_id, vacation_note, vacation_hours,
-          carpool_group)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23) RETURNING *`,
+          carpool_group, mixed_transport)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) RETURNING *`,
       [b.worker_id, b.plan_date, b.slot || 'allday', b.start_time || null, b.end_time || null,
        useType, placeId, placeText, purpose, b.transport || 'office', b.vehicle_id ?? null,
        b.est_distance_km ?? null, b.est_travel_min ?? null,
@@ -1553,7 +1553,10 @@ app.post('/api/schedule/plans', async (req, res) => {
        selfApprove ? req.session.uid : null,
        // 이동이 아니면 서버가 지운다 — 남으면 달력이 「A→B」 라고 거짓말을 한다
        keepPlace ? fromPlaceOf(roundTrip, b.one_way_dir, b.from_place_id) : null,
-       vacationNote, vacationHours, carpoolGroup]
+       vacationNote, vacationHours, carpoolGroup,
+       // 🔑 「복합」은 transport 를 밀어내지 않는다 — 법인차량이면서 복합일 수 있다
+       //    (2026-09-24 사용자 확인). 업무가 아니면 뜻이 없어 끈다.
+       keepPlace ? !!b.mixed_transport : false]
     )
     // 처음 묶이는 것이면 «대표» 줄에도 묶음 번호를 단다. 대표의 일정 내용은 건드리지 않는다.
     if (carpoolGroup) {
@@ -1675,6 +1678,9 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
               one_way_dir = $17, from_place_id = $18,
               vacation_note = $19, vacation_hours = $20,
               carpool_group = CASE WHEN $21::boolean THEN NULL ELSE carpool_group END,
+              -- 업무가 아니게 바뀌면 「복합」도 끈다 — 휴가에 복합 이동이 붙으면 거짓이다
+              mixed_transport = CASE WHEN $22::boolean THEN COALESCE($23, mixed_transport)
+                                     ELSE FALSE END,
               updated_at = now()
         WHERE id = $16`,
       [b.plan_date || null, b.slot || null, b.start_time || null, b.end_time || null, useType,
@@ -1714,7 +1720,9 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
                  end_time: b.end_time ?? cur[0].end_time,
                }))
          : null,
-       leaveCarpool]
+       leaveCarpool,
+       keepPlace,
+       b.mixed_transport === undefined ? null : !!b.mixed_transport]
     )
     if (rowCount === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
     // 고친 뒤의 모습으로 알린다. 차량이 빠졌으면 mailer 가 알아서 거른다.
@@ -2328,6 +2336,33 @@ async function notifyDone(actualId, req) {
 
 // 「계획대로」 한 번 누르면 계획 내용을 그대로 실적으로 만든다.
 // 계획 없이 생긴 일도 기록할 수 있게 plan_id 없이도 받는다.
+// ── 이동 실비 «항목별» 내역 (2026-09-24, 마이그레이션 042) ────
+// 사용자가 든 실제 사례 — 환승주차장에 법인차량을 대고 KTX 로 가서 현장에서 택시.
+// 수단이 한 칸이라 「법인차량」으로 적으면 KTX·택시비를 적을 자리가 없었다.
+//
+// 🔑 합계를 «계산해서 저장» 한다(transit_fee). 조회할 때마다 다시 더하면 나중에
+//    항목을 손대는 순간 이미 확정된 지난 정산 금액까지 소급해 달라진다 —
+//    휴가 시간(vacation_hours)에서 이미 정한 원칙이다.
+// 🔑 정산은 transit_fee 만 더하므로 계산식은 손대지 않는다.
+// ⚠ 화면 값을 믿지 않는다. 라벨 길이·금액 부호·개수를 «여기서» 자른다.
+const TRANSIT_ITEM_MAX = 20
+function cleanTransitItems(raw) {
+  if (raw === undefined) return undefined          // 안 보냈다 = 건드리지 않는다
+  if (raw === null) return null                    // 비웠다
+  if (!Array.isArray(raw)) return null
+  const items = raw
+    .map(it => ({
+      label: String(it?.label ?? '').trim().slice(0, 100),
+      amount: Math.max(0, Math.round(Number(it?.amount) || 0)),
+    }))
+    // 라벨도 금액도 없는 빈 줄은 버린다 — [+ 칸 추가] 를 눌러 두고 안 적은 줄이다
+    .filter(it => it.label || it.amount > 0)
+    .slice(0, TRANSIT_ITEM_MAX)
+  return items.length ? items : null
+}
+const transitItemsSum = items =>
+  (items || []).reduce((s, it) => s + Number(it.amount || 0), 0)
+
 app.post('/api/schedule/actuals', async (req, res) => {
   const b = req.body
   try {
@@ -2362,12 +2397,17 @@ app.post('/api/schedule/actuals', async (req, res) => {
       ? (base.round_trip ? base.est_distance_km * 2 : base.est_distance_km)
       : null
 
+    // 내역을 보냈으면 «그 합» 이 금액이다. 안 보냈으면 종전처럼 금액만 받는다.
+    const items = cleanTransitItems(b.transit_items)
+    const transitFee = items ? transitItemsSum(items) : (b.transit_fee ?? 0)
+
     const { rows } = await pool.query(
       `INSERT INTO schedule_actuals
          (plan_id, worker_id, work_date, as_planned, use_type,
           place_id, place_text, purpose, transport, vehicle_id,
-          distance_km, toll_fee, transit_fee, fuel_fee, memo)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+          distance_km, toll_fee, transit_fee, fuel_fee, memo,
+          mixed_transport, transit_items)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`,
       [b.plan_id ?? null, workerId, workDate,
        b.as_planned === undefined ? true : !!b.as_planned, useType,
        keepPlace ? (b.place_id ?? base.place_id ?? null) : null,
@@ -2376,7 +2416,10 @@ app.post('/api/schedule/actuals', async (req, res) => {
        b.transport ?? base.transport ?? 'office',
        b.vehicle_id ?? base.vehicle_id ?? null,
        b.distance_km ?? estimated,
-       b.toll_fee ?? 0, b.transit_fee ?? 0, b.fuel_fee ?? 0, b.memo || null]
+       b.toll_fee ?? 0, transitFee, b.fuel_fee ?? 0, b.memo || null,
+       // 계획에 「복합」이 켜져 있었으면 실적도 그대로 이어받는다
+       b.mixed_transport === undefined ? !!base.mixed_transport : !!b.mixed_transport,
+       items === undefined ? null : (items ? JSON.stringify(items) : null)]
     )
     // 계획 상태를 함께 옮겨 달력에서 «확인 필요» 표시가 사라지게 한다
     if (b.plan_id) {
@@ -2412,6 +2455,13 @@ app.patch('/api/schedule/actuals/:id', async (req, res) => {
     if (carErr) return res.status(400).json({ error: carErr })
     const useType  = b.use_type ?? cur[0].use_type
     const keepPlace = useType === 'business'
+    // 🔑 내역을 보냈으면 «그 합» 이 금액이다 — 금액 칸이 함께 와도 내역이 이긴다.
+    //    두 값이 어긋난 채로 남으면 어느 쪽이 맞는지 아무도 모른다(하이패스에서
+    //    「목록에서 고르면 손으로 못 고치게」 한 것과 같은 판단).
+    const items = cleanTransitItems(b.transit_items)
+    const transitFee = items !== undefined
+      ? (items ? transitItemsSum(items) : (b.transit_fee ?? 0))
+      : (b.transit_fee ?? null)
     await pool.query(
       `UPDATE schedule_actuals
           SET as_planned = COALESCE($1, as_planned), use_type = $2,
@@ -2419,7 +2469,10 @@ app.patch('/api/schedule/actuals/:id', async (req, res) => {
               transport = COALESCE($6, transport), vehicle_id = $7,
               distance_km = $8, toll_fee = COALESCE($9, toll_fee),
               transit_fee = COALESCE($10, transit_fee), fuel_fee = COALESCE($11, fuel_fee),
-              memo = $12, updated_at = now()
+              memo = $12,
+              mixed_transport = COALESCE($14, mixed_transport),
+              transit_items = CASE WHEN $15::boolean THEN $16::jsonb ELSE transit_items END,
+              updated_at = now()
         WHERE id = $13`,
       [b.as_planned === undefined ? null : !!b.as_planned, useType,
        keepPlace ? (b.place_id ?? cur[0].place_id) : null,
@@ -2427,8 +2480,13 @@ app.patch('/api/schedule/actuals/:id', async (req, res) => {
        keepPlace ? (b.purpose ?? cur[0].purpose) : null,
        b.transport || null, b.vehicle_id ?? cur[0].vehicle_id,
        b.distance_km ?? cur[0].distance_km,
-       b.toll_fee ?? null, b.transit_fee ?? null, b.fuel_fee ?? null,
-       b.memo ?? cur[0].memo, req.params.id]
+       b.toll_fee ?? null, transitFee, b.fuel_fee ?? null,
+       b.memo ?? cur[0].memo, req.params.id,
+       b.mixed_transport === undefined ? null : !!b.mixed_transport,
+       // ⚠ 「안 보냈다」와 「비웠다」를 갈라야 한다. 안 보낸 것을 NULL 로 덮어쓰면
+       //   남이 적어 둔 내역이 조용히 지워진다(차량 PATCH 에서 겪은 사고와 같다).
+       items !== undefined,
+       items ? JSON.stringify(items) : null]
     )
     res.json({ ok: true })
   } catch (e) {
@@ -2944,6 +3002,10 @@ async function buildSettlement(ym) {
       transit_fee: r.transit_fee, vehicle_name: r.vehicle_name,
       vehicle_kind: r.vehicle_kind, memo: r.memo, locked: r.locked,
       carpool_rider: !!r.carpool_rider,
+      // 🔑 「이 35,100원이 무엇인가」 를 정산 화면에서 바로 볼 수 있어야 한다 —
+      //    근거를 물으려고 사람을 찾아야 하면 그 자리에서 확정할 수 없다 (2026-09-24)
+      transit_items: r.transit_items || null,
+      mixed_transport: !!r.mixed_transport,
     })
 
     // ── 차량별 ──

@@ -6029,7 +6029,24 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
   const [distance,setDistance]=useState(actual?.distance_km??planned??'')
   const [toll,setToll]=useState(actual?.toll_fee??'')
   const [fuel,setFuel]=useState(actual?.fuel_fee??'')
-  const [transit,setTransit]=useState(actual?.transit_fee??'')
+  // ── 이동 실비 — «항목을 늘려 가며» 적는다 (2026-09-24 지시) ──
+  // 환승주차장 주차비 + KTX + 현장 택시처럼 한 날에 여러 갈래로 돈이 든다.
+  // 🔑 항목 이름은 «자유 입력» 이다(지시). 목록으로 묶으면 어디에도 안 맞는 것이
+  //    반드시 생긴다 — 휴가 «사유» 를 종류에 넣지 않은 것과 같은 판단이다.
+  // 🔑 처음엔 «한 칸» 만 낸다(지시). [+ 칸 추가] 로 늘린다.
+  // ⚠ 지난 기록은 금액만 있고 내역이 없다. 그때는 한 줄짜리 내역으로 펴서 보여 준다 —
+  //   빈 칸을 내면 적어 둔 금액이 사라진 것처럼 보인다.
+  const [tItems,setTItems]=useState(()=>{
+    const saved=Array.isArray(actual?.transit_items)?actual.transit_items:null
+    if(saved&&saved.length)return saved.map(it=>({label:it.label||'',amount:it.amount??''}))
+    if(actual?.transit_fee)return[{label:'',amount:actual.transit_fee}]
+    return[{label:'',amount:''}]
+  })
+  const transitTotal=tItems.reduce((s,it)=>s+(Number(it.amount)||0),0)
+  const setItem=(i,k,v)=>setTItems(a=>a.map((it,n)=>n===i?{...it,[k]:v}:it))
+  const addItem=()=>setTItems(a=>[...a,{label:'',amount:''}])
+  // 마지막 한 칸은 남긴다 — 다 지우면 다시 적을 자리가 없다
+  const delItem=i=>setTItems(a=>a.length<=1?[{label:'',amount:''}]:a.filter((_,n)=>n!==i))
   const [memo,setMemo]=useState(actual?.memo||'')
   const [busy,setBusy]=useState(false)
 
@@ -6148,7 +6165,12 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
       // 🔑 목록에서 고른 것이 있으면 하이패스 금액은 «그 합» 이다. 손으로 적은 값을
       //    함께 보내면 붙이기 뒤 다시 세는 값과 어긋난다(서버가 합으로 덮어쓴다).
       toll_fee:tollFromList?pickedSum:(num(toll)??0),
-      fuel_fee:num(fuel)??0, transit_fee:num(transit)??0,
+      fuel_fee:num(fuel)??0,
+      // 🔑 금액은 «내역의 합» 이다. 서버가 다시 더해 transit_fee 에 저장하므로
+      //    여기서 보내는 합계는 참고값이다 — 두 값이 어긋나면 서버 것이 이긴다.
+      //    ⚠ 빈 줄은 서버가 버린다(적어 두고 안 채운 칸).
+      transit_items:tItems.map(it=>({label:String(it.label||'').trim(),amount:Number(it.amount)||0})),
+      transit_fee:transitTotal,
       memo:memo||null,
     }
     try{
@@ -6273,13 +6295,44 @@ function ActualDialog({plan,actual,vehicles,me,canEditOthers=false,onClose,onSav
                   placeholder="0" style={inputS}/>
               </div>
             )}
-            {fareLabel&&(
-              <div style={{gridColumn:'1 / -1'}}>
-                <label style={labelS}>{fareLabel} (원)</label>
-                <input type="number" value={transit} onChange={e=>setTransit(e.target.value)}
-                  placeholder="0" style={inputS}/>
+            {/* ── 이동 실비 — 항목을 늘려 가며 적는다 (2026-09-24) ──
+                🔑 «업무 실적이면 항상» 낸다. 법인차량으로 가도 환승주차·KTX·택시
+                   비용이 들 수 있는데, 전에는 그 돈을 적을 자리가 아예 없었다. */}
+            <div style={{gridColumn:'1 / -1'}}>
+              <label style={labelS}>
+                이동 실비
+                {fareLabel&&<span style={{fontWeight:500,color:'#9ca3af'}}> · {fareLabel}</span>}
+                {plan.mixed_transport&&<span style={{color:'#6d28d9'}}> · 🧾 복합 이동</span>}
+              </label>
+              <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                {tItems.map((it,i)=>(
+                  <div key={i} style={{display:'flex',gap:6,alignItems:'center'}}>
+                    <input value={it.label} onChange={e=>setItem(i,'label',e.target.value)}
+                      placeholder={i===0?(fareLabel||'항목 (예: 환승주차장 주차비)'):'항목'}
+                      style={{...inputS,flex:2}}/>
+                    <input type="number" value={it.amount} onChange={e=>setItem(i,'amount',e.target.value)}
+                      placeholder="0" style={{...inputS,flex:1,minWidth:90}}/>
+                    <button type="button" onClick={()=>delItem(i)} title="이 칸 지우기"
+                      style={{padding:'8px 10px',borderRadius:7,border:'1px solid #e5e7eb',
+                        background:'#fff',cursor:'pointer',color:'#b91c1c',fontWeight:700}}>&times;</button>
+                  </div>
+                ))}
               </div>
-            )}
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:6}}>
+                <button type="button" onClick={addItem}
+                  style={{padding:'6px 12px',borderRadius:7,border:'1px dashed #93c5fd',
+                    background:'#eff6ff',color:'#1a56db',cursor:'pointer',fontSize:12,fontWeight:600}}>
+                  + 칸 추가
+                </button>
+                <div style={{fontSize:12,color:'#374151'}}>
+                  합계 <strong style={{fontSize:14}}>{transitTotal.toLocaleString()}</strong> 원
+                </div>
+              </div>
+              <div style={{fontSize:11,color:'#9ca3af',marginTop:4}}>
+                💡 여러 수단을 섞었으면 칸을 늘려 <strong>항목마다</strong> 적어 주십시오 —
+                예: 환승주차 3,000 / KTX 23,700 / 현장 택시 8,400
+              </div>
+            </div>
           </div>
         )}
 
@@ -6527,6 +6580,11 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
     src?.transport || defaultTransport ||
     // 달력에서 외부 장소 줄을 눌러 들어오면 이동 수단을 «미선택» 으로 둔다
     (defaultPlaceId&&defaultPlaceId!==OFFICE_PLACE?'':'office'))
+  // 🔑 「복합 이동」은 이동 수단을 «밀어내지 않는다» (2026-09-24 사용자 확인) —
+  //    환승주차장에 법인차량을 대고 KTX 를 타는 날은 «법인차량이면서 복합» 이다.
+  //    수단을 여러 개 고르게 하지 않은 것은 transport 한 칸에 배차·달력 아이콘·
+  //    정산·장소 묶기가 모두 걸려 있어, 하나만 놓쳐도 겹침이 조용히 안 잡히기 때문이다.
+  const [mixed,setMixed]=useState(!!src?.mixed_transport)
   const [vehicleId,setVehicleId]=useState(src?.vehicle_id||defaultVehicleId||'')
   const [roundTrip,setRoundTrip]=useState(src?src.round_trip:true)
   // 편도일 때만 쓰는 방향. 기본은 「출발」 — 사무실에서 나가는 쪽이 훨씬 흔하다.
@@ -6690,6 +6748,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
       place_id:isWork&&!atOffice&&placeIdToUse?Number(placeIdToUse):null,
       purpose:isWork?purpose:null,
       transport:isVacation?'none':(atOffice?'office':transport),
+      // 외부 업무일 때만 뜻이 있다 — 내근·휴가에 「복합 이동」이 붙으면 거짓이다
+      mixed_transport:(isWork&&!atOffice)?mixed:false,
       vehicle_id:(isVehicleOnly||(isWork&&!atOffice&&tp.needsVehicle))?Number(vehicleId):null,
       est_distance_km:isWork?km:null, est_travel_min:isWork?min:null,
       round_trip:(isWork&&!atOffice)?roundTrip:false,
@@ -6939,8 +6999,9 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   // 🔑 돈 낼 칸이 있는 수단(대중교통·택시·렌터카·기타)도 창을 연다. 실적 창의
   //    판정과 «같은 함수» 를 쓴다 — 갈래가 어긋나면 창이 안 열려 금액을 적을
   //    기회 자체가 사라진다 (2026-09-24).
+  // 🔑 「복합 이동」도 창을 연다 — 그 날은 «적을 비용이 있다» 고 미리 말해 둔 날이다.
   async function handleAsPlanned(){
-    if(editing.vehicle_id||transportFare(editing.transport)){
+    if(editing.vehicle_id||transportFare(editing.transport)||editing.mixed_transport){
       // ⚠ 여기서는 묻지 않는다. 실적 창에서 저장할 때 물으므로 두 번 묻게 된다.
       onOpenActual&&onOpenActual(editing)
       onClose()
@@ -7278,6 +7339,20 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
             {canEdit&&!transport&&(
               <div style={{fontSize:11,color:'#92400e',marginTop:6}}>이동 수단을 선택해 주세요.</div>
             )}
+            {/* 🔑 수단 선택을 «지우지 않는다» — 법인차량이 눌린 채로 함께 켜진다.
+                예: 환승주차장에 회사 차를 대고 KTX 로 가서 현장에서 택시. */}
+            <label style={{display:'flex',alignItems:'flex-start',gap:7,marginTop:8,cursor:canEdit?'pointer':'default',
+              background:mixed?'#f5f3ff':'#f9fafb',border:`1px solid ${mixed?'#c4b5fd':'#e5e7eb'}`,
+              borderRadius:7,padding:'8px 10px'}}>
+              <input type="checkbox" checked={mixed} disabled={!canEdit}
+                onChange={e=>setMixed(e.target.checked)} style={{marginTop:2,cursor:canEdit?'pointer':'default'}}/>
+              <span style={{fontSize:12,color:mixed?'#5b21b6':'#6b7280'}}>
+                <strong>🧾 복합 이동</strong> — 위 수단 말고 <strong>다른 수단 비용도</strong> 듭니다
+                <div style={{fontSize:11,color:'#9ca3af',marginTop:2}}>
+                  예: 환승주차장에 차를 대고 KTX · 현장에서 택시. 실적에 <strong>항목별로</strong> 적습니다.
+                </div>
+              </span>
+            </label>
           </div>
         )}
 

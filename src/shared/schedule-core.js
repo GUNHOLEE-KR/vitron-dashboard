@@ -330,10 +330,15 @@ export const isOfficialLeave = p =>
   p?.use_type === 'vacation' && p?.vacation_type === OFFICIAL_LEAVE
 
 // 배지에 붙는 아이콘 — 휴가는 이동 수단이 없으므로 따로 잡는다
+// 🔑 「복합 이동」은 주 수단을 «밀어내지 않고 옆에» 붙는다 (2026-09-24) —
+//    「🚗🧾」는 회사 차를 대 놓고 다른 수단으로도 움직인 날이다. 🧾 로 바꿔 버리면
+//    달력만 보고는 그날 차를 가져갔는지 알 수 없어진다.
+// ⚠ 포털은 이 칸을 받지 않을 수 있다. 없으면 예전과 똑같이 아이콘 하나만 나온다.
 export function planIcon(plan) {
   if (isOfficialLeave(plan)) return '🏛'
   if (plan.use_type === 'vacation') return '🌴'
-  return (TRANSPORT_MAP[plan.transport] || TRANSPORT_MAP.office).icon
+  const base = (TRANSPORT_MAP[plan.transport] || TRANSPORT_MAP.office).icon
+  return plan.mixed_transport ? base + '🧾' : base
 }
 // 차량은 모델명만 남긴다. 「Model Y 15도 3955」 를 그대로 쓰면 달력 칸을 다 먹는다.
 export const shortVehicle = (name) => String(name || '').replace(/\s*\d+[가-힣]\s*\d+\s*$/, '').trim()
