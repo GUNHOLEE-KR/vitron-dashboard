@@ -2084,6 +2084,247 @@ app.get('/api/schedule/vacation-summary', async (req, res) => {
   }
 })
 
+// ── 출장 경비 (2026-09-24 신설, 마이그레이션 043) ─────────────
+// 법인카드 등으로 «이미 쓴» 돈의 기록. 승인 절차가 없다 (사용자 지시) —
+// 구매 요청은 «사기 전» 결재이고 이것은 «쓴 뒤» 의 기록이라 성격이 다르다.
+//
+// 🔴 월 정산(schedule_settlements)에 «합치지 않는다» (사용자와 합의).
+//    저것은 「회사에 입금 / 회사가 환급」이고 이것은 「이미 나간 돈」이다.
+//    합치면 정산 금액이 틀어진다 — 여기는 조회·집계 전용이다.
+//
+// 권한 — 보는 것은 전원, 고치는 것은 «본인만»(관리자는 대리 가능).
+//   업무 기록·스케줄과 같은 규칙이다(2026-08-21 결정). 「프로젝트별·인원별 관리」가
+//   목적이라 남의 것도 보여야 하지만, 남의 금액을 고칠 수 있으면 안 된다.
+// 🔑 판정은 «본문» 이 아니라 «DB 의 worker_id» 로 한다 — 본문을 믿으면 남의 기록을
+//    열어 자기 번호를 적어 보내는 것으로 뚫린다.
+const EXPENSE_KINDS = ['meal', 'lodging', 'transport', 'fuel', 'entertain', 'supply', 'etc']
+const EXPENSE_PAYS  = ['corp_card', 'personal_card', 'cash']
+// 🔴 영수증은 base64 로 온다 — 실제 바이트보다 «약 1.37배» 커진다.
+//    express.json 이 12MB 이므로 원본은 8MB 로 잡아 둔다. 여기서 막지 않으면
+//    본문 전체가 거절되어 「왜 저장이 안 되지」만 남는다.
+const RECEIPT_MAX_BYTES = 8 * 1024 * 1024
+
+// 목록은 «영수증 본문을 빼고» 준다. 안 빼면 사진 수십 장이 한 번에 실려 화면이 멈춘다.
+// 영수증은 필요할 때 한 장씩 따로 내려받는다.
+const EXPENSE_SELECT = `
+  SELECT e.id, e.worker_id, e.spent_on, e.amount, e.kind, e.merchant, e.pay_method,
+         e.parent_key, e.parent_text, e.note,
+         e.receipt_name, e.receipt_type, e.receipt_size,
+         (e.receipt IS NOT NULL) AS has_receipt,
+         e.created_by, e.created_at, e.updated_at,
+         w.name AS worker_name, w.team AS worker_team,
+         j.summary AS parent_summary
+    FROM trip_expenses e
+    LEFT JOIN workers w     ON w.id = e.worker_id
+    LEFT JOIN jira_issues j ON j.jira_key = e.parent_key`
+
+// 화면이 보낸 영수증을 «담을 수 있는 꼴» 로 바꾼다. 돌려주는 것 =
+//   undefined  안 보냈다 (건드리지 않는다)
+//   null       비웠다 (지운다)
+//   { buf, … } 새 영수증
+// ⚠ 던지지 않고 err 를 돌려준다 — 부르는 쪽이 사용자에게 보일 문구를 정한다.
+function readReceipt(b) {
+  if (b.receipt === undefined) return { keep: true }
+  if (b.receipt === null || b.receipt === '') return { clear: true }
+  const raw = String(b.receipt)
+  // data:image/jpeg;base64,xxxx 꼴이면 머리말을 떼고 종류를 거기서 읽는다
+  const m = raw.match(/^data:([^;]+);base64,(.*)$/)
+  const type = String(b.receipt_type || m?.[1] || 'application/octet-stream').slice(0, 100)
+  const body = m ? m[2] : raw
+  let buf
+  try { buf = Buffer.from(body, 'base64') } catch { return { err: '영수증을 읽지 못했습니다.' } }
+  if (!buf.length) return { err: '영수증이 비어 있습니다.' }
+  if (buf.length > RECEIPT_MAX_BYTES) {
+    return { err: `영수증이 너무 큽니다 (${Math.round(buf.length / 1024 / 1024 * 10) / 10}MB). `
+                + `${RECEIPT_MAX_BYTES / 1024 / 1024}MB 이하로 줄여 주십시오.` }
+  }
+  return { buf, type, name: String(b.receipt_name || '').slice(0, 200) || null }
+}
+
+// 목록 — from·to 로 기간을 자르고, 사람·프로젝트로 좁힐 수 있다.
+app.get('/api/expenses', requireLogin, async (req, res) => {
+  const { from, to, worker_id, parent_key } = req.query
+  try {
+    const { rows } = await pool.query(
+      `${EXPENSE_SELECT}
+        WHERE ($1::date IS NULL OR e.spent_on >= $1::date)
+          AND ($2::date IS NULL OR e.spent_on <= $2::date)
+          AND ($3::int  IS NULL OR e.worker_id = $3::int)
+          AND ($4::text IS NULL OR e.parent_key = $4::text)
+        ORDER BY e.spent_on DESC, e.id DESC`,
+      [from || null, to || null, worker_id || null, parent_key || null])
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.post('/api/expenses', requireLogin, async (req, res) => {
+  const b = req.body || {}
+  // 🔑 남의 것을 대신 적는 것은 관리자만. 안 보내면 «본인» 이다.
+  const workerId = b.worker_id ? Number(b.worker_id) : req.session.workerId
+  if (!workerId) return res.status(400).json({ error: '이 계정에 연결된 직원이 없습니다.' })
+  if (!canEditWorker(req.session, workerId)) return denyOther(res)
+  if (!b.spent_on) return res.status(400).json({ error: '쓴 날짜를 적어 주십시오.' })
+  const amount = Math.round(Number(b.amount) || 0)
+  if (!(amount > 0)) return res.status(400).json({ error: '금액을 적어 주십시오.' })
+
+  const r = readReceipt(b)
+  if (r.err) return res.status(400).json({ error: r.err })
+
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO trip_expenses
+         (worker_id, spent_on, amount, kind, merchant, pay_method,
+          parent_key, parent_text, note,
+          receipt, receipt_name, receipt_type, receipt_size, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
+      [workerId, b.spent_on, amount,
+       EXPENSE_KINDS.includes(b.kind) ? b.kind : 'etc',
+       String(b.merchant || '').slice(0, 200) || null,
+       EXPENSE_PAYS.includes(b.pay_method) ? b.pay_method : 'corp_card',
+       String(b.parent_key || '').slice(0, 40) || null,
+       String(b.parent_text || '').slice(0, 200) || null,
+       b.note || null,
+       r.buf || null, r.buf ? r.name : null, r.buf ? r.type : null,
+       r.buf ? r.buf.length : null,
+       req.session.uid])
+    const { rows: full } = await pool.query(`${EXPENSE_SELECT} WHERE e.id = $1`, [rows[0].id])
+    res.json(full[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 고치기 — 보낸 칸만 바꾼다. 안 보낸 칸을 NULL 로 덮어쓰면 적어 둔 것이 지워진다
+// (차량 PATCH 에서 실제로 겪은 사고, 2026-08-25).
+const EXPENSE_COLS = ['spent_on', 'amount', 'kind', 'merchant', 'pay_method',
+                      'parent_key', 'parent_text', 'note']
+app.patch('/api/expenses/:id', requireLogin, async (req, res) => {
+  const b = req.body || {}
+  try {
+    const { rows: cur } = await pool.query(
+      'SELECT id, worker_id FROM trip_expenses WHERE id = $1', [Number(req.params.id)])
+    if (!cur.length) return res.status(404).json({ error: '해당 경비를 찾을 수 없습니다.' })
+    // 🔑 DB 의 worker_id 로 판정한다 — 본문 값을 믿지 않는다
+    if (!canEditWorker(req.session, cur[0].worker_id)) return denyOther(res)
+
+    const sets = [], vals = []
+    for (const col of EXPENSE_COLS) {
+      if (b[col] === undefined) continue
+      let v = b[col]
+      if (col === 'amount') {
+        v = Math.round(Number(v) || 0)
+        if (!(v > 0)) return res.status(400).json({ error: '금액은 0보다 커야 합니다.' })
+      } else if (col === 'kind' && !EXPENSE_KINDS.includes(v)) continue
+      else if (col === 'pay_method' && !EXPENSE_PAYS.includes(v)) continue
+      else if (v === '') v = null
+      vals.push(v)
+      sets.push(`${col} = $${vals.length}`)
+    }
+    // 영수증 — 「안 보냈다」와 「비웠다」를 갈라야 한다
+    const r = readReceipt(b)
+    if (r.err) return res.status(400).json({ error: r.err })
+    if (r.clear) {
+      sets.push('receipt = NULL', 'receipt_name = NULL', 'receipt_type = NULL', 'receipt_size = NULL')
+    } else if (r.buf) {
+      vals.push(r.buf);         sets.push(`receipt = $${vals.length}`)
+      vals.push(r.name);        sets.push(`receipt_name = $${vals.length}`)
+      vals.push(r.type);        sets.push(`receipt_type = $${vals.length}`)
+      vals.push(r.buf.length);  sets.push(`receipt_size = $${vals.length}`)
+    }
+    if (!sets.length) return res.json({ ok: true })
+    vals.push(Number(req.params.id))
+    await pool.query(
+      `UPDATE trip_expenses SET ${sets.join(', ')}, updated_at = now() WHERE id = $${vals.length}`, vals)
+    const { rows: full } = await pool.query(`${EXPENSE_SELECT} WHERE e.id = $1`, [Number(req.params.id)])
+    res.json(full[0])
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+app.delete('/api/expenses/:id', requireLogin, async (req, res) => {
+  try {
+    const { rows: cur } = await pool.query(
+      'SELECT id, worker_id FROM trip_expenses WHERE id = $1', [Number(req.params.id)])
+    if (!cur.length) return res.status(404).json({ error: '해당 경비를 찾을 수 없습니다.' })
+    if (!canEditWorker(req.session, cur[0].worker_id)) return denyOther(res)
+    await pool.query('DELETE FROM trip_expenses WHERE id = $1', [Number(req.params.id)])
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 영수증 한 장 — 목록에서 뺐으므로 필요할 때 여기로 받아 간다.
+app.get('/api/expenses/:id/receipt', requireLogin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT receipt, receipt_name, receipt_type FROM trip_expenses WHERE id = $1',
+      [Number(req.params.id)])
+    if (!rows.length || !rows[0].receipt) {
+      return res.status(404).json({ error: '영수증이 없습니다.' })
+    }
+    res.setHeader('Content-Type', rows[0].receipt_type || 'application/octet-stream')
+    // ⚠ inline 이라야 새 창에서 «보인다». attachment 면 늘 내려받기가 된다.
+    //   파일 이름에 한글이 들어가므로 RFC 5987 로 적는다.
+    const name = rows[0].receipt_name || `receipt-${req.params.id}`
+    res.setHeader('Content-Disposition',
+      `inline; filename*=UTF-8''${encodeURIComponent(name)}`)
+    res.send(rows[0].receipt)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 집계 — 프로젝트별 · 인원별 · 월별 (사용자 지시).
+// 🔑 세 갈래를 «한 번에» 준다. 화면이 세 번 부르면 그 사이에 누가 기록을 더해
+//    합계가 서로 어긋나 보일 수 있다.
+app.get('/api/expenses/summary', requireLogin, async (req, res) => {
+  const { from, to } = req.query
+  const args = [from || null, to || null]
+  // ⚠ 별칭을 «e» 로 통일한다. 쿼리마다 다르게 두고 문자열을 바꿔 끼우면
+  //   나중에 칸 이름 하나만 겹쳐도 엉뚱한 곳이 치환된다.
+  const FROM_WHERE = `
+    FROM trip_expenses e
+   WHERE ($1::date IS NULL OR e.spent_on >= $1::date)
+     AND ($2::date IS NULL OR e.spent_on <= $2::date)`
+  try {
+    // 🔑 프로젝트를 안 고른 것도 «한 줄로 묶어» 보여 준다. 빼 버리면 합계가
+    //    사람별 합계와 안 맞아 「어디로 샜지」가 된다.
+    const byProject = await pool.query(
+      `SELECT coalesce(e.parent_text, '(프로젝트 없음)') AS label,
+              e.parent_key, count(*)::int AS cnt, sum(e.amount)::int AS total
+       ${FROM_WHERE}
+        GROUP BY 1, 2 ORDER BY total DESC`, args)
+    const byWorker = await pool.query(
+      `SELECT e.worker_id, coalesce(w.name, '(퇴사자)') AS label,
+              count(*)::int AS cnt, sum(e.amount)::int AS total
+         FROM trip_expenses e LEFT JOIN workers w ON w.id = e.worker_id
+        WHERE ($1::date IS NULL OR e.spent_on >= $1::date)
+          AND ($2::date IS NULL OR e.spent_on <= $2::date)
+        GROUP BY 1, 2 ORDER BY total DESC`, args)
+    const byMonth = await pool.query(
+      `SELECT to_char(e.spent_on, 'YYYY-MM') AS label,
+              count(*)::int AS cnt, sum(e.amount)::int AS total
+       ${FROM_WHERE}
+        GROUP BY 1 ORDER BY 1`, args)
+    const byKind = await pool.query(
+      `SELECT e.kind AS label, count(*)::int AS cnt, sum(e.amount)::int AS total
+       ${FROM_WHERE}
+        GROUP BY 1 ORDER BY total DESC`, args)
+    res.json({
+      by_project: byProject.rows, by_worker: byWorker.rows,
+      by_month: byMonth.rows, by_kind: byKind.rows,
+      total: byMonth.rows.reduce((s, r) => s + Number(r.total || 0), 0),
+      count: byMonth.rows.reduce((s, r) => s + Number(r.cnt || 0), 0),
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 // ── 구매 요청 (2026-08-26 신설) ──────────────────────────────
 // 승인된 것이 곧 «구매 이력» 이다. 표를 따로 두지 않는 이유는, 요청과 이력을 나누면
 // 같은 건이 두 곳에 생겨 어느 쪽이 맞는지 알 수 없게 되기 때문이다.

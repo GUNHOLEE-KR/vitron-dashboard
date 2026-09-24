@@ -7,6 +7,8 @@ import { getWorkers, addWorker, setWorkerStatus, removeWorker, updateWorkerDates
 import { getMyMailSender, saveMyMailSender, removeMyMailSender,
          getMailAccount, saveMailAccount, removeMailAccount } from './repositories/mailSenderRepo'
 import { getAbsences, addAbsence, removeAbsence } from './repositories/absenceRepo'
+import { getExpenses, getExpenseSummary, addExpense, updateExpense,
+         removeExpense, receiptUrl } from './repositories/expenseRepo'
 import { getVehicleCare, getVehicleDue, addVehicleEvent, removeVehicleEvent,
          addVehicleInsurance, removeVehicleInsurance } from './repositories/vehicleCareRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
@@ -101,7 +103,7 @@ const FIXED_PARENT='고정업무'
 // 값 80 = 배경의 위아래 여백 40+40 (여백이 다른 팝업은 제 값을 따로 쓴다).
 const MODAL_MAX_H='calc(100vh - 80px)'
 
-const TABS=['today','daily','weekly','monthly','yearly','schedule','agenda','purchase','settings']
+const TABS=['today','daily','weekly','monthly','yearly','schedule','agenda','purchase','expense','settings']
 // ── 주소로 탭을 연다 (2026-08-26 신설) ──────────────────────
 // 사내 포털의 타일이 «탭까지» 열어야 한다는 지시. 그전에는 # 를 아무도 읽지 않아
 // 링크에 #schedule 을 붙여 두어도 늘 첫 탭이 열렸다.
@@ -125,7 +127,7 @@ const hashFor=(tab,view)=>
 // ⚠ 탭 «키» 는 agenda 그대로 둔다 — 주소(#agenda)를 사내 포털 타일이 가리키고 있다.
 //   표기만 「회의록」으로 바꾼다 (2026-09-05 지시 — 안건을 회의 아래로 묶었다).
 const TAB_LABELS={today:'오늘 업무',daily:'일간',weekly:'주간',monthly:'월간',yearly:'연간',
-  schedule:'스케줄',agenda:'회의록',purchase:'구매',settings:'설정'}
+  schedule:'스케줄',agenda:'회의록',purchase:'구매',expense:'경비',settings:'설정'}
 
 // 안건 상태 — 완료는 «두 단계» 다 (2026-09-04 지시).
 //   done      담당자가 「했다」 고 표시
@@ -1766,6 +1768,9 @@ function Dashboard({me,onLoggedOut}){
           jiraTree={jiraTree} jiraDone={jiraDone}
           me={me} canEditOthers={canEditOthers} showToast={showToast}/>}
         {tab==='purchase'&&<TabPurchase workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
+          me={me} canEditOthers={canEditOthers} showToast={showToast}/>}
+        {tab==='expense'&&<TabExpense workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
+          jiraTree={jiraTree} jiraDone={jiraDone}
           me={me} canEditOthers={canEditOthers} showToast={showToast}/>}
         {tab==='settings'&&<TabSettings workers={workers} setWorkers={setWorkers} dupNames={dupNames}
           holidays={holidays} setHolidays={setHolidays}
@@ -4775,6 +4780,356 @@ const rowBtnS={padding:'5px 12px',borderRadius:6,fontSize:12,fontWeight:700,curs
 // 회의록 달력의 «달 넘기기» 단추 (2026-09-06)
 const mNavS={width:26,height:26,borderRadius:6,border:'1px solid #e5e7eb',background:'#fff',
   color:'#374151',cursor:'pointer',fontSize:13,fontWeight:700,lineHeight:1}
+
+// ── 출장 경비 탭 (2026-09-24 신설 · 마이그레이션 043) ─────────
+// 법인카드 등으로 «이미 쓴» 돈의 기록. 승인 절차가 없다 (사용자 지시) —
+// 구매 요청은 «사기 전» 결재이고 이것은 «쓴 뒤» 의 기록이라 성격이 다르다.
+//
+// 🔴 월 정산(스케줄 탭 💰정산)과 «합치지 않는다». 저것은 「회사에 입금 / 회사가
+//    환급」이고 이것은 「이미 나간 돈」이다. 합치면 정산 금액이 틀어진다.
+// 권한 — 보는 것은 전원, 고치는 것은 «본인만»(관리자는 대리 가능).
+const EXP_KINDS=[
+  {v:'meal',     label:'식비',     icon:'🍚'},
+  {v:'lodging',  label:'숙박',     icon:'🏨'},
+  {v:'transport',label:'교통',     icon:'🚄'},
+  {v:'fuel',     label:'주유·충전',icon:'⛽'},
+  {v:'entertain',label:'접대',     icon:'🤝'},
+  {v:'supply',   label:'소모품',   icon:'📦'},
+  {v:'etc',      label:'기타',     icon:'📎'},
+]
+const EXP_KIND_MAP=Object.fromEntries(EXP_KINDS.map(k=>[k.v,k]))
+const EXP_PAYS=[
+  {v:'corp_card',    label:'법인카드'},
+  {v:'personal_card',label:'개인카드'},
+  {v:'cash',         label:'현금'},
+]
+const EXP_PAY_MAP=Object.fromEntries(EXP_PAYS.map(p=>[p.v,p.label]))
+// 🔴 영수증은 base64 로 보내면 «약 1.37배» 커진다. 서버가 8MB 로 막으므로
+//    화면에서 먼저 걸러 「올리다 실패」가 아니라 「고르는 순간」 알린다.
+const RECEIPT_MAX=8*1024*1024
+
+function TabExpense({workers:allWorkers,jiraTree,jiraDone=new Set(),me,canEditOthers,showToast}){
+  const today0=today()
+  // 기본 기간 = 이번 달. 「이 달에 누가 얼마 썼나」가 가장 잦은 물음이다.
+  const [from,setFrom]=useState(today0.slice(0,8)+'01')
+  const [to,setTo]=useState(today0)
+  const [rows,setRows]=useState(null)
+  const [sum,setSum]=useState(null)
+  const [err,setErr]=useState('')
+  const [busy,setBusy]=useState(false)
+  const [groupBy,setGroupBy]=useState('project')   // project | worker | month | kind
+  const [onlyMine,setOnlyMine]=useState(false)
+
+  const blank={spent_on:today0,amount:'',kind:'meal',merchant:'',pay_method:'corp_card',
+    parent_text:'',note:'',receipt:null,receipt_name:'',worker_id:''}
+  const [form,setForm]=useState(blank)
+  const [editId,setEditId]=useState(null)
+
+  // 프로젝트 목록 = 업무 입력과 «같은 것»(Jira 상위업무).
+  // ⚠ 완료된 것은 감추되 «지금 고른 값» 은 남긴다 — 빼 버리면 완료된 프로젝트로
+  //   적어 둔 기록을 열었을 때 고르개가 조용히 빈칸이 되고 저장하는 순간 날아간다
+  //   (안건·회의록에서 이미 두 번 겪은 함정).
+  const projects=Object.keys(jiraTree)
+  const visibleProjects=cur=>projects.filter(p=>!jiraDone.has(p)||p===cur)
+  const projKeyOf=full=>{
+    const m=String(full||'').match(/^\s*\[([^\]]+)\]/)
+    return m?m[1]:null
+  }
+
+  async function load(){
+    setErr('')
+    try{
+      const f={from,to}
+      if(onlyMine&&me?.worker_id) f.worker_id=me.worker_id
+      const [list,s]=await Promise.all([getExpenses(f),getExpenseSummary({from,to})])
+      setRows(list); setSum(s)
+    }catch(e){ setErr(e.message); setRows([]); setSum(null) }
+  }
+  useEffect(()=>{ let alive=true
+    ;(async()=>{
+      try{
+        const f={from,to}
+        if(onlyMine&&me?.worker_id) f.worker_id=me.worker_id
+        const [list,s]=await Promise.all([getExpenses(f),getExpenseSummary({from,to})])
+        if(alive){ setRows(list); setSum(s); setErr('') }
+      }catch(e){ if(alive){ setErr(e.message); setRows([]); setSum(null) } }
+    })()
+    return()=>{alive=false}
+  },[from,to,onlyMine,me?.worker_id])
+
+  const won=n=>Number(n||0).toLocaleString()
+  const mine=r=>canEditOthers||Number(r.worker_id)===Number(me?.worker_id)
+
+  // 영수증 — 고른 자리에서 크기를 재고 base64 로 바꾼다.
+  function pickReceipt(file){
+    if(!file){ setForm(f=>({...f,receipt:null,receipt_name:''})); return }
+    if(file.size>RECEIPT_MAX){
+      showToast(`영수증이 너무 큽니다 (${Math.round(file.size/1024/1024*10)/10}MB). `
+        +`${RECEIPT_MAX/1024/1024}MB 이하로 줄여 주십시오.`,5000)
+      return
+    }
+    const fr=new FileReader()
+    fr.onload=()=>setForm(f=>({...f,receipt:String(fr.result),receipt_name:file.name}))
+    fr.onerror=()=>showToast('영수증을 읽지 못했습니다')
+    fr.readAsDataURL(file)
+  }
+
+  function startEdit(r){
+    setEditId(r.id)
+    setForm({
+      spent_on:r.spent_on, amount:r.amount, kind:r.kind, merchant:r.merchant||'',
+      pay_method:r.pay_method, parent_text:r.parent_text||'', note:r.note||'',
+      // ⚠ 영수증은 «건드리지 않는다» 로 둔다(undefined). null 로 두면 고치는 순간 지워진다.
+      receipt:undefined, receipt_name:r.receipt_name||'',
+    })
+  }
+  function cancelEdit(){ setEditId(null); setForm({...blank}) }
+
+  async function submit(){
+    if(!form.spent_on){ showToast('쓴 날짜를 적어 주십시오'); return }
+    if(!(Number(form.amount)>0)){ showToast('금액을 적어 주십시오'); return }
+    const body={
+      spent_on:form.spent_on, amount:Number(form.amount), kind:form.kind,
+      merchant:form.merchant||null, pay_method:form.pay_method,
+      // 🔑 키와 이름을 «함께» 보낸다 — Jira 가 제목을 바꿔도 지난 표시가 안 흔들린다
+      parent_text:form.parent_text||null, parent_key:projKeyOf(form.parent_text),
+      note:form.note||null,
+    }
+    // ⚠ 고칠 때는 주인을 바꾸지 않는다 — 남의 기록을 내 것으로 옮기는 길이 생기면 안 된다
+    if(!editId&&form.worker_id) body.worker_id=Number(form.worker_id)
+    if(form.receipt!==undefined) body.receipt=form.receipt, body.receipt_name=form.receipt_name
+    try{
+      setBusy(true)
+      if(editId) await updateExpense(editId,body)
+      else await addExpense(body)
+      showToast(editId?'고쳤습니다':'경비를 기록했습니다')
+      cancelEdit(); await load()
+    }catch(e){ showToast('실패: '+e.message,5000) }
+    finally{ setBusy(false) }
+  }
+
+  async function remove(r){
+    if(!await askConfirm(`${r.spent_on} · ${won(r.amount)}원 · ${r.merchant||EXP_KIND_MAP[r.kind]?.label}`,
+      {title:'이 경비 기록을 지울까요?',ok:'기록 지우기'}))return
+    try{ setBusy(true); await removeExpense(r.id); showToast('지웠습니다'); await load() }
+    catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
+
+  const inS={padding:'7px 9px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13,width:'100%'}
+  const lbS={fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:3,display:'block'}
+  const cell=(l,node)=><div><label style={lbS}>{l}</label>{node}</div>
+
+  const groups={project:'📁 프로젝트별',worker:'🧑 인원별',month:'🗓 월별',kind:'🏷 종류별'}
+  const groupRows=sum?({project:sum.by_project,worker:sum.by_worker,
+    month:sum.by_month,kind:sum.by_kind}[groupBy]||[]):[]
+  const groupLabel=r=>groupBy==='kind'?(EXP_KIND_MAP[r.label]?.icon+' '+(EXP_KIND_MAP[r.label]?.label||r.label))
+    :(cleanName(r.label)||r.label)
+  const maxTotal=Math.max(1,...groupRows.map(r=>Number(r.total||0)))
+
+  return(
+    <div>
+      <Card title="💳 출장 경비 — 법인카드 사용 내역">
+        <div style={{background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:8,
+          padding:'10px 12px',fontSize:12,color:'#1e40af',marginBottom:12}}>
+          출장에서 <strong>이미 쓴 돈</strong>을 적는 자리입니다. <strong>승인 절차가 없고</strong> 적으면 그대로 기록됩니다.<br/>
+          💡 <strong>사기 전</strong> 결재가 필요하면 <strong>「구매」 탭</strong>을 쓰십시오.<br/>
+          ⚠ 여기 금액은 <strong>월 정산(스케줄 탭 💰정산)에 합쳐지지 않습니다</strong> — 저쪽은 「입금·환급」이고 이것은 「이미 나간 돈」입니다.
+        </div>
+
+        {/* ── 적는 자리 ── */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(130px,1fr))',gap:9,
+          background:editId?'#fffbeb':'#f9fafb',
+          border:`1px solid ${editId?'#fde68a':'#e5e7eb'}`,borderRadius:8,padding:12,marginBottom:14}}>
+          {editId&&(
+            <div style={{gridColumn:'1 / -1',fontSize:12,fontWeight:700,color:'#92400e'}}>
+              ✎ 고치는 중 — 저장하면 기존 기록이 바뀝니다
+            </div>
+          )}
+          {/* 관리자만 — 남을 대신 적어 준다. 업무 입력·스케줄과 같은 규칙이다. */}
+          {canEditOthers&&!editId&&cell('쓴 사람',
+            <select value={form.worker_id} onChange={e=>setForm({...form,worker_id:e.target.value})} style={inS}>
+              <option value="">나 ({me?.name||'본인'})</option>
+              {allWorkers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}
+            </select>)}
+          {cell('쓴 날 *',<input type="date" value={form.spent_on}
+            onChange={e=>setForm({...form,spent_on:e.target.value})} style={inS}/>)}
+          {cell('금액(원) *',<input type="number" value={form.amount}
+            onChange={e=>setForm({...form,amount:e.target.value})} placeholder="0" style={inS}/>)}
+          {cell('종류',
+            <select value={form.kind} onChange={e=>setForm({...form,kind:e.target.value})} style={inS}>
+              {EXP_KINDS.map(k=><option key={k.v} value={k.v}>{k.icon} {k.label}</option>)}
+            </select>)}
+          {cell('결제 수단',
+            <select value={form.pay_method} onChange={e=>setForm({...form,pay_method:e.target.value})} style={inS}>
+              {EXP_PAYS.map(p=><option key={p.v} value={p.v}>{p.label}</option>)}
+            </select>)}
+          {cell('가맹점',<input value={form.merchant}
+            onChange={e=>setForm({...form,merchant:e.target.value})} placeholder="○○식당" style={inS}/>)}
+          {cell('프로젝트 (선택)',
+            <select value={form.parent_text} onChange={e=>setForm({...form,parent_text:e.target.value})} style={inS}>
+              <option value="">— 프로젝트 없음 —</option>
+              {visibleProjects(form.parent_text).map(p=>
+                <option key={p} value={p}>{jiraDone.has(p)?'(완료) ':''}{cleanName(p)||p}</option>)}
+            </select>)}
+          <div style={{gridColumn:'1 / -1',display:'flex',gap:9,alignItems:'flex-end',flexWrap:'wrap'}}>
+            <div style={{flex:2,minWidth:200}}>
+              {cell('메모',<input value={form.note}
+                onChange={e=>setForm({...form,note:e.target.value})} placeholder="누구와 · 무엇을" style={inS}/>)}
+            </div>
+            <div style={{flex:1,minWidth:180}}>
+              <label style={lbS}>영수증 (선택)</label>
+              <input type="file" accept="image/*,application/pdf"
+                onChange={e=>pickReceipt(e.target.files?.[0]||null)}
+                style={{...inS,padding:'5px 7px'}}/>
+            </div>
+            <button onClick={submit} disabled={busy}
+              style={{padding:'8px 18px',borderRadius:7,border:'none',fontSize:13,fontWeight:700,
+                background:busy?'#93c5fd':(editId?'#b45309':'#0369a1'),color:'#fff',
+                cursor:busy?'wait':'pointer',whiteSpace:'nowrap'}}>
+              {busy?'저장 중…':(editId?'수정 저장':'경비 기록')}
+            </button>
+            {editId&&(
+              <button onClick={cancelEdit} disabled={busy}
+                style={{padding:'8px 14px',borderRadius:7,border:'1px solid #e5e7eb',
+                  background:'#fff',fontSize:13,cursor:'pointer'}}>취소</button>
+            )}
+          </div>
+          <div style={{gridColumn:'1 / -1',fontSize:11,color:'#9ca3af'}}>
+            💡 <strong>쓴 날</strong>과 <strong>금액</strong> 말고는 모두 비워 두셔도 됩니다.
+            {form.receipt_name&&<> · 고른 영수증: <strong>{form.receipt_name}</strong></>}
+          </div>
+        </div>
+
+        {/* ── 기간 ── */}
+        <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap',marginBottom:12}}>
+          <input type="date" value={from} onChange={e=>setFrom(e.target.value)}
+            style={{padding:'6px 9px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
+          <span style={{color:'#9ca3af'}}>~</span>
+          <input type="date" value={to} onChange={e=>setTo(e.target.value)}
+            style={{padding:'6px 9px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}}/>
+          <label style={{display:'inline-flex',alignItems:'center',gap:5,fontSize:12,
+            color:'#6b7280',cursor:'pointer',padding:'6px 10px',borderRadius:7,
+            border:'1px solid #e5e7eb',background:onlyMine?'#eff6ff':'#fff'}}>
+            <input type="checkbox" checked={onlyMine} onChange={e=>setOnlyMine(e.target.checked)}
+              style={{cursor:'pointer'}}/>
+            내 것만
+          </label>
+          {sum&&(
+            <span style={{marginLeft:'auto',fontSize:13,color:'#374151'}}>
+              합계 <strong style={{fontSize:17,color:'#0369a1'}}>{won(sum.total)}</strong> 원
+              <span style={{color:'#9ca3af'}}> · {sum.count}건</span>
+            </span>
+          )}
+        </div>
+
+        {err&&<div style={{fontSize:12,color:'#b91c1c',marginBottom:10}}>불러오지 못했습니다: {err}</div>}
+      </Card>
+
+      {/* ── 집계 — 담긴 것은 하나이고 «묶는 기준» 만 바뀐다 ── */}
+      {sum&&sum.count>0&&(
+        <Card title="집계">
+          <div style={{display:'flex',gap:6,marginBottom:12,flexWrap:'wrap'}}>
+            {Object.entries(groups).map(([v,t])=>(
+              <button key={v} onClick={()=>setGroupBy(v)}
+                style={{padding:'6px 13px',borderRadius:7,cursor:'pointer',fontSize:12,
+                  fontWeight:groupBy===v?700:500,
+                  border:'1px solid '+(groupBy===v?'#0369a1':'#e5e7eb'),
+                  background:groupBy===v?'#eff6ff':'#fff',color:groupBy===v?'#0369a1':'#6b7280'}}>{t}</button>
+            ))}
+          </div>
+          <table style={{width:'100%',borderCollapse:'collapse'}}>
+            <thead><tr>
+              <th style={{...thS,textAlign:'left'}}>{groups[groupBy].slice(2)}</th>
+              <th style={{...thS,width:60}}>건수</th>
+              <th style={{...thS,width:110}}>금액</th>
+              <th style={{...thS}}>비중</th>
+            </tr></thead>
+            <tbody>
+              {groupRows.map((r,i)=>(
+                <tr key={i}>
+                  <td style={{...tdS,textAlign:'left'}}>{groupLabel(r)}</td>
+                  <td style={tdS}>{r.cnt}</td>
+                  <td style={{...tdS,fontWeight:700}}>{won(r.total)}</td>
+                  <td style={{...tdS,padding:'6px 10px'}}>
+                    <div style={{background:'#e5e7eb',borderRadius:4,height:14,position:'relative'}}>
+                      <div style={{background:'#0369a1',borderRadius:4,height:14,
+                        width:`${Math.max(2,Math.round(Number(r.total||0)/maxTotal*100))}%`}}/>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
+
+      {/* ── 낱건 ── */}
+      <Card title={rows?`내역 ${rows.length}건`:'내역'}>
+        {!rows?<p style={{fontSize:12,color:'#9ca3af'}}>불러오는 중…</p>
+         :rows.length===0?<p style={{fontSize:12,color:'#9ca3af'}}>이 기간에 적힌 경비가 없습니다.</p>
+         :<div style={{overflowX:'auto'}}>
+            <table style={{width:'100%',borderCollapse:'collapse',minWidth:760}}>
+              <thead><tr>
+                <th style={{...thS,width:88}}>쓴 날</th>
+                <th style={{...thS,width:78}}>사람</th>
+                <th style={{...thS,width:80}}>종류</th>
+                <th style={{...thS,textAlign:'left'}}>가맹점 · 메모</th>
+                <th style={{...thS,width:140}}>프로젝트</th>
+                <th style={{...thS,width:74}}>수단</th>
+                <th style={{...thS,width:92}}>금액</th>
+                <th style={{...thS,width:52}}>영수증</th>
+                <th style={{...thS,width:70}}>관리</th>
+              </tr></thead>
+              <tbody>
+                {rows.map(r=>(
+                  <tr key={r.id} style={{background:editId===r.id?'#fffbeb':undefined}}>
+                    <td style={{...tdS,fontSize:11}}>{r.spent_on}</td>
+                    <td style={{...tdS,fontSize:11}}>{r.worker_name||'—'}</td>
+                    <td style={{...tdS,fontSize:11}}>
+                      {EXP_KIND_MAP[r.kind]?.icon} {EXP_KIND_MAP[r.kind]?.label}
+                    </td>
+                    <td style={{...tdS,textAlign:'left',fontSize:11}}>
+                      {r.merchant||<span style={{color:'#9ca3af'}}>—</span>}
+                      {r.note&&<div style={{color:'#9ca3af',fontSize:10}}>{r.note}</div>}
+                    </td>
+                    <td style={{...tdS,fontSize:11}}>
+                      {r.parent_text
+                        ?<span title={r.parent_text}>{cleanName(r.parent_text)||r.parent_text}</span>
+                        :<span style={{color:'#d1d5db'}}>—</span>}
+                    </td>
+                    <td style={{...tdS,fontSize:11}}>{EXP_PAY_MAP[r.pay_method]||r.pay_method}</td>
+                    <td style={{...tdS,fontWeight:700}}>{won(r.amount)}</td>
+                    <td style={tdS}>
+                      {r.has_receipt
+                        ?<a href={receiptUrl(r.id)} target="_blank" rel="noreferrer"
+                            title={r.receipt_name||'영수증 보기'}
+                            style={{textDecoration:'none',fontSize:15}}>🧾</a>
+                        :<span style={{color:'#e5e7eb'}}>—</span>}
+                    </td>
+                    <td style={tdS}>
+                      {mine(r)?(
+                        <span style={{display:'inline-flex',gap:7}}>
+                          <span onClick={()=>startEdit(r)} title="고치기"
+                            style={{cursor:'pointer',color:'#0369a1',fontWeight:700}}>✎</span>
+                          <span onClick={()=>remove(r)} title="지우기"
+                            style={{cursor:'pointer',color:'#b91c1c',fontWeight:700}}>&times;</span>
+                        </span>
+                      ):<span style={{color:'#d1d5db',fontSize:11}}>—</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>}
+        <div style={{fontSize:11,color:'#9ca3af',marginTop:8}}>
+          💡 <strong>내 것만</strong> 고칠 수 있습니다 (관리자는 대신 고칠 수 있습니다).
+          남의 기록도 <strong>보이는 것</strong>은 프로젝트별 합계를 함께 보기 위해서입니다.
+        </div>
+      </Card>
+    </div>
+  )
+}
 
 function TabPurchase({workers:allWorkers,me,canEditOthers,showToast}){
   // 🔑 구매는 대표이사가 «결재하는» 일이지 «요청하는» 일이 아니다 (2026-09-05 지시).
