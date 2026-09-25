@@ -313,7 +313,8 @@ deploy.sh                  # NAS 배포 스크립트
 - `.env` = `KAKAO_REST_KEY` · `KAKAO_REDIRECT_URI`(앱에 글자 그대로 등록) · `KAKAO_CLIENT_SECRET`(선택)
   · `KAKAO_TO_TEST`(테스트만). **키가 없으면 기능만 꺼진 채 돈다**(409 · 「⏸ 아직 꺼져 있습니다」)
 - ✅ **실제 발송 확인**(2026-09-25, 테스트 서버) — 카카오 앱 = **DarkHorseHelper**(ID 1454727, 비즈 앱).
-  Redirect URI 는 REST API 키 카드의 「로그인 리다이렉트 URI」 에 **8092·8082 둘 다** 등록돼 있다.
+  Redirect URI 는 REST API 키 카드의 「로그인 리다이렉트 URI」 에 등록한다 — **8092 는 실제 연결로 확인**,
+  8082 는 함께 등록하도록 안내했으나 **운영 연결 때 확인할 것**(안 돼 있으면 KOE006).
   🔑클라이언트 시크릿은 새 콘솔에서 **기본 «사용함»** 이라 `KAKAO_CLIENT_SECRET` 이 필요하다(「카카오 로그인」 줄 코드).
   동의항목 「카카오톡 메시지 전송」 = 이용 중 동의(연결할 때 `scope=talk_message` 로 요청하므로 그대로 된다)
 - ⏳ **운영** — 운영 `.env` 에 세 줄(Redirect **8082**, `KAKAO_TO_TEST` 없이) + 배포 뒤 **대표이사가 [카카오 계정 연결]**
