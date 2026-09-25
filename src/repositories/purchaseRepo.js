@@ -44,3 +44,7 @@ export const setPurchaseStatus = (id, status, rejectReason) =>
   request('PATCH', `/${id}/approval`, { status, reject_reason: rejectReason })
 // ⚠ 승인된 건은 서버가 409 로 막는다 — 그것은 요청이 아니라 이미 구매 이력이다.
 export const removePurchase = (id) => request('DELETE', `/${id}`)
+// 프로젝트만 고친다 (2026-09-25) — 금액·결재에 닿지 않아 «승인 뒤에도» 된다.
+// parentText 를 비우면 「프로젝트 없음」 이 된다.
+export const setPurchaseProject = (id, parentText, parentKey) =>
+  request('PATCH', `/${id}/project`, { parent_text: parentText || null, parent_key: parentKey || null })

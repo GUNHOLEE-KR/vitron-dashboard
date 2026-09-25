@@ -19,11 +19,12 @@ import { getPlaces, addPlace, updatePlace, hidePlace, getVehicles, addVehicle, u
          getPlans, getMailStatus, addPlan, updatePlan, removePlan, getActuals, addActual, updateActual,
          removeActual, login, logout, whoAmI, getSettlement, notifySettlement,
          completeSettlement, reopenSettlement, setApproval, getVacationSummary,
-         getPlaceDistance, savePlaceDistance, joinCarpool, leaveCarpool } from './repositories/scheduleRepo'
+         getPlaceDistance, savePlaceDistance, joinCarpool, leaveCarpool,
+         updatePlanProjects } from './repositories/scheduleRepo'
 import { getHolidays, syncHolidays, addHoliday, setHolidayWorking, removeHoliday,
          restDaySet } from './repositories/holidayRepo'
 import { getPurchases, addPurchase, setPurchaseStatus,
-         removePurchase } from './repositories/purchaseRepo'
+         removePurchase, setPurchaseProject } from './repositories/purchaseRepo'
 import { getAgenda, addAgenda, updateAgenda, removeAgenda,
          confirmAgenda, agendaToJira } from './repositories/agendaRepo'
 import { getMeetings, addMeeting, updateMeeting,
@@ -1639,6 +1640,8 @@ function Dashboard({me,onLoggedOut}){
           transport:src.transport, vehicle_id:src.vehicle_id??null,
           est_distance_km:src.est_distance_km??null, est_travel_min:src.est_travel_min??null,
           round_trip:src.round_trip, one_way_dir:src.one_way_dir??null,
+          // 같은 일을 다른 날 하는 것이라 프로젝트 배분도 함께 옮긴다 (2026-09-25)
+          projects:src.projects??null,
         }
         try{ await addPlan(body); done++ }
         catch(e){
@@ -1782,6 +1785,7 @@ function Dashboard({me,onLoggedOut}){
           jiraTree={jiraTree} jiraDone={jiraDone}
           me={me} canEditOthers={canEditOthers} showToast={showToast}/>}
         {tab==='purchase'&&<TabPurchase workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
+          jiraTree={jiraTree} jiraDone={jiraDone}
           me={me} canEditOthers={canEditOthers} showToast={showToast}/>}
         {tab==='expense'&&<TabExpense workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
           jiraTree={jiraTree} jiraDone={jiraDone}
@@ -1802,6 +1806,7 @@ function Dashboard({me,onLoggedOut}){
           workers={activeWorkers.map(w=>({...w,name:workerLabel(w,dupNames)}))}
           places={places} vehicles={vehicles} showToast={showToast}
           restDays={restDays} holidayMap={holidayMap}
+          jiraTree={jiraTree} jiraDone={jiraDone}
           me={me} canEditOthers={canEditOthers}
           onClose={()=>setPlanDialog(null)}
           onCopy={p=>{ setClipboard(p); showToast('복사했습니다 — 달력에서 붙일 칸을 골라 주세요',4000) }}
@@ -5147,6 +5152,79 @@ function TabExpense({workers:allWorkers,jiraTree,jiraDone=new Set(),me,canEditOt
   )
 }
 
+// ── 프로젝트 고르개 · 프로젝트+비율 입력 (2026-09-25 · 마이그레이션 045) ──
+// 손익의 원가를 프로젝트에 나누는 근거를 받는 부품. 일정 계획 · 구매 요청이 쓴다.
+// 프로젝트 = 업무 입력과 «같은 목록»(Jira 상위업무).
+const projectKey=full=>{ const m=String(full||'').match(/^\s*\[([^\]]+)\]/); return m?m[1]:null }
+// 🔑 완료된 프로젝트는 감추되 «지금 고른 값» 은 남긴다 — 빼면 완료된 프로젝트로 적어 둔
+//    기록을 열었을 때 고르개가 조용히 빈칸이 되고 저장하는 순간 날아간다
+//    (안건·회의록·경비에서 세 번 겪은 함정). 목록에 아예 없는 값(이름이 바뀐 것)도 남긴다.
+function ProjectSelect({value,onChange,jiraTree,jiraDone=new Set(),exclude=[],disabled,style,
+                        emptyLabel='— 프로젝트 없음 —'}){
+  const all=Object.keys(jiraTree||{})
+  let list=all.filter(p=>(!jiraDone.has(p)||p===value)&&(p===value||!exclude.includes(p)))
+  if(value&&!all.includes(value)) list=[...list,value]
+  return(
+    <select value={value||''} disabled={disabled} onChange={e=>onChange(e.target.value)} style={style}>
+      <option value="">{emptyLabel}</option>
+      {list.map(p=><option key={p} value={p}>{jiraDone.has(p)?'(완료) ':''}{cleanName(p)||p}</option>)}
+    </select>
+  )
+}
+// 똑같이 나누기 — 34·33·33 처럼 남는 %는 앞줄부터 하나씩(서버도 같은 결과로 맞춘다)
+const evenShares=n=>{ const b=Math.floor(100/n); return Array.from({length:n},(_,i)=>b+(i<100-b*n?1:0)) }
+// 서버로 보낼 꼴 — 빈 줄을 빼고, 하나뿐이면 100%. 아무것도 없으면 null(=프로젝트 없음)
+const projectsForSave=list=>{
+  const l=(list||[]).filter(r=>r.parent_text)
+  if(!l.length) return null
+  return l.map(r=>({parent_text:r.parent_text,parent_key:r.parent_key||projectKey(r.parent_text),
+    share:l.length===1?100:Number(r.share)||0}))
+}
+// 한 번 나가서 여기저기 다니는 날(사용자 지시) — 프로젝트를 여러 개 고르고 «비율» 로 나눈다.
+// 🔑 줄을 더하거나 빼면 «똑같이» 다시 나눈다. 비율을 고친 뒤 합이 100 이 아니면 알리되
+//    막지는 않는다 — 서버가 비율대로 100 에 맞춰 저장한다.
+function ProjectSharesEditor({value,onChange,jiraTree,jiraDone,disabled}){
+  const rows=value&&value.length?value:[{parent_text:'',parent_key:null,share:100}]
+  const resplit=list=>{ const s=evenShares(list.length); return list.map((r,i)=>({...r,share:s[i]})) }
+  const setText=(i,t)=>onChange(rows.map((r,j)=>j===i?{...r,parent_text:t,parent_key:projectKey(t)}:r))
+  const setShare=(i,v)=>onChange(rows.map((r,j)=>j===i?{...r,share:v===''?'':Number(v)}:r))
+  const add=()=>onChange(resplit([...rows,{parent_text:'',parent_key:null,share:0}]))
+  const del=i=>{ const n=rows.filter((_,j)=>j!==i); onChange(n.length?resplit(n):[]) }
+  const multi=rows.length>1
+  const sum=rows.reduce((s,r)=>s+(Number(r.share)||0),0)
+  const inS={padding:'6px 8px',border:'1px solid #e5e7eb',borderRadius:7,fontSize:13}
+  return(
+    <div>
+      {rows.map((r,i)=>(
+        <div key={i} style={{display:'flex',gap:6,alignItems:'center',marginBottom:5}}>
+          <ProjectSelect value={r.parent_text} onChange={t=>setText(i,t)} disabled={disabled}
+            jiraTree={jiraTree} jiraDone={jiraDone}
+            exclude={rows.filter((_,j)=>j!==i).map(x=>x.parent_text).filter(Boolean)}
+            style={{...inS,flex:1,minWidth:0}}/>
+          {multi&&<>
+            <input type="number" value={r.share} disabled={disabled} min={0} max={100}
+              onChange={e=>setShare(i,e.target.value)} style={{...inS,width:62,textAlign:'right'}}/>
+            <span style={{fontSize:12,color:'#6b7280'}}>%</span>
+          </>}
+          {!disabled&&(multi||r.parent_text)&&
+            <span onClick={()=>del(i)} title="이 줄 빼기"
+              style={{cursor:'pointer',color:'#b91c1c',fontWeight:700,padding:'0 4px'}}>&times;</span>}
+        </div>
+      ))}
+      {!disabled&&(
+        <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',fontSize:12}}>
+          <span onClick={add} style={{cursor:'pointer',color:'#1a56db',fontWeight:700}}>+ 프로젝트 추가</span>
+          {multi&&<span onClick={()=>onChange(resplit(rows))}
+            style={{cursor:'pointer',color:'#0369a1'}}>똑같이 나누기</span>}
+          {multi&&<span style={{color:sum===100?'#059669':'#b45309',fontWeight:600}}>
+            합계 {sum}%{sum!==100&&' — 저장하면 비율대로 100%에 맞춥니다'}
+          </span>}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── 프로젝트 손익 탭 (2026-09-25 신설 · 마이그레이션 044) ─────
 // 대표이사 전용. 손익 = 계약금액(공급가) − (인건비 + 경비 + 이동 + 구매).
 // 🔑 금액 기준은 «공급가(부가세 뺀 금액)» 다 (사용자 지시). 계약금액은 부가세 포함
@@ -5502,7 +5580,7 @@ function TabProfit({workers,dupNames,jiraTree,jiraDone=new Set(),showToast}){
   )
 }
 
-function TabPurchase({workers:allWorkers,me,canEditOthers,showToast}){
+function TabPurchase({workers:allWorkers,jiraTree={},jiraDone=new Set(),me,canEditOthers,showToast}){
   // 🔑 구매는 대표이사가 «결재하는» 일이지 «요청하는» 일이 아니다 (2026-09-05 지시).
   //    요청자 고르개·이력 거르개 어디에도 세우지 않는다.
   // ⚠ 표에서 «지우지는» 않는다 — 예전에 등록된 건이 있으면 화면의 줄과
@@ -5569,6 +5647,8 @@ function TabPurchase({workers:allWorkers,me,canEditOthers,showToast}){
   const [link,setLink]=useState('')
   const [usedFor,setUsedFor]=useState('')
   const [note,setNote]=useState('')
+  // 프로젝트 (선택 — 2026-09-25). 승인된 구매가 손익 원가에 이 프로젝트로 잡힌다
+  const [project,setProject]=useState('')
 
   useEffect(()=>{
     let alive=true
@@ -5594,16 +5674,18 @@ function TabPurchase({workers:allWorkers,me,canEditOthers,showToast}){
     // 🔑 대표이사에게 결재가 올라가는 일이라 «오눌림» 을 그대로 통과시키지 않는다.
     if(!await askConfirm(
       `· ${itemName.trim()}\n· 수량 ${Number(qty)} × 단가 ${wonFmt(unitPrice)}원\n`
-      +`· 금액 ${wonFmt(amount)}원\n\n대표이사에게 승인 요청 메일이 갑니다.`,
+      +`· 금액 ${wonFmt(amount)}원\n`
+      +`· 프로젝트 ${project?(cleanName(project)||project):'없음'}\n\n대표이사에게 승인 요청 메일이 갑니다.`,
       {title:'아래 구매를 요청할까요?',ok:'구매 요청'}
     ))return
     try{
       setBusy(-1)
       await addPurchase({worker_id:Number(workerId)||null,item_name:itemName.trim(),
         qty:Number(qty),unit_price:Number(unitPrice),
-        link:link.trim(),used_for:usedFor.trim(),note:note.trim()})
+        link:link.trim(),used_for:usedFor.trim(),note:note.trim(),
+        parent_text:project||null,parent_key:projectKey(project)})
       showToast('구매를 요청했습니다')
-      setItemName(''); setQty('1'); setUnitPrice(''); setLink(''); setUsedFor(''); setNote('')
+      setItemName(''); setQty('1'); setUnitPrice(''); setLink(''); setUsedFor(''); setNote(''); setProject('')
       reload()
     }catch(e){ showToast('요청 실패: '+e.message) }
     finally{ setBusy(0) }
@@ -5624,6 +5706,18 @@ function TabPurchase({workers:allWorkers,me,canEditOthers,showToast}){
       setBusy(p.id)
       await setPurchaseStatus(p.id,status,reason)
       showToast(status==='approved'?'승인했습니다':'반려했습니다')
+      reload()
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(0) }
+  }
+
+  // 프로젝트만 고친다 (2026-09-25) — 금액·결재에 닿지 않아 «승인 뒤에도» 된다.
+  // 🔑 구매 요청은 등록 뒤 고치는 길이 없어, 깜빡하면 영영 「공통」 에 남는다.
+  async function changeProject(p,text){
+    try{
+      setBusy(p.id)
+      await setPurchaseProject(p.id,text,projectKey(text))
+      showToast(text?`프로젝트를 「${cleanName(text)||text}」 로 바꿨습니다`:'프로젝트를 비웠습니다')
       reload()
     }catch(e){ showToast('실패: '+e.message) }
     finally{ setBusy(0) }
@@ -5713,6 +5807,12 @@ function TabPurchase({workers:allWorkers,me,canEditOthers,showToast}){
             <label style={labelS}>기타 (선택)</label>
             <input value={note} onChange={e=>setNote(e.target.value)} style={inputS}/>
           </div>
+        </div>
+        {/* 프로젝트 (선택 — 2026-09-25). 사무용품처럼 매이지 않는 구매도 있어 비워 둘 수 있다 */}
+        <div style={{marginBottom:10}}>
+          <label style={labelS}>프로젝트 (선택) — 승인되면 그 프로젝트의 원가로 잡힙니다</label>
+          <ProjectSelect value={project} onChange={setProject}
+            jiraTree={jiraTree} jiraDone={jiraDone} style={inputS}/>
         </div>
         <div style={{display:'flex',gap:10,alignItems:'flex-end'}}>
           {canEditOthers&&(
@@ -5915,7 +6015,8 @@ function TabPurchase({workers:allWorkers,me,canEditOthers,showToast}){
             <thead><tr>
               <th style={thS}>요청일</th><th style={thS}>상태</th><th style={thS}>이름</th>
               <th style={thS}>물품</th><th style={thS}>수량</th><th style={thS}>단가</th>
-              <th style={thS}>금액</th><th style={thS}>사용처</th><th style={thS}>기타</th><th style={thS}></th>
+              <th style={thS}>금액</th><th style={thS}>프로젝트</th>
+              <th style={thS}>사용처</th><th style={thS}>기타</th><th style={thS}></th>
             </tr></thead>
             <tbody>
               {items.map(p=>{
@@ -5941,6 +6042,17 @@ function TabPurchase({workers:allWorkers,me,canEditOthers,showToast}){
                     <td style={tdS}>{Number(p.qty)}</td>
                     <td style={tdS}>{wonFmt(p.unit_price)}</td>
                     <td style={{...tdS,fontWeight:700}}>{wonFmt(p.amount)}</td>
+                    <td style={{...tdS,fontSize:11,maxWidth:180}}>
+                      {/* 주인·관리자·대표이사는 그 자리에서 고친다 — 승인 뒤에도(서버도 같은 기준) */}
+                      {(mine||canEditOthers||me?.is_boss)
+                        ?<ProjectSelect value={p.parent_text||''} onChange={t=>changeProject(p,t)}
+                            jiraTree={jiraTree} jiraDone={jiraDone} disabled={busy===p.id}
+                            emptyLabel="— 없음 —"
+                            style={{fontSize:11,padding:'3px 4px',border:'1px solid #e5e7eb',
+                              borderRadius:5,maxWidth:170}}/>
+                        :<span style={{color:p.parent_text?'#374151':'#d1d5db'}}>
+                            {p.parent_text?(cleanName(p.parent_text)||p.parent_text):'—'}</span>}
+                    </td>
                     <td style={{...tdS,fontSize:11,color:'#6b7280'}}>{p.used_for||'-'}</td>
                     <td style={{...tdS,fontSize:11,color:'#6b7280'}}>{p.note||'-'}</td>
                     <td style={tdS}>
@@ -7283,6 +7395,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
                      // 기간으로 넣을 때 «쉬는 날» 을 빼려면 공휴일을 알아야 한다 (2026-09-05)
                      restDays=new Set(),holidayMap=new Map(),
                      me,canEditOthers=false,
+                     // 프로젝트 고르개 목록 (2026-09-25 — 손익의 이동 비용 배분)
+                     jiraTree={},jiraDone=new Set(),
                      onClose,onSaved,onCopy,onOpenActual,showToast}){
   const isNew=!editing
   const src=editing||copyFrom||null        // 값을 가져올 원본
@@ -7347,6 +7461,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   //    수단을 여러 개 고르게 하지 않은 것은 transport 한 칸에 배차·달력 아이콘·
   //    정산·장소 묶기가 모두 걸려 있어, 하나만 놓쳐도 겹침이 조용히 안 잡히기 때문이다.
   const [mixed,setMixed]=useState(!!src?.mixed_transport)
+  // 프로젝트와 비율 (2026-09-25) — 손익의 이동 비용이 이 비율대로 나뉜다
+  const [projects,setProjects]=useState(()=>Array.isArray(src?.projects)?src.projects:[])
   const [vehicleId,setVehicleId]=useState(src?.vehicle_id||defaultVehicleId||'')
   const [roundTrip,setRoundTrip]=useState(src?src.round_trip:true)
   // 편도일 때만 쓰는 방향. 기본은 「출발」 — 사무실에서 나가는 쪽이 훨씬 흔하다.
@@ -7422,6 +7538,23 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   const showMin=estMin!=null?(roundTrip?estMin*2:estMin):null
   // 외부 장소를 골랐는지 (이동 수단을 물어야 하는 상태)
   const needsTransport=isWork&&!atOffice&&!!placeId
+  // 🔑 프로젝트는 «이동 비용이 생기는 업무» 에만 묻는다 — 외부 업무, 업무용 차량 예약.
+  //    내근·개인 사용·휴가에는 나눌 이동 비용이 없다(서버도 업무가 아니면 비운다).
+  const showProjects=needsTransport||(isVehicleOnly&&!personal)
+  // 프로젝트는 정산 금액에 닿지 않으므로 «실적이 붙어 잠긴 계획» 에도 고칠 수 있게 한다.
+  // 주인·관리자에 더해 대표이사(손익을 정리하는 사람)도 된다 — 서버도 같은 기준이다.
+  const canEditProjects=mine||!!me?.is_boss
+  const projectsOnly=!isNew&&!canEdit&&canEditProjects&&editing?.use_type==='business'
+  async function saveProjectsOnly(){
+    try{
+      setBusy(true)
+      await updatePlanProjects(editing.id,projectsForSave(projects))
+      showToast('프로젝트를 저장했습니다')
+      await onSaved({focusDate:editing.plan_date})
+      onClose()
+    }catch(e){ showToast('실패: '+e.message) }
+    finally{ setBusy(false) }
+  }
   // 차량 예약은 이동 수단이 «법인차량 또는 자차» 뿐이다(대중교통은 차량이 아니다)
   const vehicleTransports=OUT_TRANSPORTS.filter(t=>t.needsVehicle)
 
@@ -7513,6 +7646,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
       transport:isVacation?'none':(atOffice?'office':transport),
       // 외부 업무일 때만 뜻이 있다 — 내근·휴가에 「복합 이동」이 붙으면 거짓이다
       mixed_transport:(isWork&&!atOffice)?mixed:false,
+      // 이동 비용이 생기는 업무일 때만 싣는다. 그 밖에는 비워 보내 서버가 지우게 한다
+      projects:showProjects?projectsForSave(projects):null,
       vehicle_id:(isVehicleOnly||(isWork&&!atOffice&&tp.needsVehicle))?Number(vehicleId):null,
       est_distance_km:isWork?km:null, est_travel_min:isWork?min:null,
       round_trip:(isWork&&!atOffice)?roundTrip:false,
@@ -8370,6 +8505,34 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
                   {oneWayDir==='이동'?'출발지를 고르면 거리가 표시됩니다.':'장소를 고르면 거리·시간이 표시됩니다.'}
                 </span>}
             </div>
+          </div>
+        )}
+
+        {/* ── 프로젝트 (2026-09-25) — 손익의 이동 비용을 나누는 근거 ── */}
+        {(showProjects||(projectsOnly&&projects.length>0))&&(
+          <div style={rowS}>
+            <label style={labelS}>프로젝트 (선택)</label>
+            <ProjectSharesEditor value={projects} onChange={setProjects}
+              jiraTree={jiraTree} jiraDone={jiraDone} disabled={!(canEdit||projectsOnly)}/>
+            <div style={{fontSize:11,color:'#9ca3af',marginTop:5,lineHeight:1.6}}>
+              이 일정의 <strong>이동 비용</strong>(이동 실비·하이패스·주유)이 이 프로젝트에 잡힙니다.
+              한 번 나가 <strong>여러 곳</strong>을 다녀오면 프로젝트를 더하고 <strong>비율</strong>을 나누십시오.
+              곳마다 계획을 따로 넣었다면 계획마다 하나씩 고르면 됩니다.
+            </div>
+            {projectsOnly&&(
+              <div style={{marginTop:8,background:'#f0f9ff',border:'1px solid #bae6fd',borderRadius:7,
+                padding:'8px 10px',display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+                <span style={{fontSize:11,color:'#075985',flex:1,minWidth:180}}>
+                  🔒 {locked?'실적이 들어가 계획은 잠겨 있지만':'남의 일정이지만'}
+                  {' '}<strong>프로젝트는 고칠 수 있습니다</strong> — 정산 금액에는 닿지 않습니다.
+                </span>
+                <button onClick={saveProjectsOnly} disabled={busy}
+                  style={{padding:'7px 14px',borderRadius:7,border:'none',background:'#0369a1',
+                    color:'#fff',cursor:'pointer',fontSize:12,fontWeight:700}}>
+                  {busy?'처리 중…':'프로젝트만 저장'}
+                </button>
+              </div>
+            )}
           </div>
         )}
 

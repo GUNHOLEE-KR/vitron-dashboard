@@ -69,6 +69,10 @@ export const removePlan = (id) => request('DELETE', `/plans/${id}`)
 export const joinCarpool = (id, withPlanId) =>
   request('POST', `/plans/${id}/carpool`, { with_plan_id: withPlanId })
 export const leaveCarpool = (id) => request('DELETE', `/plans/${id}/carpool`)
+// 프로젝트만 고친다 (2026-09-25) — 실적이 붙어 잠긴 계획도 이 한 칸은 고칠 수 있다.
+// projects = [{parent_key, parent_text, share}] · 비우려면 null. 비율은 서버가 100 에 맞춘다.
+export const updatePlanProjects = (id, projects) =>
+  request('PATCH', `/plans/${id}/projects`, { projects })
 
 // ── 휴가 승인 (2026-08-26 신설) ──
 // 승인·반려는 대표이사만 할 수 있다. 서버가 막으므로 화면은 단추를 감추기만 한다.

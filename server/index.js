@@ -1364,6 +1364,49 @@ const PLAN_SELECT = `
          AND q.status <> 'canceled'
     ) cp ON TRUE`
 
+// ── 일정의 프로젝트 (2026-09-25, 마이그레이션 045) ───────────────
+// 손익의 «이동 비용» 을 프로젝트에 나누는 근거. 한 번 나가서 여기저기 다니는 날이
+// 있으므로(사용자 지시) 프로젝트를 «여러 개» 받고 비율로 나눈다.
+// 돌려주는 것 =  { keep:true }   안 보냈다 (건드리지 않는다)
+//                { value:null }  비웠다
+//                { value:[…] }   정리한 목록 — share 는 «정수 %, 합 100»
+//                { err }         사용자에게 보일 문구
+// 🔑 비율은 서버가 맞춘다 — 화면이 90% 를 보내도 비율대로 100 에 맞춰 저장한다.
+//    안 맞추면 손익에서 10% 가 어디로도 안 가고 조용히 사라진다.
+const PROJECT_MAX = 10
+const projectKeyOf = text => (String(text || '').match(/^\s*\[([^\]]+)\]/) || [])[1] || null
+function cleanProjects(raw) {
+  if (raw === undefined) return { keep: true }
+  if (raw === null || raw === '') return { value: null }
+  if (!Array.isArray(raw)) return { err: '프로젝트 형식이 올바르지 않습니다.' }
+  const seen = new Set(), list = []
+  for (const it of raw) {
+    const text = String(it?.parent_text || '').trim().slice(0, 200)
+    if (!text) continue
+    const key = String(it?.parent_key || projectKeyOf(text) || '').slice(0, 40) || null
+    const id = key || text
+    if (seen.has(id)) continue            // 같은 프로젝트를 두 번 고르면 한 줄로
+    seen.add(id)
+    const share = Number(it?.share)
+    list.push({ parent_key: key, parent_text: text, share: share > 0 ? share : 0 })
+  }
+  if (list.length > PROJECT_MAX) return { err: `프로젝트는 ${PROJECT_MAX}개까지 고를 수 있습니다.` }
+  if (!list.length) return { value: null }
+  // 비율 — 하나도 안 적었으면 «똑같이», 적었으면 그 비율대로 100 에 맞춘다.
+  // 정수로 자르고 남는 1% 들은 «버림이 컸던 줄» 부터 하나씩 준다(최대 나머지 방식) —
+  // 첫 줄에 몰아주면 셋으로 나눌 때 34·33·33 은 맞지만 비율을 적은 경우엔 치우친다.
+  const total = list.reduce((s, x) => s + x.share, 0)
+  const exact = total > 0 ? list.map(x => x.share / total * 100) : list.map(() => 100 / list.length)
+  const ints = exact.map(Math.floor)
+  let rest = 100 - ints.reduce((s, x) => s + x, 0)
+  const order = exact.map((v, i) => [v - Math.floor(v), i]).sort((a, b) => b[0] - a[0])
+  for (let k = 0; rest > 0; k++, rest--) ints[order[k % order.length][1]]++
+  list.forEach((x, i) => { x.share = ints[i] })
+  // 비율을 0 으로 적은 줄은 «안 쓴 것» 이다 — 남기면 0% 짜리 프로젝트가 표에 뜬다
+  const kept = list.filter(x => x.share > 0)
+  return { value: kept.length ? kept : null }
+}
+
 app.get('/api/schedule/plans', async (req, res) => {
   const { from, to, worker_id, vehicle_id } = req.query
   if (!from || !to) return res.status(400).json({ error: 'from·to 날짜가 필요합니다.' })
@@ -1476,6 +1519,10 @@ app.post('/api/schedule/plans', async (req, res) => {
   //    종류와 «따로» 담는다 — 종류 칸에 넣으면 집계가 갈라진다(033 의 메모 참고).
   const vacationNote = useType === 'vacation'
     ? (String(b.vacation_note || '').trim().slice(0, 100) || null) : null
+  // 프로젝트 — 업무 일정만. 개인 사용·휴가는 장소처럼 서버가 비운다(2026-09-25, 045)
+  const pj = cleanProjects(b.projects)
+  if (pj.err) return res.status(400).json({ error: pj.err })
+  const projectsJson = keepPlace && pj.value ? JSON.stringify(pj.value) : null
   try {
     // 자차 소유 검사 — 겹침 검사보다 «먼저» 본다. 애초에 쓸 수 없는 차라면
     // 「이미 예약된 차량입니다」로 되묻는 것이 안내로도 맞지 않는다.
@@ -1543,8 +1590,8 @@ app.post('/api/schedule/plans', async (req, res) => {
           place_id, place_text, purpose, transport, vehicle_id,
           est_distance_km, est_travel_min, round_trip, vacation_type, one_way_dir,
           approval, approved_at, approved_by_id, from_place_id, vacation_note, vacation_hours,
-          carpool_group, mixed_transport)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) RETURNING *`,
+          carpool_group, mixed_transport, projects)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25::jsonb) RETURNING *`,
       [b.worker_id, b.plan_date, b.slot || 'allday', b.start_time || null, b.end_time || null,
        useType, placeId, placeText, purpose, b.transport || 'office', b.vehicle_id ?? null,
        b.est_distance_km ?? null, b.est_travel_min ?? null,
@@ -1556,7 +1603,8 @@ app.post('/api/schedule/plans', async (req, res) => {
        vacationNote, vacationHours, carpoolGroup,
        // 🔑 「복합」은 transport 를 밀어내지 않는다 — 법인차량이면서 복합일 수 있다
        //    (2026-09-24 사용자 확인). 업무가 아니면 뜻이 없어 끈다.
-       keepPlace ? !!b.mixed_transport : false]
+       keepPlace ? !!b.mixed_transport : false,
+       projectsJson]
     )
     // 처음 묶이는 것이면 «대표» 줄에도 묶음 번호를 단다. 대표의 일정 내용은 건드리지 않는다.
     if (carpoolGroup) {
@@ -1666,6 +1714,10 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
     const leaveCarpool = cur[0].carpool_group != null && (
       (b.plan_date && String(b.plan_date) !== String(cur[0].plan_date))
       || Number(nextVehicle || 0) !== Number(cur[0].vehicle_id || 0))
+    // 프로젝트 — 🔑 「안 보냄」(그대로)과 「비움」을 가른다(transit_items 와 같은 규칙).
+    //    안 가르면 프로젝트를 안 건드리는 수정 한 번에 배분이 통째로 사라진다.
+    const pj = cleanProjects(b.projects)
+    if (pj.err) return res.status(400).json({ error: pj.err })
     const { rowCount } = await pool.query(
       `UPDATE schedule_plans
           SET plan_date = COALESCE($1, plan_date), slot = COALESCE($2, slot),
@@ -1681,6 +1733,11 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
               -- 업무가 아니게 바뀌면 「복합」도 끈다 — 휴가에 복합 이동이 붙으면 거짓이다
               mixed_transport = CASE WHEN $22::boolean THEN COALESCE($23, mixed_transport)
                                      ELSE FALSE END,
+              -- 업무가 아니게 바뀌면 프로젝트도 비운다(장소와 같은 규칙).
+              -- 보냈으면 그 값, 안 보냈으면 그대로
+              projects = CASE WHEN NOT $22::boolean THEN NULL
+                              WHEN $24::boolean THEN $25::jsonb
+                              ELSE projects END,
               updated_at = now()
         WHERE id = $16`,
       [b.plan_date || null, b.slot || null, b.start_time || null, b.end_time || null, useType,
@@ -1722,12 +1779,42 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
          : null,
        leaveCarpool,
        keepPlace,
-       b.mixed_transport === undefined ? null : !!b.mixed_transport]
+       b.mixed_transport === undefined ? null : !!b.mixed_transport,
+       !pj.keep,
+       pj.value ? JSON.stringify(pj.value) : null]
     )
     if (rowCount === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
     // 고친 뒤의 모습으로 알린다. 차량이 빠졌으면 mailer 가 알아서 거른다.
     notifyVehicle('update', req.params.id, req)
     res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ── 프로젝트만 고치기 (2026-09-25) ───────────────────────────
+// 🔑 실적이 붙은 계획은 화면이 통째로 잠근다(계획을 바꾸면 정산 근거와 어긋난다).
+//    그런데 지난 출장은 거의 모두 실적이 붙어 있어, 그대로면 «지난 일정에 프로젝트를
+//    달 길이 없다». 프로젝트는 정산 금액에 닿지 않고 손익 배분에만 쓰이므로,
+//    이 한 칸만은 잠겨 있어도 고칠 수 있게 따로 연다.
+// 권한 = 그 일정의 주인 · 관리자 · 대표이사(손익을 정리하는 사람).
+app.patch('/api/schedule/plans/:id/projects', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, worker_id, use_type FROM schedule_plans WHERE id = $1', [req.params.id])
+    if (!rows.length) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
+    if (!canEditWorker(req.session, rows[0].worker_id) && !await isBossUser(req.session.uid)) {
+      return denyOther(res)
+    }
+    if (rows[0].use_type !== 'business') {
+      return res.status(400).json({ error: '업무 일정에만 프로젝트를 달 수 있습니다.' })
+    }
+    const pj = cleanProjects(req.body?.projects ?? null)
+    if (pj.err) return res.status(400).json({ error: pj.err })
+    const { rows: out } = await pool.query(
+      'UPDATE schedule_plans SET projects = $1::jsonb, updated_at = now() WHERE id = $2 RETURNING projects',
+      [pj.value ? JSON.stringify(pj.value) : null, req.params.id])
+    res.json({ ok: true, projects: out[0].projects })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
@@ -2561,17 +2648,23 @@ app.post('/api/purchases', async (req, res) => {
     // 🔑 결재자가 낸 요청은 그 자리에서 승인으로 둔다 — 자기에게 요청 메일을 보내고
     //    자기가 승인하는 것은 절차가 아니라 헛돌기다 (휴가와 같은 결).
     const selfApprove = await canApprove(req.session.uid)
+    // 프로젝트 (선택 — 2026-09-25, 045). 키와 «이름» 을 함께 담는다
+    const parentText = String(b.parent_text || '').trim().slice(0, 200) || null
+    const parentKey = parentText
+      ? (String(b.parent_key || projectKeyOf(parentText) || '').slice(0, 40) || null) : null
     const { rows } = await pool.query(
       `INSERT INTO purchase_requests
          (requester_id, worker_id, item_name, qty, unit_price, amount,
-          link, used_for, note, status, approved_at, approved_by_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+          link, used_for, note, status, approved_at, approved_by_id,
+          parent_key, parent_text)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
       [req.session.uid, workerId, itemName, qty, unitPrice,
        purchaseAmount(qty, unitPrice),
        (b.link || '').trim() || null, (b.used_for || '').trim() || null,
        (b.note || '').trim() || null,
        selfApprove ? 'approved' : 'pending',
-       selfApprove ? new Date() : null, selfApprove ? req.session.uid : null])
+       selfApprove ? new Date() : null, selfApprove ? req.session.uid : null,
+       parentKey, parentText])
 
     if (!selfApprove) notifyPurchaseById('request', rows[0].id, req)
     res.json(rows[0])
@@ -2602,6 +2695,30 @@ app.patch('/api/purchases/:id/approval', async (req, res) => {
     if (rowCount === 0) return res.status(404).json({ error: '해당 요청을 찾을 수 없습니다.' })
     notifyPurchaseById(want, req.params.id, req, reason)
     res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// 프로젝트만 고치기 (2026-09-25). 🔑 구매 요청은 등록 뒤 «고치는» 길이 없고 승인된 건은
+// 지울 수도 없다 — 프로젝트를 깜빡하면 영영 「공통」 에 남는다. 프로젝트는 금액·결재에
+// 닿지 않으므로 이 한 칸만은 승인 뒤에도 고칠 수 있게 연다.
+// 권한 = 요청한 사람(주인) · 관리자 · 대표이사.
+app.patch('/api/purchases/:id/project', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT worker_id FROM purchase_requests WHERE id = $1', [req.params.id])
+    if (!rows.length) return res.status(404).json({ error: '해당 요청을 찾을 수 없습니다.' })
+    if (!canEditWorker(req.session, rows[0].worker_id) && !await isBossUser(req.session.uid)) {
+      return denyOther(res)
+    }
+    const parentText = String(req.body?.parent_text || '').trim().slice(0, 200) || null
+    const parentKey = parentText
+      ? (String(req.body?.parent_key || projectKeyOf(parentText) || '').slice(0, 40) || null) : null
+    await pool.query(
+      `UPDATE purchase_requests SET parent_key = $1, parent_text = $2, updated_at = now()
+        WHERE id = $3`, [parentKey, parentText, req.params.id])
+    res.json({ ok: true, parent_key: parentKey, parent_text: parentText })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
