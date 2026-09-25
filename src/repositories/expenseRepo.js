@@ -44,3 +44,21 @@ export const removeExpense = (id) => request('DELETE', `/${id}`)
 
 // 영수증은 새 창에서 «보는» 것이라 주소만 만들어 준다 (내려받지 않는다).
 export const receiptUrl = (id) => `${BASE}/${id}/receipt`
+
+// ── 카카오톡 「나에게 보내기」 (2026-09-25) ──
+// 🔑 등록·수정·삭제 때는 보내지 않는다(사용자 지시). 「미전송」 에서 고른 것만 보낸다.
+export const sendExpensesKakao = (ids) => request('POST', '/kakao-send', { ids })
+
+async function kakaoCall(method, path) {
+  const res = await fetch('/api/kakao' + path, { method })
+  const text = await res.text()
+  let data = null
+  try { data = text ? JSON.parse(text) : null } catch { /* JSON 이 아니면 원문을 쓴다 */ }
+  if (!res.ok) throw new Error(data?.error || text || `요청 실패 (HTTP ${res.status})`)
+  return data
+}
+// { configured, cred_ready, test, recipient:{name}, connected, can_connect, last_ok_at, last_error, … }
+export const getKakaoStatus = () => kakaoCall('GET', '/status')
+export const disconnectKakao = () => kakaoCall('DELETE', '/link')
+// ⚠ 연결은 fetch 가 아니라 «주소 이동» 이다 — 카카오 동의 화면을 거쳐 설정 탭으로 돌아온다
+export const KAKAO_CONNECT_URL = '/api/kakao/connect'

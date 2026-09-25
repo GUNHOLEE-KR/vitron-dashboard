@@ -8,7 +8,8 @@ import { getMyMailSender, saveMyMailSender, removeMyMailSender,
          getMailAccount, saveMailAccount, removeMailAccount } from './repositories/mailSenderRepo'
 import { getAbsences, addAbsence, removeAbsence } from './repositories/absenceRepo'
 import { getExpenses, getExpenseSummary, addExpense, updateExpense,
-         removeExpense, receiptUrl } from './repositories/expenseRepo'
+         removeExpense, receiptUrl, sendExpensesKakao, getKakaoStatus, disconnectKakao,
+         KAKAO_CONNECT_URL } from './repositories/expenseRepo'
 import { getContracts, addContract, removeContract,
          getRates, addRate, removeRate, getProfitSummary } from './repositories/profitRepo'
 import { getVehicleCare, getVehicleDue, addVehicleEvent, removeVehicleEvent,
@@ -4829,6 +4830,88 @@ const EXP_PAY_MAP=Object.fromEntries(EXP_PAYS.map(p=>[p.v,p.label]))
 //    화면에서 먼저 걸러 「올리다 실패」가 아니라 「고르는 순간」 알린다.
 const RECEIPT_MAX=8*1024*1024
 
+// ── 카카오톡 「나에게 보내기」 연결 카드 (2026-09-25 · 047) ─────
+// 받는 사람 = 대표이사(테스트 서버는 KAKAO_TO_TEST). 연결은 «받는 사람 본인» 만 한다 —
+// 연결한 사람의 「나와의 채팅」 으로 가기 때문이다.
+// 🔴 끊기거나 실패하면 붉게 알린다. 연결은 약 두 달이면 끝나므로 서버가 날마다 갱신하지만,
+//    그래도 끊기면 «조용히 멈춘» 것을 아무도 모른다.
+const fmtDT=v=>v?String(new Date(v).toLocaleString('ko-KR',{hour12:false})).replace(/:\d\d$/,''):'—'
+function KakaoCard({showToast}){
+  const [st,setSt]=useState(null)
+  const [err,setErr]=useState('')
+  const [busy,setBusy]=useState(false)
+  const load=()=>getKakaoStatus().then(s=>{setSt(s);setErr('')}).catch(e=>setErr(e.message))
+  // ⚠ showToast 는 대시보드가 그려질 때마다 새로 만들어지는 함수라 의존성에 넣으면
+  //   그때마다 상태를 다시 조회한다 — 처음 한 번만 돈다
+  const toastRef=useRef(showToast)
+  useEffect(()=>{
+    // 카카오 동의 화면에서 돌아오면 결과가 주소에 실려 온다 — 한 번 알리고 주소를 깨끗이 한다
+    const q=new URLSearchParams(window.location.search)
+    const ok=q.get('kakao'), bad=q.get('kakao_error')
+    if(ok||bad){
+      toastRef.current(bad?`카카오 연결 실패 — ${bad}`:'카카오 계정을 연결했습니다',bad?7000:4000)
+      window.history.replaceState(null,'',window.location.pathname+window.location.hash)
+    }
+    let alive=true
+    getKakaoStatus().then(s=>{ if(alive){setSt(s);setErr('')} }).catch(e=>{ if(alive) setErr(e.message) })
+    return()=>{alive=false}
+  },[])
+  async function unlink(){
+    if(!await askConfirm('끊으면 경비를 카카오톡으로 보낼 수 없습니다. 다시 연결하면 됩니다.',
+      {title:'카카오 연결을 끊을까요?',ok:'연결 끊기'})) return
+    try{ setBusy(true); await disconnectKakao(); showToast('연결을 끊었습니다'); await load() }
+    catch(e){ showToast('실패: '+e.message) } finally{ setBusy(false) }
+  }
+  const row=(l,v)=><div style={{display:'flex',gap:8,fontSize:12,marginBottom:3}}>
+    <span style={{color:'#6b7280',minWidth:88}}>{l}</span><span>{v}</span></div>
+  return(
+    <Card title="💬 카카오톡 — 경비 받는 사람" style={{flex:1,minWidth:300}}>
+      {err&&<div style={{fontSize:12,color:'#991b1b'}}>⚠ {err}</div>}
+      {!st?<p style={{fontSize:12,color:'#9ca3af'}}>{err?'':'불러오는 중…'}</p>:<>
+        {!st.configured&&(
+          <div style={{background:'#f9fafb',border:'1px solid #e5e7eb',borderRadius:8,padding:'8px 10px',
+            fontSize:12,color:'#6b7280',marginBottom:8,lineHeight:1.6}}>
+            ⏸ <strong>아직 꺼져 있습니다.</strong> 카카오 디벨로퍼스 앱 키가 서버에 들어가면 켜집니다
+            (<code>KAKAO_REST_KEY</code> · <code>KAKAO_REDIRECT_URI</code>).
+          </div>)}
+        {st.configured&&st.last_error&&(
+          <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,padding:'8px 10px',
+            fontSize:12,color:'#991b1b',marginBottom:8,lineHeight:1.6}}>
+            🔴 <strong>마지막 실패</strong> ({fmtDT(st.last_error_at)}) — {st.last_error}
+            {st.can_connect&&<><br/>아래 <strong>[다시 연결]</strong> 을 눌러 주십시오.</>}
+          </div>)}
+        {row('받는 사람',<strong>{st.recipient?.name||'— (대표이사를 찾지 못함)'}
+          {st.test&&<span style={{marginLeft:6,fontSize:11,color:'#b91c1c'}}>테스트 서버</span>}</strong>)}
+        {row('연결',st.connected
+          ?<span style={{color:'#059669',fontWeight:700}}>✓ 연결됨 <span style={{fontWeight:400,color:'#6b7280'}}>({fmtDT(st.connected_at)})</span></span>
+          :<span style={{color:'#b91c1c',fontWeight:700}}>연결 안 됨</span>)}
+        {st.connected&&row('마지막 보냄',fmtDT(st.last_ok_at))}
+        {st.connected&&row('연결 만료',<>{fmtDT(st.refresh_expires_at)}
+          <span style={{color:'#9ca3af'}}> — 서버가 날마다 갱신합니다</span></>)}
+        <div style={{display:'flex',gap:8,marginTop:10,flexWrap:'wrap'}}>
+          {st.can_connect&&st.cred_ready&&(
+            // ⚠ fetch 가 아니라 «주소 이동» — 카카오 동의 화면을 거쳐 이 탭으로 돌아온다
+            <a href={KAKAO_CONNECT_URL}
+              style={{padding:'7px 14px',borderRadius:7,background:'#fee500',color:'#191600',
+                fontSize:12,fontWeight:700,textDecoration:'none'}}>
+              {st.connected?'다시 연결':'카카오 계정 연결'}</a>)}
+          {st.connected&&(st.can_connect)&&(
+            <button onClick={unlink} disabled={busy}
+              style={{padding:'7px 12px',borderRadius:7,border:'1px solid #e5e7eb',background:'#fff',
+                color:'#6b7280',fontSize:12,cursor:'pointer'}}>연결 끊기</button>)}
+        </div>
+        {st.configured&&!st.can_connect&&(
+          <div style={{fontSize:11,color:'#9ca3af',marginTop:8,lineHeight:1.6}}>
+            연결은 <strong>받는 사람({st.recipient?.name||'대표이사'}) 본인</strong>만 할 수 있습니다 —
+            연결한 사람의 「나와의 채팅」 으로 가기 때문입니다.
+          </div>)}
+        {st.configured&&!st.cred_ready&&(
+          <div style={{fontSize:11,color:'#b91c1c',marginTop:8}}>⚠ 서버에 MAIL_CRED_KEY 가 없어 연결 정보를 담을 수 없습니다.</div>)}
+      </>}
+    </Card>
+  )
+}
+
 function TabExpense({workers:allWorkers,jiraTree,jiraDone=new Set(),me,canEditOthers,showToast}){
   const today0=today()
   // 기본 기간 = 이번 달. 「이 달에 누가 얼마 썼나」가 가장 잦은 물음이다.
@@ -4865,6 +4948,7 @@ function TabExpense({workers:allWorkers,jiraTree,jiraDone=new Set(),me,canEditOt
       const [list,s]=await Promise.all([getExpenses(f),getExpenseSummary({from,to})])
       setRows(list); setSum(s)
     }catch(e){ setErr(e.message); setRows([]); setSum(null) }
+    loadKakao()
   }
   useEffect(()=>{ let alive=true
     ;(async()=>{
@@ -4877,6 +4961,55 @@ function TabExpense({workers:allWorkers,jiraTree,jiraDone=new Set(),me,canEditOt
     })()
     return()=>{alive=false}
   },[from,to,onlyMine,me?.worker_id])
+
+  // ── 카카오톡 (2026-09-25 · 047) ─────────────────────────────
+  // 🔑 등록·수정·삭제 때는 보내지 않는다(사용자 지시). 「미전송」 에서 체크한 것만 [보내기].
+  //    미전송 = 한 번도 안 보낸 것 + «보낸 뒤 고친 것»(대표이사가 옛 금액만 알고 있으면 안 된다).
+  //    ⚠ 기간과 무관하게 전부 본다 — 지난달 것을 깜빡했어도 여기 남아 있어야 한다.
+  //    내가 보낼 수 있는 것(본인 것 · 관리자는 전부)만 보인다 — 서버도 같은 기준이다.
+  const [kst,setKst]=useState(null)
+  const [unsent,setUnsent]=useState([])
+  const [pick,setPick]=useState(()=>new Set())
+  const [sending,setSending]=useState(false)
+  const unsentOf=all=>all.filter(r=>r.kakao_state!=='sent'
+    &&(canEditOthers||Number(r.worker_id)===Number(me?.worker_id)))
+  async function loadKakao(){
+    try{
+      const [s,all]=await Promise.all([getKakaoStatus().catch(()=>null),getExpenses({})])
+      const list=unsentOf(all)
+      setKst(s); setUnsent(list)
+      // 사라진 것(보냈거나 지운 것)은 고른 목록에서도 뺀다
+      setPick(p=>new Set([...p].filter(id=>list.some(r=>r.id===id))))
+    }catch{ /* 목록 오류는 아래 내역 칸이 알린다 */ }
+  }
+  useEffect(()=>{ let alive=true
+    ;(async()=>{
+      try{
+        const [s,all]=await Promise.all([getKakaoStatus().catch(()=>null),getExpenses({})])
+        if(alive){ setKst(s); setUnsent(all.filter(r=>r.kakao_state!=='sent'
+          &&(canEditOthers||Number(r.worker_id)===Number(me?.worker_id)))) }
+      }catch{ /* 목록 오류는 아래 내역 칸이 알린다 */ }
+    })()
+    return()=>{alive=false}
+  },[canEditOthers,me?.worker_id])
+  const kakaoReady=!!(kst?.configured&&kst?.connected)
+  async function sendKakao(){
+    const chosen=unsent.filter(r=>pick.has(r.id))
+    if(!chosen.length){ showToast('보낼 경비를 골라 주십시오'); return }
+    const total=chosen.reduce((s,r)=>s+Number(r.amount||0),0)
+    if(!await askConfirm(
+      `${chosen.length}건 · 합계 ${Number(total).toLocaleString()}원\n`
+      +`→ ${kst?.recipient?.name||'대표이사'} 님 카카오톡(나와의 채팅)`,
+      {title:'골라 둔 경비를 카카오톡으로 보낼까요?',ok:'카카오톡 보내기'})) return
+    try{
+      setSending(true)
+      const r=await sendExpensesKakao(chosen.map(x=>x.id))
+      showToast(`${r.sent}건을 ${r.to} 님께 카카오톡으로 보냈습니다`,4000)
+      setPick(new Set())
+      await load()
+    }catch(e){ showToast('보내기 실패: '+e.message,7000); await loadKakao() }
+    finally{ setSending(false) }
+  }
 
   const won=n=>Number(n||0).toLocaleString()
   const mine=r=>canEditOthers||Number(r.worker_id)===Number(me?.worker_id)
@@ -5047,6 +5180,77 @@ function TabExpense({workers:allWorkers,jiraTree,jiraDone=new Set(),me,canEditOt
         {err&&<div style={{fontSize:12,color:'#b91c1c',marginBottom:10}}>불러오지 못했습니다: {err}</div>}
       </Card>
 
+      {/* ── 카카오톡으로 보내기 (047) — 체크한 것만 보낸다 ── */}
+      <Card title={`💬 카카오톡으로 보내기 — 미전송 ${unsent.length}건`}>
+        <div style={{fontSize:12,marginBottom:8,display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}}>
+          <span>받는 사람 <strong>{kst?.recipient?.name||'대표이사'}</strong></span>
+          {!kst?<span style={{color:'#9ca3af'}}>확인 중…</span>
+           :!kst.configured?<span style={{color:'#6b7280'}}>⏸ 아직 꺼져 있습니다 (카카오 앱 키 설정 전)</span>
+           :!kst.connected?<span style={{color:'#b91c1c',fontWeight:700}}>
+              카카오 계정이 연결되지 않았습니다 — 받는 사람이 [설정] 탭에서 연결해야 보낼 수 있습니다</span>
+           :<span style={{color:'#059669',fontWeight:700}}>✓ 연결됨</span>}
+        </div>
+        {kst?.last_error&&(
+          <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:7,padding:'6px 10px',
+            fontSize:12,color:'#991b1b',marginBottom:8}}>🔴 마지막 실패 — {kst.last_error}</div>)}
+        {unsent.length===0
+          ?<p style={{fontSize:12,color:'#9ca3af'}}>보낼 것이 없습니다. 새로 적거나 고친 경비가 여기 올라옵니다.</p>
+          :<div style={{overflowX:'auto'}}>
+            <table style={{width:'100%',borderCollapse:'collapse',minWidth:620}}>
+              <thead><tr>
+                <th style={{...thS,width:34}}>
+                  <input type="checkbox" title="전체 고르기"
+                    checked={pick.size>0&&pick.size===unsent.length}
+                    onChange={e=>setPick(e.target.checked?new Set(unsent.map(r=>r.id)):new Set())}/>
+                </th>
+                <th style={{...thS,width:88}}>쓴 날</th>
+                <th style={{...thS,width:78}}>사람</th>
+                <th style={{...thS,width:80}}>종류</th>
+                <th style={{...thS,textAlign:'left'}}>가맹점 · 프로젝트</th>
+                <th style={{...thS,width:92}}>금액</th>
+                <th style={{...thS,width:80}}>상태</th>
+              </tr></thead>
+              <tbody>
+                {unsent.map(r=>(
+                  <tr key={r.id} onClick={()=>setPick(p=>{const n=new Set(p); n.has(r.id)?n.delete(r.id):n.add(r.id); return n})}
+                    style={{cursor:'pointer',background:pick.has(r.id)?'#eff6ff':undefined}}>
+                    <td style={tdS}><input type="checkbox" readOnly checked={pick.has(r.id)}/></td>
+                    <td style={{...tdS,fontSize:11}}>{r.spent_on}</td>
+                    <td style={{...tdS,fontSize:11}}>{r.worker_name||'—'}</td>
+                    <td style={{...tdS,fontSize:11}}>{EXP_KIND_MAP[r.kind]?.icon} {EXP_KIND_MAP[r.kind]?.label}</td>
+                    <td style={{...tdS,textAlign:'left',fontSize:11}}>
+                      {r.merchant||<span style={{color:'#9ca3af'}}>—</span>}
+                      {r.parent_text&&<span style={{color:'#6b7280'}}> · {cleanName(r.parent_text)||r.parent_text}</span>}
+                    </td>
+                    <td style={{...tdS,fontWeight:700}}>{won(r.amount)}</td>
+                    <td style={{...tdS,fontSize:11}}>
+                      {r.kakao_state==='changed'
+                        ?<span title={`보낸 때 ${fmtDT(r.kakao_sent_at)}`} style={{color:'#b45309',fontWeight:700}}>보낸 뒤 수정됨</span>
+                        :<span style={{color:'#6b7280'}}>미전송</span>}
+                    </td>
+                  </tr>))}
+              </tbody>
+            </table>
+          </div>}
+        {unsent.length>0&&(
+          <div style={{display:'flex',gap:10,alignItems:'center',marginTop:10,flexWrap:'wrap'}}>
+            <button onClick={sendKakao} disabled={sending||!pick.size||!kakaoReady}
+              title={!kakaoReady?'카카오 연결이 되어야 보낼 수 있습니다':''}
+              style={{padding:'8px 16px',borderRadius:7,border:'none',
+                background:(!pick.size||!kakaoReady)?'#e5e7eb':'#fee500',
+                color:(!pick.size||!kakaoReady)?'#9ca3af':'#191600',fontWeight:700,fontSize:13,
+                cursor:(sending||!pick.size||!kakaoReady)?'default':'pointer'}}>
+              {sending?'보내는 중…':`고른 ${pick.size}건 카카오톡으로 보내기`}
+            </button>
+            {pick.size>0&&<span style={{fontSize:12,color:'#374151'}}>
+              합계 <strong>{won(unsent.filter(r=>pick.has(r.id)).reduce((s,r)=>s+Number(r.amount||0),0))}</strong>원</span>}
+          </div>)}
+        <div style={{fontSize:11,color:'#9ca3af',marginTop:8,lineHeight:1.6}}>
+          💡 경비를 <strong>적거나 고치거나 지울 때는 보내지 않습니다.</strong> 여기서 골라 한 번에 보냅니다.
+          보낸 뒤 고친 것은 <strong>「보낸 뒤 수정됨」</strong> 으로 다시 올라옵니다. 여러 건이면 합계와 앞 몇 건을 한 통으로 보냅니다(카카오 글자 수 제한).
+        </div>
+      </Card>
+
       {/* ── 집계 — 담긴 것은 하나이고 «묶는 기준» 만 바뀐다 ── */}
       {sum&&sum.count>0&&(
         <Card title="집계">
@@ -5100,6 +5304,7 @@ function TabExpense({workers:allWorkers,jiraTree,jiraDone=new Set(),me,canEditOt
                 <th style={{...thS,width:74}}>수단</th>
                 <th style={{...thS,width:92}}>금액</th>
                 <th style={{...thS,width:52}}>영수증</th>
+                <th style={{...thS,width:60}}>카톡</th>
                 <th style={{...thS,width:70}}>관리</th>
               </tr></thead>
               <tbody>
@@ -5127,6 +5332,14 @@ function TabExpense({workers:allWorkers,jiraTree,jiraDone=new Set(),me,canEditOt
                             title={r.receipt_name||'영수증 보기'}
                             style={{textDecoration:'none',fontSize:15}}>🧾</a>
                         :<span style={{color:'#e5e7eb'}}>—</span>}
+                    </td>
+                    {/* 카카오톡 — ✓ 보냄 / 수정됨(보낸 뒤 고침) / — 미전송 */}
+                    <td style={{...tdS,fontSize:11}}>
+                      {r.kakao_state==='sent'
+                        ?<span title={`보낸 때 ${fmtDT(r.kakao_sent_at)}`} style={{color:'#059669',fontWeight:700}}>✓</span>
+                        :r.kakao_state==='changed'
+                          ?<span title={`보낸 때 ${fmtDT(r.kakao_sent_at)} — 그 뒤 고침`} style={{color:'#b45309',fontWeight:700}}>수정됨</span>
+                          :<span style={{color:'#d1d5db'}}>—</span>}
                     </td>
                     <td style={tdS}>
                       {mine(r)?(
@@ -11267,6 +11480,8 @@ function TabSettings({workers,setWorkers,dupNames=new Set(),holidays=[],setHolid
             할 때 개인 쪽에 먼저 넣는 일이 실제로 있었다. */}
         <MailAccountCard/>
         <MyMailSenderCard/>
+        {/* 카카오톡 받는 사람 연결 (2026-09-25 · 047) — 경비를 골라 보낼 때 쓴다 */}
+        <KakaoCard showToast={showToast}/>
       </div>
       <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
         <Card title="직원 관리" style={{flex:1,minWidth:300}}>
