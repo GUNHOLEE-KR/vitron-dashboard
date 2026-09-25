@@ -21,6 +21,15 @@ async function request(method, path, body) {
   return data
 }
 
+// ── 손익 집계 — { rows:[…], missing_rates:[…] } · from/to 를 비우면 전체 기간 ──
+export const getProfitSummary = ({ from, to } = {}) => {
+  const p = new URLSearchParams()
+  if (from) p.set('from', from)
+  if (to) p.set('to', to)
+  const s = p.toString()
+  return request('GET', `/summary${s ? `?${s}` : ''}`)
+}
+
 // ── 계약금액 — 고치지 않고 쌓는다 (가장 최근 줄이 지금 계약) ──
 export const getContracts = () => request('GET', '/contracts')
 // { parent_key, parent_text, amount, vat_included, contract_date, kind, note }

@@ -71,10 +71,13 @@ export const joinCarpool = (id, withPlanId) =>
 export const leaveCarpool = (id) => request('DELETE', `/plans/${id}/carpool`)
 // 프로젝트만 고친다 (2026-09-25) — 실적이 붙어 잠긴 계획도 이 한 칸은 고칠 수 있다.
 // projects = [{parent_key, parent_text, share}] · 비우려면 null. 비율은 서버가 100 에 맞춘다.
-// purpose(달력의 「업무」 글자)를 함께 보내면 같이 바꾼다. 안 보내면 그대로 둔다.
-export const updatePlanProjects = (id, projects, purpose) =>
-  request('PATCH', `/plans/${id}/projects`,
-    purpose === undefined ? { projects } : { projects, purpose })
+// purpose(달력의 「업무」 글자)·workNote(메모)를 함께 보내면 같이 바꾼다. 안 보내면 그대로 둔다.
+export const updatePlanProjects = (id, projects, purpose, workNote) => {
+  const body = { projects }
+  if (purpose !== undefined) body.purpose = purpose
+  if (workNote !== undefined) body.work_note = workNote
+  return request('PATCH', `/plans/${id}/projects`, body)
+}
 
 // ── 휴가 승인 (2026-08-26 신설) ──
 // 승인·반려는 대표이사만 할 수 있다. 서버가 막으므로 화면은 단추를 감추기만 한다.

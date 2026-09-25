@@ -10,7 +10,7 @@ import { getAbsences, addAbsence, removeAbsence } from './repositories/absenceRe
 import { getExpenses, getExpenseSummary, addExpense, updateExpense,
          removeExpense, receiptUrl } from './repositories/expenseRepo'
 import { getContracts, addContract, removeContract,
-         getRates, addRate, removeRate } from './repositories/profitRepo'
+         getRates, addRate, removeRate, getProfitSummary } from './repositories/profitRepo'
 import { getVehicleCare, getVehicleDue, addVehicleEvent, removeVehicleEvent,
          addVehicleInsurance, removeVehicleInsurance } from './repositories/vehicleCareRepo'
 import { getHistory, getHistoryByDate, saveWorkerHistory } from './repositories/historyRepo'
@@ -1641,7 +1641,7 @@ function Dashboard({me,onLoggedOut}){
           est_distance_km:src.est_distance_km??null, est_travel_min:src.est_travel_min??null,
           round_trip:src.round_trip, one_way_dir:src.one_way_dir??null,
           // 같은 일을 다른 날 하는 것이라 프로젝트 배분도 함께 옮긴다 (2026-09-25)
-          projects:src.projects??null,
+          projects:src.projects??null, work_note:src.work_note??null,
         }
         try{ await addPlan(body); done++ }
         catch(e){
@@ -5178,12 +5178,12 @@ function ProjectSelect({value,onChange,jiraTree,jiraDone=new Set(),exclude=[],di
 const evenShares=n=>{ const b=Math.floor(100/n); return Array.from({length:n},(_,i)=>b+(i<100-b*n?1:0)) }
 // 한 줄이 «채워졌는가» — 프로젝트를 골랐거나, 직접 적기에 글이 있거나
 const rowFilled=r=>r.free?!!String(r.label||'').trim():!!r.parent_text
-// 서버로 보낼 꼴 — 빈 줄을 빼고, 하나뿐이면 100%.
-// 🔑 프로젝트가 «하나도» 없으면 null 이다(전부 「공통」 — 글은 purpose 에 남는다).
-//    직접 적은 줄은 비율에 «함께» 넣는다 — 그 몫이 손익에서 「공통」 으로 간다.
+// 서버로 보낼 꼴 — 빈 줄을 빼고, 하나뿐이면 100%. 아무것도 없으면 null.
+// 🔑 직접 적은 줄은 비율에 «함께» 넣는다 — 그 몫이 손익에서 「공통」 으로 간다.
+//    직접 적은 줄«만» 있어도 담는다 — 다시 열 때 그 줄을 되살려야 한다(메모와 갈라야 한다).
 const projectsForSave=list=>{
   const l=(list||[]).filter(rowFilled)
-  if(!l.some(r=>!r.free)) return null
+  if(!l.length) return null
   return l.map(r=>{
     const share=l.length===1?100:Number(r.share)||0
     return r.free
@@ -5194,17 +5194,21 @@ const projectsForSave=list=>{
 // 달력·메일에 보이는 「업무」 글자 — 고른 프로젝트 이름과 직접 적은 글을 이어 붙인다.
 // 🔑 purpose 를 따로 적는 칸을 없앴다(2026-09-25 지시 — 「무엇을 하러」와 프로젝트가 같은 것이다).
 //    달력·풍선·메일은 여태처럼 purpose 를 읽으므로 그쪽은 손대지 않는다.
-const purposeOf=list=>{
-  const s=(list||[]).filter(rowFilled)
-    .map(r=>r.free?String(r.label).trim():(cleanName(r.parent_text)||r.parent_text)).join(' · ')
-  return s.slice(0,200)||null
+// + 메모(046, 사용자 선택 (나) — 프로젝트를 고르면 「얼라인오류 수정」 같은 세부 내용이 사라졌다)
+const purposeOf=(list,memo)=>{
+  const parts=(list||[]).filter(rowFilled)
+    .map(r=>r.free?String(r.label).trim():(cleanName(r.parent_text)||r.parent_text))
+  const m=String(memo||'').trim()
+  if(m) parts.push(m)
+  return parts.join(' · ').slice(0,200)||null
 }
-// 계획 → 입력 줄. 프로젝트가 있으면 그것을, 없고 예전 «업무» 글만 있으면 «직접 적기» 한 줄로 —
-// 🔑 예전 계획의 글이 사라지면 안 된다(열었다 닫기만 해도 빈칸이 되면 안 된다).
-const planWorkRows=plan=>{
-  if(Array.isArray(plan?.projects)&&plan.projects.length) return plan.projects
-  if(plan?.purpose) return [{free:true,label:plan.purpose,parent_text:null,parent_key:null,share:100}]
-  return []
+// 계획 → 입력 줄 (프로젝트 · 직접 적은 줄)
+const planWorkRows=plan=>Array.isArray(plan?.projects)&&plan.projects.length?plan.projects:[]
+// 계획 → 메모. 🔑 예전 계획(메모 칸도 프로젝트도 없는 것)은 옛 «업무» 글을 «메모» 로 읽는다 —
+//    그래야 프로젝트를 새로 골라도 세부 내용이 남는다. 열었다 닫기만 해도 지워지면 안 된다.
+const planMemo=plan=>{
+  if(plan?.work_note!=null) return plan.work_note
+  return planWorkRows(plan).length?'':(plan?.purpose||'')
 }
 // 한 번 나가서 여기저기 다니는 날(사용자 지시) — 프로젝트를 여러 개 고르고 «비율» 로 나눈다.
 // 🔑 줄을 더하거나 빼면 «똑같이» 다시 나눈다. 비율을 고친 뒤 합이 100 이 아니면 알리되
@@ -5274,6 +5278,194 @@ function ProjectSharesEditor({value,onChange,jiraTree,jiraDone,disabled,allowFre
 //    여부를 체크로 받아 공급가로 바꿔 둔다.
 // 🔴 이 탭은 서버가 직책으로 막는다(requireBoss). 여기 들어왔다는 것 자체가 대표이사라는 뜻이지만,
 //    403 이 오면 그대로 보여 준다 — 조용히 빈 표를 보이면 「왜 비었지」가 된다.
+// ── 손익 집계표 (3단계) ──────────────────────────────────────
+// 손익 = 계약(공급가) − (인건비 + 경비(공급가) + 구매(공급가) + 이동(실지출)).
+// 🔑 부가세 기준이 «칸마다 다르다» (사용자 지시 — 잘 구별해서 볼 수 있게).
+//    경비·구매는 들어온 금액이 부가세 포함이라 공급가(÷1.1)로 계산하고 «포함 금액을 함께» 적는다.
+//    이동은 대중교통처럼 면세가 섞여 있어 나누지 않고 «실지출» 이라 적는다.
+const PROFIT_PERIODS=[{k:'all',label:'전체'},{k:'year',label:'올해'},
+  {k:'month',label:'이번 달'},{k:'prev',label:'지난 달'}]
+function profitRange(k){
+  const t=today(), y=Number(t.slice(0,4)), m=Number(t.slice(5,7))
+  if(k==='year') return {from:`${y}-01-01`,to:t}
+  if(k==='month') return {from:t.slice(0,8)+'01',to:t}
+  if(k==='prev') return {from:ymd(new Date(y,m-2,1)),to:ymd(new Date(y,m-1,0))}
+  return {from:'',to:''}
+}
+function ProfitSummary({reloadKey}){
+  const [pk,setPk]=useState('all')
+  const [from,setFrom]=useState('')
+  const [to,setTo]=useState('')
+  const [data,setData]=useState(null)
+  const [err,setErr]=useState('')
+  const [open,setOpen]=useState(null)
+  const [onlyContract,setOnlyContract]=useState(false)
+  useEffect(()=>{ let alive=true
+    ;(async()=>{
+      try{ const d=await getProfitSummary({from,to}); if(alive){ setData(d); setErr('') } }
+      catch(e){ if(alive){ setErr(e.message); setData(null) } }
+    })()
+    return()=>{alive=false}
+  },[from,to,reloadKey])
+  function pick(k){ setPk(k); const r=profitRange(k); setFrom(r.from); setTo(r.to) }
+
+  const won=n=>n==null?'—':Math.round(Number(n)).toLocaleString()
+  const rows=(data?.rows||[])
+  const projects=rows.filter(r=>!r.common)
+    .filter(r=>!onlyContract||r.contract)
+    // 계약이 있는 것 먼저, 그 안에서는 손익이 나쁜 순(먼저 봐야 할 것) — 없는 것은 원가 큰 순
+    .sort((a,b)=>(!!b.contract-!!a.contract)
+      ||(a.contract&&b.contract?(a.profit-b.profit):(b.cost-a.cost)))
+  const common=rows.find(r=>r.common)
+  const withContract=rows.filter(r=>r.contract)
+  const sum=(list,f)=>list.reduce((s,r)=>s+Number(f(r)||0),0)
+  const revenue=sum(withContract,r=>r.contract.supply)
+  const profit=sum(withContract,r=>r.profit)
+  const costAll=sum(rows,r=>r.cost)
+
+  const thS={background:'#f9fafb',padding:'6px 8px',fontSize:11,fontWeight:700,color:'#6b7280',
+    borderBottom:'1px solid #e5e7eb',textAlign:'center',whiteSpace:'nowrap'}
+  const tdS={padding:'6px 8px',fontSize:12,borderBottom:'1px solid #f3f4f6',textAlign:'right',
+    verticalAlign:'middle',whiteSpace:'nowrap'}
+  const sub={fontSize:10,color:'#9ca3af',fontWeight:400}
+  // 부가세 포함으로 들어온 칸 — 공급가를 굵게, 포함 금액을 아래 작게
+  const vatCell=o=>o.gross>0
+    ?<><div style={{fontWeight:600}}>{won(o.supply)}</div><div style={sub}>포함 {won(o.gross)} · {o.count}건</div></>
+    :<span style={{color:'#d1d5db'}}>—</span>
+  const profitColor=p=>p==null?'#9ca3af':p<0?'#b91c1c':'#059669'
+
+  const line=(r,isCommon)=>{
+    const opened=open===(r.key||r.name)
+    return(<Fragment key={r.key||r.name}>
+      <tr style={{background:isCommon?'#f9fafb':undefined,cursor:'pointer'}}
+        onClick={()=>setOpen(opened?null:(r.key||r.name))}>
+        <td style={{...tdS,textAlign:'left',whiteSpace:'normal',minWidth:180}}>
+          <span style={{color:'#9ca3af',marginRight:4}}>{opened?'▾':'▸'}</span>
+          {r.done&&<span style={{color:'#9ca3af'}}>(완료) </span>}
+          <strong style={{color:isCommon?'#6b7280':'#111827'}}>{isCommon?r.name:(cleanName(r.name)||r.name)}</strong>
+          {r.key&&<span style={{...sub,marginLeft:4}}>{r.key}</span>}
+        </td>
+        <td style={tdS}>
+          {r.contract
+            ?<><div style={{fontWeight:700,color:'#1a56db'}}>{won(r.contract.supply)}</div>
+               <div style={sub}>{r.contract.vat_included?`포함 ${won(r.contract.amount)}`:'부가세 별도'}
+                 {r.contract.changes?` · 변경 ${r.contract.changes}`:''}</div></>
+            :<span style={{color:'#d1d5db'}}>{isCommon?'':'계약 없음'}</span>}
+        </td>
+        <td style={tdS}>
+          {r.labor.hours>0
+            ?<><div style={{fontWeight:600}}>{won(r.labor.cost)}</div>
+               <div style={sub}>{r.labor.hours}h
+                 {r.labor.missing_hours>0&&<span style={{color:'#b91c1c'}}> · 단가 없음 {r.labor.missing_hours}h</span>}</div></>
+            :<span style={{color:'#d1d5db'}}>—</span>}
+        </td>
+        <td style={tdS}>{vatCell(r.expense)}</td>
+        <td style={tdS}>{vatCell(r.purchase)}</td>
+        <td style={tdS}>
+          {r.travel.amount>0
+            ?<><div style={{fontWeight:600}}>{won(r.travel.amount)}</div><div style={sub}>실지출 · {r.travel.count}건</div></>
+            :<span style={{color:'#d1d5db'}}>—</span>}
+        </td>
+        <td style={{...tdS,fontWeight:700}}>{won(r.cost)}</td>
+        <td style={{...tdS,fontWeight:700,color:profitColor(r.profit)}}>{isCommon?'':won(r.profit)}</td>
+        <td style={{...tdS,color:profitColor(r.profit)}}>{r.margin==null?(isCommon?'':'—'):`${r.margin}%`}</td>
+      </tr>
+      {opened&&(
+        <tr><td colSpan={9} style={{padding:'8px 12px 12px 34px',background:'#fcfcfd',borderBottom:'1px solid #e5e7eb'}}>
+          <div style={{fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:4}}>👤 사람별 인건비</div>
+          {r.labor.workers.length===0
+            ?<div style={{fontSize:11,color:'#9ca3af'}}>이 기간에 적힌 시간이 없습니다.</div>
+            :<table style={{borderCollapse:'collapse'}}><tbody>
+              {r.labor.workers.map(w=>(
+                <tr key={w.worker_id}>
+                  <td style={{fontSize:12,padding:'2px 14px 2px 0'}}>{w.name}</td>
+                  <td style={{fontSize:12,padding:'2px 14px 2px 0',textAlign:'right'}}>{w.hours}h</td>
+                  <td style={{fontSize:12,padding:'2px 14px 2px 0',textAlign:'right',fontWeight:600}}>{won(w.cost)}원</td>
+                  <td style={{fontSize:11,color:'#b91c1c'}}>{w.missing_hours>0?`단가 없음 ${w.missing_hours}h`:''}</td>
+                </tr>))}
+            </tbody></table>}
+          {isCommon&&<div style={{fontSize:11,color:'#6b7280',marginTop:8,lineHeight:1.6}}>
+            「공통」 = 프로젝트를 고르지 않은 것 · 「✎ 직접 적기」 의 몫 · 고정업무(주간회의 등) · 계획 없는 실적.
+            특정 프로젝트의 원가로 넣지 않은 간접비입니다.</div>}
+        </td></tr>
+      )}
+    </Fragment>)
+  }
+
+  return(
+    <Card title="📊 프로젝트 손익">
+      <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap',marginBottom:10}}>
+        {PROFIT_PERIODS.map(p=>(
+          <button key={p.k} onClick={()=>pick(p.k)}
+            style={{padding:'5px 12px',borderRadius:7,fontSize:12,cursor:'pointer',
+              border:'1px solid '+(pk===p.k?'#1a56db':'#e5e7eb'),
+              background:pk===p.k?'#eff6ff':'#fff',color:pk===p.k?'#1a56db':'#6b7280',fontWeight:pk===p.k?700:500}}>
+            {p.label}</button>))}
+        <input type="date" value={from} onChange={e=>{setFrom(e.target.value);setPk('')}}
+          style={{padding:'4px 6px',border:'1px solid #e5e7eb',borderRadius:6,fontSize:12}}/>
+        <span style={{color:'#9ca3af'}}>~</span>
+        <input type="date" value={to} onChange={e=>{setTo(e.target.value);setPk('')}}
+          style={{padding:'4px 6px',border:'1px solid #e5e7eb',borderRadius:6,fontSize:12}}/>
+        <label style={{marginLeft:'auto',fontSize:12,color:'#374151',display:'flex',gap:5,alignItems:'center',cursor:'pointer'}}>
+          <input type="checkbox" checked={onlyContract} onChange={e=>setOnlyContract(e.target.checked)}/>
+          계약 있는 프로젝트만
+        </label>
+      </div>
+      {(from||to)&&<div style={{fontSize:11,color:'#92400e',marginBottom:8}}>
+        ⚠ 기간을 좁히면 <strong>원가만</strong> 그 기간으로 잘립니다. 계약금액은 기간과 무관하게 <strong>전체 금액</strong>이라
+        손익은 「전체」 로 보셔야 맞습니다.</div>}
+      {err&&<div style={{fontSize:12,color:'#991b1b',marginBottom:8}}>⚠ {err}</div>}
+      {data?.missing_rates?.length>0&&(
+        <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,padding:'8px 12px',
+          fontSize:12,color:'#991b1b',marginBottom:10}}>
+          ⚠ <strong>단가가 없어 인건비가 0원으로 잡힌 시간</strong>이 있습니다 —{' '}
+          {data.missing_rates.map(m=>`${m.name} ${m.hours}h`).join(' · ')}.
+          아래 「인건비 단가」 에서 채우면 손익이 바로 고쳐집니다.
+        </div>
+      )}
+      {!data?<p style={{fontSize:12,color:'#9ca3af'}}>{err?'':'불러오는 중…'}</p>:<>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:8,marginBottom:12}}>
+          {[['계약 합계 (공급가)',won(revenue),'#1a56db'],
+            ['손익 합계 (계약 있는 것)',won(profit),profitColor(withContract.length?profit:null)],
+            ['원가 합계 (공통 포함)',won(costAll),'#374151'],
+            ['공통(간접) 원가',won(common?.cost||0),'#6b7280']].map(([l,v,c])=>(
+            <div key={l} style={{border:'1px solid #e5e7eb',borderRadius:8,padding:'8px 10px'}}>
+              <div style={{fontSize:11,color:'#6b7280'}}>{l}</div>
+              <div style={{fontSize:16,fontWeight:800,color:c}}>{v}<span style={{fontSize:11,fontWeight:500}}> 원</span></div>
+            </div>))}
+        </div>
+        <div style={{overflowX:'auto'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',minWidth:980}}>
+            <thead><tr>
+              <th style={{...thS,textAlign:'left'}}>프로젝트</th>
+              <th style={thS}>계약<div style={sub}>공급가</div></th>
+              <th style={thS}>인건비<div style={sub}>시간 × 그날 단가</div></th>
+              <th style={thS}>경비<div style={sub}>공급가 (포함÷1.1)</div></th>
+              <th style={thS}>구매<div style={sub}>공급가 (포함÷1.1) · 승인분</div></th>
+              <th style={thS}>이동<div style={sub}>실지출</div></th>
+              <th style={thS}>원가 계</th>
+              <th style={thS}>손익</th>
+              <th style={thS}>이익률</th>
+            </tr></thead>
+            <tbody>
+              {projects.length===0&&!common
+                ?<tr><td colSpan={9} style={{...tdS,textAlign:'center',color:'#9ca3af'}}>이 기간에 잡힌 원가·계약이 없습니다.</td></tr>
+                :projects.map(r=>line(r,false))}
+              {common&&!onlyContract&&line(common,true)}
+            </tbody>
+          </table>
+        </div>
+        <div style={{fontSize:11,color:'#9ca3af',marginTop:8,lineHeight:1.7}}>
+          💡 <strong>부가세 기준이 칸마다 다릅니다.</strong> 계약·인건비는 그대로, <strong>경비·구매</strong>는 부가세 포함으로 들어온 금액을
+          <strong> ÷1.1 한 공급가</strong>로 원가에 넣고 포함 금액을 아래에 적었습니다. <strong>이동</strong>은 대중교통처럼 면세가 섞여 있어
+          나누지 않은 <strong>실지출</strong>입니다.<br/>
+          💡 줄을 누르면 사람별 인건비가 펼쳐집니다. 이동 비용은 일정의 「업무」 칸에 고른 <strong>프로젝트 비율대로</strong> 나뉩니다.
+        </div>
+      </>}
+    </Card>
+  )
+}
+
 const CONTRACT_KINDS={initial:'최초',change:'변경'}
 const supplyOf=(amount,vat)=>vat?Math.round(Number(amount)/1.1):Math.round(Number(amount))
 
@@ -5295,9 +5487,12 @@ function TabProfit({workers,dupNames,jiraTree,jiraDone=new Set(),showToast}){
     const [c,r]=await Promise.all([getContracts(),getRates()])
     return {c,r}
   }
+  // 계약·단가를 바꾸면 위의 손익표도 다시 센다
+  const [sumTick,setSumTick]=useState(0)
   async function reload(){
     try{ const {c,r}=await fetchAll(); setContracts(c); setRates(r); setErr('') }
     catch(e){ setErr(e.message); setContracts([]); setRates([]) }
+    setSumTick(t=>t+1)
   }
   useEffect(()=>{ let alive=true
     ;(async()=>{
@@ -5427,6 +5622,9 @@ function TabProfit({workers,dupNames,jiraTree,jiraDone=new Set(),showToast}){
       </div>
       {err&&<div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,
         padding:'10px 12px',fontSize:12,color:'#991b1b',marginBottom:14}}>⚠ {err}</div>}
+
+      {/* ── 손익표 (3단계) ── */}
+      <ProfitSummary reloadKey={sumTick}/>
 
       {/* ── 계약금액 ── */}
       <Card title="📄 프로젝트 계약금액">
@@ -7507,6 +7705,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   //   손익의 이동 비용이 이 비율대로 나뉘고, 달력·메일의 「업무」 글자(purpose)는 여기서 만든다.
   //   🔑 예전 계획의 글은 «직접 적기» 한 줄로 들어온다 — 열었다 닫기만 해도 지워지면 안 된다.
   const [projects,setProjects]=useState(()=>planWorkRows(src))
+  // 세부 메모 (046) — 「다크호스 I · 얼라인오류 수정」 의 뒤쪽. 예전 계획의 글은 여기로 들어온다
+  const [memo,setMemo]=useState(()=>planMemo(src))
   const [vehicleId,setVehicleId]=useState(src?.vehicle_id||defaultVehicleId||'')
   const [roundTrip,setRoundTrip]=useState(src?src.round_trip:true)
   // 편도일 때만 쓰는 방향. 기본은 「출발」 — 사무실에서 나가는 쪽이 훨씬 흔하다.
@@ -7592,7 +7792,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   async function saveProjectsOnly(){
     try{
       setBusy(true)
-      await updatePlanProjects(editing.id,projectsForSave(projects),purposeOf(projects))
+      await updatePlanProjects(editing.id,projectsForSave(projects),purposeOf(projects,memo),
+        memo.trim()||null)
       showToast('프로젝트를 저장했습니다')
       await onSaved({focusDate:editing.plan_date})
       onClose()
@@ -7671,6 +7872,15 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
           <strong> 한 줄 더</strong> 넣고 비율을 나누십시오 — 이동 비용이 그 비율대로 프로젝트에 잡힙니다.
         </div>
       )}
+      {/* 세부 메모 (046 — 사용자 선택 (나)). 프로젝트만으로는 「무엇을 고쳤나」가 남지 않는다 */}
+      <input value={memo} onChange={e=>setMemo(e.target.value)} disabled={!(canEdit||projectsOnly)}
+        maxLength={200} placeholder="메모 (선택) — 예: 얼라인 오류 수정"
+        style={{...inputS,marginTop:6}}/>
+      {purposeOf(projects,memo)&&(
+        <div style={{fontSize:11,color:'#6b7280',marginTop:4}}>
+          달력에는 <strong style={{color:'#374151'}}>{purposeOf(projects,memo)}</strong> 로 보입니다
+        </div>
+      )}
       {projectsOnly&&(
         <div style={{marginTop:8,background:'#f0f9ff',border:'1px solid #bae6fd',borderRadius:7,
           padding:'8px 10px',display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
@@ -7720,7 +7930,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
       place_id:isWork&&!atOffice&&placeIdToUse?Number(placeIdToUse):null,
       // 「업무」 글자 — 고른 프로젝트 이름 + 직접 적은 글 (따로 적는 칸은 없앴다).
       // 업무용 차량 예약도 담는다 — 안 담으면 직접 적은 글이 저장되지 않고 사라진다
-      purpose:showProjects?purposeOf(projects):null,
+      purpose:showProjects?purposeOf(projects,memo):null,
+      work_note:showProjects?(memo.trim()||null):null,
       transport:isVacation?'none':(atOffice?'office':transport),
       // 외부 업무일 때만 뜻이 있다 — 내근·휴가에 「복합 이동」이 붙으면 거짓이다
       mixed_transport:(isWork&&!atOffice)?mixed:false,

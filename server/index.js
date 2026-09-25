@@ -1401,8 +1401,9 @@ function cleanProjects(raw) {
     list.push({ parent_key: key, parent_text: text, share: share > 0 ? share : 0 })
   }
   if (list.length > PROJECT_MAX) return { err: `프로젝트는 ${PROJECT_MAX}개까지 고를 수 있습니다.` }
-  // 프로젝트가 «하나도» 없으면 전부 「공통」 이라 담을 것이 없다 — 글은 purpose 에 남는다
-  if (!list.some(x => !x.free)) return { value: null }
+  // 🔑 직접 적은 줄«만» 있어도 담는다 — 다시 열 때 «어느 줄이 직접 적은 것이었나» 를
+  //    되살려야 한다(046 메모 칸과 갈라야 한다). 손익에서는 전부 「공통」 으로 간다.
+  if (!list.length) return { value: null }
   // 비율 — 하나도 안 적었으면 «똑같이», 적었으면 그 비율대로 100 에 맞춘다.
   // 정수로 자르고 남는 1% 들은 «버림이 컸던 줄» 부터 하나씩 준다(최대 나머지 방식) —
   // 첫 줄에 몰아주면 셋으로 나눌 때 34·33·33 은 맞지만 비율을 적은 경우엔 치우친다.
@@ -1415,7 +1416,7 @@ function cleanProjects(raw) {
   list.forEach((x, i) => { x.share = ints[i] })
   // 비율을 0 으로 적은 줄은 «안 쓴 것» 이다 — 남기면 0% 짜리 프로젝트가 표에 뜬다
   const kept = list.filter(x => x.share > 0)
-  return { value: kept.some(x => !x.free) ? kept : null }
+  return { value: kept.length ? kept : null }
 }
 
 app.get('/api/schedule/plans', async (req, res) => {
@@ -1535,6 +1536,8 @@ app.post('/api/schedule/plans', async (req, res) => {
   const pj = cleanProjects(b.projects)
   if (pj.err) return res.status(400).json({ error: pj.err })
   const projectsJson = keepPlace && pj.value ? JSON.stringify(pj.value) : null
+  // 업무 메모 (046) — 업무 일정만. 개인 사용·휴가는 행선지처럼 비운다
+  const workNote = keepPlace ? (String(b.work_note || '').trim().slice(0, 200) || null) : null
   try {
     // 자차 소유 검사 — 겹침 검사보다 «먼저» 본다. 애초에 쓸 수 없는 차라면
     // 「이미 예약된 차량입니다」로 되묻는 것이 안내로도 맞지 않는다.
@@ -1602,8 +1605,8 @@ app.post('/api/schedule/plans', async (req, res) => {
           place_id, place_text, purpose, transport, vehicle_id,
           est_distance_km, est_travel_min, round_trip, vacation_type, one_way_dir,
           approval, approved_at, approved_by_id, from_place_id, vacation_note, vacation_hours,
-          carpool_group, mixed_transport, projects)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25::jsonb) RETURNING *`,
+          carpool_group, mixed_transport, projects, work_note)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25::jsonb,$26) RETURNING *`,
       [b.worker_id, b.plan_date, b.slot || 'allday', b.start_time || null, b.end_time || null,
        useType, placeId, placeText, purpose, b.transport || 'office', b.vehicle_id ?? null,
        b.est_distance_km ?? null, b.est_travel_min ?? null,
@@ -1616,7 +1619,7 @@ app.post('/api/schedule/plans', async (req, res) => {
        // 🔑 「복합」은 transport 를 밀어내지 않는다 — 법인차량이면서 복합일 수 있다
        //    (2026-09-24 사용자 확인). 업무가 아니면 뜻이 없어 끈다.
        keepPlace ? !!b.mixed_transport : false,
-       projectsJson]
+       projectsJson, workNote]
     )
     // 처음 묶이는 것이면 «대표» 줄에도 묶음 번호를 단다. 대표의 일정 내용은 건드리지 않는다.
     if (carpoolGroup) {
@@ -1750,6 +1753,10 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
               projects = CASE WHEN NOT $22::boolean THEN NULL
                               WHEN $24::boolean THEN $25::jsonb
                               ELSE projects END,
+              -- 업무 메모(046) — 같은 규칙: 업무가 아니면 비우고, 안 보냈으면 그대로
+              work_note = CASE WHEN NOT $22::boolean THEN NULL
+                               WHEN $26::boolean THEN $27
+                               ELSE work_note END,
               updated_at = now()
         WHERE id = $16`,
       [b.plan_date || null, b.slot || null, b.start_time || null, b.end_time || null, useType,
@@ -1794,7 +1801,9 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
        keepPlace,
        b.mixed_transport === undefined ? null : !!b.mixed_transport,
        !pj.keep,
-       pj.value ? JSON.stringify(pj.value) : null]
+       pj.value ? JSON.stringify(pj.value) : null,
+       b.work_note !== undefined,
+       String(b.work_note || '').trim().slice(0, 200) || null]
     )
     if (rowCount === 0) return res.status(404).json({ error: '해당 계획을 찾을 수 없습니다.' })
     // 고친 뒤의 모습으로 알린다. 차량이 빠졌으면 mailer 가 알아서 거른다.
@@ -1827,15 +1836,18 @@ app.patch('/api/schedule/plans/:id/projects', async (req, res) => {
     // 「업무」 글자(purpose)도 함께 — 프로젝트를 바꿨는데 달력 글자가 옛것이면 둘이 어긋난다.
     // 안 보냈으면 그대로 둔다. 정산 금액과는 무관한 칸이다.
     const sentPurpose = req.body?.purpose !== undefined
+    const sentNote = req.body?.work_note !== undefined   // 메모(046)도 같은 규칙
     const { rows: out } = await pool.query(
       `UPDATE schedule_plans
-          SET projects = $1::jsonb,
-              purpose  = CASE WHEN $3::boolean THEN $4 ELSE purpose END,
+          SET projects  = $1::jsonb,
+              purpose   = CASE WHEN $3::boolean THEN $4 ELSE purpose END,
+              work_note = CASE WHEN $5::boolean THEN $6 ELSE work_note END,
               updated_at = now()
-        WHERE id = $2 RETURNING projects, purpose`,
+        WHERE id = $2 RETURNING projects, purpose, work_note`,
       [pj.value ? JSON.stringify(pj.value) : null, req.params.id,
-       sentPurpose, sentPurpose ? (String(req.body.purpose || '').slice(0, 200) || null) : null])
-    res.json({ ok: true, projects: out[0].projects, purpose: out[0].purpose })
+       sentPurpose, sentPurpose ? (String(req.body.purpose || '').slice(0, 200) || null) : null,
+       sentNote, sentNote ? (String(req.body.work_note || '').trim().slice(0, 200) || null) : null])
+    res.json({ ok: true, ...out[0] })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
@@ -2552,6 +2564,214 @@ app.delete('/api/profit/rates/:id', requireLogin, requireBoss, async (req, res) 
     const r = await pool.query('DELETE FROM worker_hourly_rates WHERE id = $1', [Number(req.params.id)])
     if (!r.rowCount) return res.status(404).json({ error: '해당 단가 기록을 찾을 수 없습니다.' })
     res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ── 손익 집계 (3단계, 2026-09-25) ─────────────────────────────
+// 손익 = 계약금액(공급가) − (인건비 + 경비(공급가) + 구매(공급가) + 이동(실지출)).
+//
+// 🔑 «프로젝트» = Jira 에 있는 상위업무(키가 있는 것). 그 밖의 것 — 프로젝트 없음 ·
+//    직접 적은 줄 · 고정업무(MANUAL-…, 주간회의 등) — 은 모두 「공통(간접)」 한 줄로 모은다.
+//    빼 버리면 원가 합계가 사람별·항목별 합계와 맞지 않아 「어디로 샜지」가 된다.
+// 🔑 부가세 (사용자 지시 — 손익은 «공급가» 기준):
+//    - 계약금액: 입력 때 공급가를 계산해 저장해 두었다(044)
+//    - 경비·구매: 들어오는 금액이 «부가세 포함» 이다 → ÷1.1 로 공급가를 내고, 포함 금액도 함께 준다
+//    - 이동: 대중교통처럼 면세가 섞여 있어 일괄로 나누면 틀린다 → «실지출 그대로» 두고 그렇게 표시한다
+//    - 인건비: 부가세가 없다
+// 🔑 인건비 = 업무 기록 한 줄(1시간) × «그날 적용되던» 단가. 단가가 바뀌어도 지난 달은 그때 단가다.
+//    단가가 없는 시간은 0원으로 잡되 «몇 시간이 빠졌는지» 를 따로 센다 — 조용히 0 이 되면
+//    손익이 좋아 보이는 쪽으로 틀린다.
+const vatSupply = gross => Math.round(Number(gross || 0) / 1.1)
+const isRealProject = key => !!key && !String(key).startsWith('MANUAL-')
+const COMMON = '__common__'
+
+app.get('/api/profit/summary', requireLogin, requireBoss, async (req, res) => {
+  const from = req.query.from || null, to = req.query.to || null
+  const period = [from, to]
+  try {
+    // ── 프로젝트 이름표 · 업무 이름 → 프로젝트 ──
+    const { rows: jira } = await pool.query(
+      'SELECT jira_key, parent_key, full_text, status_category FROM jira_issues ORDER BY jira_key')
+    const byKey = new Map(jira.map(j => [j.jira_key, j]))
+    // ⚠ 같은 이름이 두 줄로 들어와 있던 적이 있다(2026-08-25) — 먼저 것 하나만 쓴다(두 번 세지 않게)
+    const byText = new Map()
+    for (const j of jira) {
+      const t = normalizeWorkText(j.full_text)
+      if (t && !byText.has(t)) byText.set(t, j)
+    }
+    // 업무 기록의 글 → 프로젝트 키. 하위업무면 부모로, 에픽이면 자기 자신.
+    const projectOfText = text => {
+      const j = byText.get(normalizeWorkText(text))
+      if (!j) return null
+      const key = j.parent_key || j.jira_key
+      return isRealProject(key) ? key : null
+    }
+
+    const rows = new Map()
+    const newRow = (id, key, name, done) => ({
+      id, key, name, done, contract: null,
+      labor: { hours: 0, cost: 0, missing_hours: 0, workers: new Map() },
+      expense: { gross: 0, count: 0 },
+      purchase: { gross: 0, count: 0 },
+      travel: { amount: 0, count: 0 },
+    })
+    // key 가 없으면 「공통」 줄이다
+    const rowOf = (key, textHint) => {
+      const id = key || COMMON
+      if (!rows.has(id)) {
+        const j = key ? byKey.get(key) : null
+        rows.set(id, newRow(id, key || null,
+          key ? (j?.full_text || textHint || key) : '공통(간접)', j?.status_category === 'done'))
+      }
+      return rows.get(id)
+    }
+
+    // ── 매출: 지금 계약(최근 줄) ──
+    const { rows: cs } = await pool.query(
+      `SELECT DISTINCT ON (coalesce(parent_key, parent_text))
+              parent_key, parent_text, amount, vat_included, supply_amount, contract_date,
+              (SELECT count(*) FROM project_contracts c2
+                WHERE coalesce(c2.parent_key, c2.parent_text) = coalesce(c.parent_key, c.parent_text)
+                  AND c2.kind = 'change')::int AS changes
+         FROM project_contracts c
+        ORDER BY coalesce(parent_key, parent_text), contract_date DESC, id DESC`)
+    for (const c of cs) {
+      // 키 없는 계약(드묾)은 공통에 섞지 않고 «그 이름» 으로 한 줄을 둔다 — 매출이 공통으로 새면 안 된다
+      let r
+      if (isRealProject(c.parent_key)) r = rowOf(c.parent_key, c.parent_text)
+      else {
+        const id = 'text:' + c.parent_text
+        if (!rows.has(id)) rows.set(id, newRow(id, null, c.parent_text, false))
+        r = rows.get(id)
+      }
+      r.contract = {
+        amount: Number(c.amount), vat_included: c.vat_included,
+        supply: Number(c.supply_amount), contract_date: c.contract_date, changes: c.changes,
+      }
+    }
+
+    // ── 인건비 ──
+    const { rows: rates } = await pool.query(
+      'SELECT worker_id, hourly_rate, effective_from FROM worker_hourly_rates ORDER BY worker_id, effective_from DESC')
+    const rateList = new Map()
+    for (const r of rates) {
+      if (!rateList.has(r.worker_id)) rateList.set(r.worker_id, [])
+      rateList.get(r.worker_id).push(r)
+    }
+    // 그날 적용 단가 = 그날 이전(같은 날 포함) 가운데 가장 늦게 시작한 줄 (목록이 늦은 순이다)
+    const rateOn = (wid, date) =>
+      (rateList.get(wid) || []).find(r => String(r.effective_from) <= String(date))?.hourly_rate ?? null
+
+    const { rows: hist } = await pool.query(
+      `SELECT coalesce(h.worker_id,
+                (SELECT w.id FROM workers w WHERE w.name = h.worker_name ORDER BY w.id LIMIT 1)) AS worker_id,
+              h.work_date, h.work_text, count(*)::int AS hours
+         FROM work_history h
+        WHERE ($1::date IS NULL OR h.work_date >= $1::date)
+          AND ($2::date IS NULL OR h.work_date <= $2::date)
+          AND coalesce(trim(h.work_text), '') <> ''
+        GROUP BY 1, 2, 3`, period)
+    const { rows: ws } = await pool.query('SELECT id, name FROM workers')
+    const nameOf = new Map(ws.map(w => [w.id, w.name]))
+    const missing = new Map()   // 단가가 없어 0원으로 잡힌 시간 — 사람별
+    for (const h of hist) {
+      const key = projectOfText(h.work_text)
+      const r = rowOf(key)
+      const rate = rateOn(h.worker_id, h.work_date)
+      const cost = rate == null ? 0 : rate * h.hours
+      r.labor.hours += h.hours
+      r.labor.cost += cost
+      if (rate == null) {
+        r.labor.missing_hours += h.hours
+        missing.set(h.worker_id, (missing.get(h.worker_id) || 0) + h.hours)
+      }
+      const w = r.labor.workers.get(h.worker_id) || { worker_id: h.worker_id,
+        name: nameOf.get(h.worker_id) || '(알 수 없음)', hours: 0, cost: 0, missing_hours: 0 }
+      w.hours += h.hours; w.cost += cost; if (rate == null) w.missing_hours += h.hours
+      r.labor.workers.set(h.worker_id, w)
+    }
+
+    // ── 경비 (부가세 포함 금액) ──
+    const { rows: ex } = await pool.query(
+      `SELECT parent_key, max(parent_text) AS parent_text, sum(amount)::bigint AS gross, count(*)::int AS n
+         FROM trip_expenses
+        WHERE ($1::date IS NULL OR spent_on >= $1::date) AND ($2::date IS NULL OR spent_on <= $2::date)
+        GROUP BY parent_key`, period)
+    for (const e of ex) {
+      const r = rowOf(isRealProject(e.parent_key) ? e.parent_key : null, e.parent_text)
+      r.expense.gross += Number(e.gross); r.expense.count += e.n
+    }
+
+    // ── 구매 (승인된 것만 · 부가세 포함 금액) ──
+    //   날짜 = 승인일(없으면 요청일) — 「언제 돈이 나가기로 정해졌나」
+    const { rows: pu } = await pool.query(
+      `SELECT parent_key, max(parent_text) AS parent_text, sum(amount)::bigint AS gross, count(*)::int AS n
+         FROM purchase_requests
+        WHERE status = 'approved'
+          AND ($1::date IS NULL OR coalesce(approved_at, created_at)::date >= $1::date)
+          AND ($2::date IS NULL OR coalesce(approved_at, created_at)::date <= $2::date)
+        GROUP BY parent_key`, period)
+    for (const p of pu) {
+      const r = rowOf(isRealProject(p.parent_key) ? p.parent_key : null, p.parent_text)
+      r.purchase.gross += Number(p.gross); r.purchase.count += p.n
+    }
+
+    // ── 이동 (업무 실적의 이동 실비 + 하이패스 + 주유 — 실지출) ──
+    //   계획의 비율대로 나눈다. 직접 적은 줄의 몫 · 프로젝트 없는 계획 · 계획 없는 실적은 공통.
+    //   ⚠ 하이패스는 붙은 통행의 합이 toll_fee 로 들어와 있다(retotalToll) — 따로 더하면 두 번 센다.
+    const { rows: tr } = await pool.query(
+      `SELECT a.id, coalesce(a.transit_fee,0) + coalesce(a.toll_fee,0) + coalesce(a.fuel_fee,0) AS amount,
+              p.projects
+         FROM schedule_actuals a
+         LEFT JOIN schedule_plans p ON p.id = a.plan_id
+        WHERE a.use_type = 'business'
+          AND ($1::date IS NULL OR a.work_date >= $1::date)
+          AND ($2::date IS NULL OR a.work_date <= $2::date)`, period)
+    for (const t of tr) {
+      const amount = Number(t.amount || 0)
+      if (!(amount > 0)) continue
+      const parts = Array.isArray(t.projects) && t.projects.length ? t.projects : [{ free: true, share: 100 }]
+      const total = parts.reduce((s, x) => s + Number(x.share || 0), 0) || 100
+      // 원 단위로 나누고 끝전은 마지막 줄에 — 나눈 합이 원래 금액과 1원도 어긋나지 않게
+      let left = amount
+      parts.forEach((x, i) => {
+        const part = i === parts.length - 1 ? left : Math.round(amount * Number(x.share || 0) / total)
+        left -= part
+        const key = !x.free && isRealProject(x.parent_key) ? x.parent_key : null
+        const r = rowOf(key, x.parent_text)
+        r.travel.amount += part; r.travel.count += 1
+      })
+    }
+
+    // ── 합치기 ──
+    const out = [...rows.values()].map(r => {
+      const expenseSupply = vatSupply(r.expense.gross)
+      const purchaseSupply = vatSupply(r.purchase.gross)
+      const cost = r.labor.cost + expenseSupply + purchaseSupply + r.travel.amount
+      const revenue = r.contract ? r.contract.supply : null
+      return {
+        key: r.key, name: r.name, done: r.done, common: r.id === COMMON,
+        contract: r.contract,
+        labor: { hours: r.labor.hours, cost: r.labor.cost, missing_hours: r.labor.missing_hours,
+                 workers: [...r.labor.workers.values()].sort((a, b) => b.cost - a.cost || b.hours - a.hours) },
+        expense: { gross: r.expense.gross, supply: expenseSupply, count: r.expense.count },
+        purchase: { gross: r.purchase.gross, supply: purchaseSupply, count: r.purchase.count },
+        travel: r.travel,
+        cost,
+        profit: revenue == null ? null : revenue - cost,
+        margin: revenue ? Math.round((revenue - cost) / revenue * 1000) / 10 : null,
+      }
+    })
+    res.json({
+      from, to,
+      rows: out,
+      // 단가가 없어 0원으로 잡힌 시간이 있는 사람 — 화면이 맨 위에 알린다
+      missing_rates: [...missing.entries()].map(([wid, hours]) =>
+        ({ worker_id: wid, name: nameOf.get(wid) || '(알 수 없음)', hours }))
+        .sort((a, b) => b.hours - a.hours),
+    })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
