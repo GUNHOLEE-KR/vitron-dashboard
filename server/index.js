@@ -1381,17 +1381,28 @@ function cleanProjects(raw) {
   if (!Array.isArray(raw)) return { err: '프로젝트 형식이 올바르지 않습니다.' }
   const seen = new Set(), list = []
   for (const it of raw) {
+    const share = Number(it?.share)
+    // 🔑 «직접 적은» 줄 (2026-09-25 지시 — 프로젝트가 아닌 일도 있다: 영업 상담·견적 방문 등).
+    //    프로젝트가 아니므로 손익에서는 그 몫이 「공통」 으로 간다. 비율에는 «함께» 넣는다 —
+    //    빼면 A 프로젝트와 영업 상담을 반씩 한 날의 비용이 전부 A 로 쏠린다.
+    if (it?.free) {
+      const label = String(it?.label || '').trim().slice(0, 100)
+      if (!label || seen.has('free:' + label)) continue
+      seen.add('free:' + label)
+      list.push({ free: true, label, parent_key: null, parent_text: null, share: share > 0 ? share : 0 })
+      continue
+    }
     const text = String(it?.parent_text || '').trim().slice(0, 200)
     if (!text) continue
     const key = String(it?.parent_key || projectKeyOf(text) || '').slice(0, 40) || null
     const id = key || text
     if (seen.has(id)) continue            // 같은 프로젝트를 두 번 고르면 한 줄로
     seen.add(id)
-    const share = Number(it?.share)
     list.push({ parent_key: key, parent_text: text, share: share > 0 ? share : 0 })
   }
   if (list.length > PROJECT_MAX) return { err: `프로젝트는 ${PROJECT_MAX}개까지 고를 수 있습니다.` }
-  if (!list.length) return { value: null }
+  // 프로젝트가 «하나도» 없으면 전부 「공통」 이라 담을 것이 없다 — 글은 purpose 에 남는다
+  if (!list.some(x => !x.free)) return { value: null }
   // 비율 — 하나도 안 적었으면 «똑같이», 적었으면 그 비율대로 100 에 맞춘다.
   // 정수로 자르고 남는 1% 들은 «버림이 컸던 줄» 부터 하나씩 준다(최대 나머지 방식) —
   // 첫 줄에 몰아주면 셋으로 나눌 때 34·33·33 은 맞지만 비율을 적은 경우엔 치우친다.
@@ -1404,7 +1415,7 @@ function cleanProjects(raw) {
   list.forEach((x, i) => { x.share = ints[i] })
   // 비율을 0 으로 적은 줄은 «안 쓴 것» 이다 — 남기면 0% 짜리 프로젝트가 표에 뜬다
   const kept = list.filter(x => x.share > 0)
-  return { value: kept.length ? kept : null }
+  return { value: kept.some(x => !x.free) ? kept : null }
 }
 
 app.get('/api/schedule/plans', async (req, res) => {
@@ -1512,7 +1523,8 @@ app.post('/api/schedule/plans', async (req, res) => {
   const keepPlace = useType === 'business'
   const placeId   = keepPlace ? (b.place_id ?? null) : null
   const placeText = keepPlace ? (b.place_text || null) : null
-  const purpose   = keepPlace ? (b.purpose || null) : null
+  // ⚠ 칸이 VARCHAR(200) 이다. 프로젝트를 여럿 고르면 이름을 이어 붙여 넘칠 수 있어 자른다
+  const purpose   = keepPlace ? (String(b.purpose || '').slice(0, 200) || null) : null
   const vacationType = useType === 'vacation' ? (b.vacation_type || null) : null
   const vacationHours = useType === 'vacation' ? vacationHoursOf(b) : null
   // 🔑 「기타」에 «무엇인지» 를 적어 두는 자리 (2026-09-07 지시 — 예: 예비군 참석).
@@ -1743,7 +1755,8 @@ app.patch('/api/schedule/plans/:id', async (req, res) => {
       [b.plan_date || null, b.slot || null, b.start_time || null, b.end_time || null, useType,
        keepPlace ? (b.place_id ?? cur[0].place_id) : null,
        keepPlace ? (b.place_text ?? cur[0].place_text) : null,
-       keepPlace ? (b.purpose ?? cur[0].purpose) : null,
+       // ⚠ VARCHAR(200) — 프로젝트 이름을 이어 붙이면 넘칠 수 있어 자른다(2026-09-25)
+       keepPlace ? (b.purpose == null ? cur[0].purpose : (String(b.purpose).slice(0, 200) || null)) : null,
        b.transport || null, b.vehicle_id ?? cur[0].vehicle_id,
        b.est_distance_km ?? cur[0].est_distance_km,
        b.est_travel_min ?? cur[0].est_travel_min,
@@ -1811,10 +1824,18 @@ app.patch('/api/schedule/plans/:id/projects', async (req, res) => {
     }
     const pj = cleanProjects(req.body?.projects ?? null)
     if (pj.err) return res.status(400).json({ error: pj.err })
+    // 「업무」 글자(purpose)도 함께 — 프로젝트를 바꿨는데 달력 글자가 옛것이면 둘이 어긋난다.
+    // 안 보냈으면 그대로 둔다. 정산 금액과는 무관한 칸이다.
+    const sentPurpose = req.body?.purpose !== undefined
     const { rows: out } = await pool.query(
-      'UPDATE schedule_plans SET projects = $1::jsonb, updated_at = now() WHERE id = $2 RETURNING projects',
-      [pj.value ? JSON.stringify(pj.value) : null, req.params.id])
-    res.json({ ok: true, projects: out[0].projects })
+      `UPDATE schedule_plans
+          SET projects = $1::jsonb,
+              purpose  = CASE WHEN $3::boolean THEN $4 ELSE purpose END,
+              updated_at = now()
+        WHERE id = $2 RETURNING projects, purpose`,
+      [pj.value ? JSON.stringify(pj.value) : null, req.params.id,
+       sentPurpose, sentPurpose ? (String(req.body.purpose || '').slice(0, 200) || null) : null])
+    res.json({ ok: true, projects: out[0].projects, purpose: out[0].purpose })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }

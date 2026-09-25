@@ -5159,8 +5159,10 @@ const projectKey=full=>{ const m=String(full||'').match(/^\s*\[([^\]]+)\]/); ret
 // 🔑 완료된 프로젝트는 감추되 «지금 고른 값» 은 남긴다 — 빼면 완료된 프로젝트로 적어 둔
 //    기록을 열었을 때 고르개가 조용히 빈칸이 되고 저장하는 순간 날아간다
 //    (안건·회의록·경비에서 세 번 겪은 함정). 목록에 아예 없는 값(이름이 바뀐 것)도 남긴다.
+// 「✎ 직접 적기」 를 고르면 이 값이 온다 — 프로젝트가 아닌 일(영업 상담 등)을 적는 길
+const FREE_PICK='__free__'
 function ProjectSelect({value,onChange,jiraTree,jiraDone=new Set(),exclude=[],disabled,style,
-                        emptyLabel='— 프로젝트 없음 —'}){
+                        emptyLabel='— 프로젝트 없음 —',allowFree=false}){
   const all=Object.keys(jiraTree||{})
   let list=all.filter(p=>(!jiraDone.has(p)||p===value)&&(p===value||!exclude.includes(p)))
   if(value&&!all.includes(value)) list=[...list,value]
@@ -5168,25 +5170,55 @@ function ProjectSelect({value,onChange,jiraTree,jiraDone=new Set(),exclude=[],di
     <select value={value||''} disabled={disabled} onChange={e=>onChange(e.target.value)} style={style}>
       <option value="">{emptyLabel}</option>
       {list.map(p=><option key={p} value={p}>{jiraDone.has(p)?'(완료) ':''}{cleanName(p)||p}</option>)}
+      {allowFree&&<option value={FREE_PICK}>✎ 직접 적기 (프로젝트가 아닌 일)</option>}
     </select>
   )
 }
 // 똑같이 나누기 — 34·33·33 처럼 남는 %는 앞줄부터 하나씩(서버도 같은 결과로 맞춘다)
 const evenShares=n=>{ const b=Math.floor(100/n); return Array.from({length:n},(_,i)=>b+(i<100-b*n?1:0)) }
-// 서버로 보낼 꼴 — 빈 줄을 빼고, 하나뿐이면 100%. 아무것도 없으면 null(=프로젝트 없음)
+// 한 줄이 «채워졌는가» — 프로젝트를 골랐거나, 직접 적기에 글이 있거나
+const rowFilled=r=>r.free?!!String(r.label||'').trim():!!r.parent_text
+// 서버로 보낼 꼴 — 빈 줄을 빼고, 하나뿐이면 100%.
+// 🔑 프로젝트가 «하나도» 없으면 null 이다(전부 「공통」 — 글은 purpose 에 남는다).
+//    직접 적은 줄은 비율에 «함께» 넣는다 — 그 몫이 손익에서 「공통」 으로 간다.
 const projectsForSave=list=>{
-  const l=(list||[]).filter(r=>r.parent_text)
-  if(!l.length) return null
-  return l.map(r=>({parent_text:r.parent_text,parent_key:r.parent_key||projectKey(r.parent_text),
-    share:l.length===1?100:Number(r.share)||0}))
+  const l=(list||[]).filter(rowFilled)
+  if(!l.some(r=>!r.free)) return null
+  return l.map(r=>{
+    const share=l.length===1?100:Number(r.share)||0
+    return r.free
+      ?{free:true,label:String(r.label).trim(),parent_text:null,parent_key:null,share}
+      :{parent_text:r.parent_text,parent_key:r.parent_key||projectKey(r.parent_text),share}
+  })
+}
+// 달력·메일에 보이는 「업무」 글자 — 고른 프로젝트 이름과 직접 적은 글을 이어 붙인다.
+// 🔑 purpose 를 따로 적는 칸을 없앴다(2026-09-25 지시 — 「무엇을 하러」와 프로젝트가 같은 것이다).
+//    달력·풍선·메일은 여태처럼 purpose 를 읽으므로 그쪽은 손대지 않는다.
+const purposeOf=list=>{
+  const s=(list||[]).filter(rowFilled)
+    .map(r=>r.free?String(r.label).trim():(cleanName(r.parent_text)||r.parent_text)).join(' · ')
+  return s.slice(0,200)||null
+}
+// 계획 → 입력 줄. 프로젝트가 있으면 그것을, 없고 예전 «업무» 글만 있으면 «직접 적기» 한 줄로 —
+// 🔑 예전 계획의 글이 사라지면 안 된다(열었다 닫기만 해도 빈칸이 되면 안 된다).
+const planWorkRows=plan=>{
+  if(Array.isArray(plan?.projects)&&plan.projects.length) return plan.projects
+  if(plan?.purpose) return [{free:true,label:plan.purpose,parent_text:null,parent_key:null,share:100}]
+  return []
 }
 // 한 번 나가서 여기저기 다니는 날(사용자 지시) — 프로젝트를 여러 개 고르고 «비율» 로 나눈다.
 // 🔑 줄을 더하거나 빼면 «똑같이» 다시 나눈다. 비율을 고친 뒤 합이 100 이 아니면 알리되
 //    막지는 않는다 — 서버가 비율대로 100 에 맞춰 저장한다.
-function ProjectSharesEditor({value,onChange,jiraTree,jiraDone,disabled}){
+// allowFree — 「✎ 직접 적기」 를 연다(프로젝트가 아닌 일도 있다 — 사용자 지시). 일정에서 쓴다.
+function ProjectSharesEditor({value,onChange,jiraTree,jiraDone,disabled,allowFree=false,
+                              emptyLabel='— 프로젝트 없음 —'}){
   const rows=value&&value.length?value:[{parent_text:'',parent_key:null,share:100}]
   const resplit=list=>{ const s=evenShares(list.length); return list.map((r,i)=>({...r,share:s[i]})) }
-  const setText=(i,t)=>onChange(rows.map((r,j)=>j===i?{...r,parent_text:t,parent_key:projectKey(t)}:r))
+  const setText=(i,t)=>onChange(rows.map((r,j)=>j!==i?r
+    :t===FREE_PICK?{free:true,label:'',parent_text:null,parent_key:null,share:r.share}
+    :{parent_text:t,parent_key:projectKey(t),share:r.share}))
+  const setLabel=(i,t)=>onChange(rows.map((r,j)=>j===i?{...r,label:t}:r))
+  const backToList=i=>onChange(rows.map((r,j)=>j===i?{parent_text:'',parent_key:null,share:r.share}:r))
   const setShare=(i,v)=>onChange(rows.map((r,j)=>j===i?{...r,share:v===''?'':Number(v)}:r))
   const add=()=>onChange(resplit([...rows,{parent_text:'',parent_key:null,share:0}]))
   const del=i=>{ const n=rows.filter((_,j)=>j!==i); onChange(n.length?resplit(n):[]) }
@@ -5197,23 +5229,34 @@ function ProjectSharesEditor({value,onChange,jiraTree,jiraDone,disabled}){
     <div>
       {rows.map((r,i)=>(
         <div key={i} style={{display:'flex',gap:6,alignItems:'center',marginBottom:5}}>
-          <ProjectSelect value={r.parent_text} onChange={t=>setText(i,t)} disabled={disabled}
-            jiraTree={jiraTree} jiraDone={jiraDone}
-            exclude={rows.filter((_,j)=>j!==i).map(x=>x.parent_text).filter(Boolean)}
-            style={{...inS,flex:1,minWidth:0}}/>
+          {r.free
+            ?<>
+              <span title="프로젝트가 아닌 일 — 손익에서는 「공통」 으로 잡힙니다"
+                style={{fontSize:11,color:'#6b7280',whiteSpace:'nowrap'}}>✎</span>
+              <input value={r.label||''} disabled={disabled} maxLength={100}
+                onChange={e=>setLabel(i,e.target.value)} placeholder="무엇을 하는지 한 줄로 (예: 견적 상담)"
+                style={{...inS,flex:1,minWidth:0}}/>
+              {!disabled&&<span onClick={()=>backToList(i)} title="프로젝트 목록에서 고르기"
+                style={{cursor:'pointer',fontSize:11,color:'#0369a1',whiteSpace:'nowrap'}}>↩ 목록</span>}
+            </>
+            :<ProjectSelect value={r.parent_text} onChange={t=>setText(i,t)} disabled={disabled}
+              jiraTree={jiraTree} jiraDone={jiraDone} allowFree={allowFree} emptyLabel={emptyLabel}
+              exclude={rows.filter((_,j)=>j!==i).map(x=>x.parent_text).filter(Boolean)}
+              style={{...inS,flex:1,minWidth:0}}/>}
           {multi&&<>
             <input type="number" value={r.share} disabled={disabled} min={0} max={100}
               onChange={e=>setShare(i,e.target.value)} style={{...inS,width:62,textAlign:'right'}}/>
             <span style={{fontSize:12,color:'#6b7280'}}>%</span>
           </>}
-          {!disabled&&(multi||r.parent_text)&&
+          {!disabled&&(multi||rowFilled(r)||r.free)&&
             <span onClick={()=>del(i)} title="이 줄 빼기"
               style={{cursor:'pointer',color:'#b91c1c',fontWeight:700,padding:'0 4px'}}>&times;</span>}
         </div>
       ))}
       {!disabled&&(
         <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',fontSize:12}}>
-          <span onClick={add} style={{cursor:'pointer',color:'#1a56db',fontWeight:700}}>+ 프로젝트 추가</span>
+          <span onClick={add} style={{cursor:'pointer',color:'#1a56db',fontWeight:700}}>
+            + {allowFree?'한 줄 더':'프로젝트 추가'}</span>
           {multi&&<span onClick={()=>onChange(resplit(rows))}
             style={{cursor:'pointer',color:'#0369a1'}}>똑같이 나누기</span>}
           {multi&&<span style={{color:sum===100?'#059669':'#b45309',fontWeight:600}}>
@@ -7451,7 +7494,6 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   const [placeId,setPlaceId]=useState(
     src ? (src.transport==='office'?OFFICE_PLACE:(src.place_id||''))
         : (defaultPlaceId??OFFICE_PLACE))
-  const [purpose,setPurpose]=useState(src?.purpose||'')
   const [transport,setTransport]=useState(
     src?.transport || defaultTransport ||
     // 달력에서 외부 장소 줄을 눌러 들어오면 이동 수단을 «미선택» 으로 둔다
@@ -7461,8 +7503,10 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   //    수단을 여러 개 고르게 하지 않은 것은 transport 한 칸에 배차·달력 아이콘·
   //    정산·장소 묶기가 모두 걸려 있어, 하나만 놓쳐도 겹침이 조용히 안 잡히기 때문이다.
   const [mixed,setMixed]=useState(!!src?.mixed_transport)
-  // 프로젝트와 비율 (2026-09-25) — 손익의 이동 비용이 이 비율대로 나뉜다
-  const [projects,setProjects]=useState(()=>Array.isArray(src?.projects)?src.projects:[])
+  // 「업무」 = 프로젝트(+비율) · 직접 적기 (2026-09-25 지시 — 「무엇을 하러」와 프로젝트를 하나로).
+  //   손익의 이동 비용이 이 비율대로 나뉘고, 달력·메일의 「업무」 글자(purpose)는 여기서 만든다.
+  //   🔑 예전 계획의 글은 «직접 적기» 한 줄로 들어온다 — 열었다 닫기만 해도 지워지면 안 된다.
+  const [projects,setProjects]=useState(()=>planWorkRows(src))
   const [vehicleId,setVehicleId]=useState(src?.vehicle_id||defaultVehicleId||'')
   const [roundTrip,setRoundTrip]=useState(src?src.round_trip:true)
   // 편도일 때만 쓰는 방향. 기본은 「출발」 — 사무실에서 나가는 쪽이 훨씬 흔하다.
@@ -7538,9 +7582,9 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   const showMin=estMin!=null?(roundTrip?estMin*2:estMin):null
   // 외부 장소를 골랐는지 (이동 수단을 물어야 하는 상태)
   const needsTransport=isWork&&!atOffice&&!!placeId
-  // 🔑 프로젝트는 «이동 비용이 생기는 업무» 에만 묻는다 — 외부 업무, 업무용 차량 예약.
-  //    내근·개인 사용·휴가에는 나눌 이동 비용이 없다(서버도 업무가 아니면 비운다).
-  const showProjects=needsTransport||(isVehicleOnly&&!personal)
+  // 🔑 「업무」 칸(프로젝트)은 업무 일정이면 늘 묻는다 — 내근도(무엇을 했나는 남긴다, 비용은 0),
+  //    업무용 차량 예약도. 개인 사용·휴가는 묻지 않는다(서버도 업무가 아니면 비운다).
+  const showProjects=isWork||(isVehicleOnly&&!personal)
   // 프로젝트는 정산 금액에 닿지 않으므로 «실적이 붙어 잠긴 계획» 에도 고칠 수 있게 한다.
   // 주인·관리자에 더해 대표이사(손익을 정리하는 사람)도 된다 — 서버도 같은 기준이다.
   const canEditProjects=mine||!!me?.is_boss
@@ -7548,7 +7592,7 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   async function saveProjectsOnly(){
     try{
       setBusy(true)
-      await updatePlanProjects(editing.id,projectsForSave(projects))
+      await updatePlanProjects(editing.id,projectsForSave(projects),purposeOf(projects))
       showToast('프로젝트를 저장했습니다')
       await onSaved({focusDate:editing.plan_date})
       onClose()
@@ -7612,6 +7656,38 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
   const labelS={fontSize:11,fontWeight:700,color:'#6b7280',marginBottom:4,display:'block'}
   const rowS={marginBottom:12}
 
+  // ── 「업무」 칸 = 무엇을 하러 가나 = 프로젝트 (2026-09-25 지시로 하나로 합쳤다) ──
+  // 프로젝트가 있으면 목록에서 고르고, 아니면 「✎ 직접 적기」(사용자 지시 — 선택적이어야 한다).
+  // 한 번 나가 여러 곳을 다니면 줄을 더하고 비율을 나눈다 — 이동 비용이 그 비율대로 나뉜다.
+  const workFieldEl=(
+    <div style={rowS}>
+      <label style={labelS}>업무 <span style={{fontWeight:500}}>(선택 — 무엇을 하러 가나요)</span></label>
+      <ProjectSharesEditor value={projects} onChange={setProjects} allowFree
+        emptyLabel="— 프로젝트 고르기 —"
+        jiraTree={jiraTree} jiraDone={jiraDone} disabled={!(canEdit||projectsOnly)}/>
+      {(canEdit||projectsOnly)&&(
+        <div style={{fontSize:11,color:'#9ca3af',marginTop:4,lineHeight:1.6}}>
+          프로젝트가 아닌 일은 맨 아래 <strong>「✎ 직접 적기」</strong>. 여러 곳을 한 번에 다녀오면
+          <strong> 한 줄 더</strong> 넣고 비율을 나누십시오 — 이동 비용이 그 비율대로 프로젝트에 잡힙니다.
+        </div>
+      )}
+      {projectsOnly&&(
+        <div style={{marginTop:8,background:'#f0f9ff',border:'1px solid #bae6fd',borderRadius:7,
+          padding:'8px 10px',display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+          <span style={{fontSize:11,color:'#075985',flex:1,minWidth:180}}>
+            🔒 {locked?'실적이 들어가 계획은 잠겨 있지만':'남의 일정이지만'}
+            {' '}<strong>프로젝트는 고칠 수 있습니다</strong> — 정산 금액에는 닿지 않습니다.
+          </span>
+          <button onClick={saveProjectsOnly} disabled={busy}
+            style={{padding:'7px 14px',borderRadius:7,border:'none',background:'#0369a1',
+              color:'#fff',cursor:'pointer',fontSize:12,fontWeight:700}}>
+            {busy?'처리 중…':'프로젝트만 저장'}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+
   // 입력값 검사 — 유형에 따라 필요한 것만 본다
   function validate(){
     if(!workerId){showToast('이름을 선택해 주세요');return false}
@@ -7642,7 +7718,9 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
       //    시간은 서버가 다시 세어 저장한다 — 화면 값을 믿지 않는다.
       worker_id:Number(workerId), plan_date:planDate, slot:isVacation?vacSlot:slot, use_type:ut,
       place_id:isWork&&!atOffice&&placeIdToUse?Number(placeIdToUse):null,
-      purpose:isWork?purpose:null,
+      // 「업무」 글자 — 고른 프로젝트 이름 + 직접 적은 글 (따로 적는 칸은 없앴다).
+      // 업무용 차량 예약도 담는다 — 안 담으면 직접 적은 글이 저장되지 않고 사라진다
+      purpose:showProjects?purposeOf(projects):null,
       transport:isVacation?'none':(atOffice?'office':transport),
       // 외부 업무일 때만 뜻이 있다 — 내근·휴가에 「복합 이동」이 붙으면 거짓이다
       mixed_transport:(isWork&&!atOffice)?mixed:false,
@@ -8206,11 +8284,7 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
               )}
             </div>
 
-            <div style={rowS}>
-              <label style={labelS}>업무 {atOffice&&<span style={{fontWeight:500}}>(선택)</span>}</label>
-              <input value={purpose} onChange={e=>setPurpose(e.target.value)} disabled={!canEdit}
-                placeholder="무엇을 할 계획인지 한 줄로" style={inputS}/>
-            </div>
+            {workFieldEl}
           </>
         )}
 
@@ -8293,6 +8367,8 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
                 </div>
               )}
             </div>
+            {/* 업무용 차량 예약도 «무엇을 하러» 를 묻는다 — 개인 사용은 묻지 않는다(사생활) */}
+            {!personal&&workFieldEl}
           </>
         )}
 
@@ -8505,34 +8581,6 @@ function PlanDialog({editing,copyFrom,defaultDate,defaultWorkerId,defaultPlaceId
                   {oneWayDir==='이동'?'출발지를 고르면 거리가 표시됩니다.':'장소를 고르면 거리·시간이 표시됩니다.'}
                 </span>}
             </div>
-          </div>
-        )}
-
-        {/* ── 프로젝트 (2026-09-25) — 손익의 이동 비용을 나누는 근거 ── */}
-        {(showProjects||(projectsOnly&&projects.length>0))&&(
-          <div style={rowS}>
-            <label style={labelS}>프로젝트 (선택)</label>
-            <ProjectSharesEditor value={projects} onChange={setProjects}
-              jiraTree={jiraTree} jiraDone={jiraDone} disabled={!(canEdit||projectsOnly)}/>
-            <div style={{fontSize:11,color:'#9ca3af',marginTop:5,lineHeight:1.6}}>
-              이 일정의 <strong>이동 비용</strong>(이동 실비·하이패스·주유)이 이 프로젝트에 잡힙니다.
-              한 번 나가 <strong>여러 곳</strong>을 다녀오면 프로젝트를 더하고 <strong>비율</strong>을 나누십시오.
-              곳마다 계획을 따로 넣었다면 계획마다 하나씩 고르면 됩니다.
-            </div>
-            {projectsOnly&&(
-              <div style={{marginTop:8,background:'#f0f9ff',border:'1px solid #bae6fd',borderRadius:7,
-                padding:'8px 10px',display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
-                <span style={{fontSize:11,color:'#075985',flex:1,minWidth:180}}>
-                  🔒 {locked?'실적이 들어가 계획은 잠겨 있지만':'남의 일정이지만'}
-                  {' '}<strong>프로젝트는 고칠 수 있습니다</strong> — 정산 금액에는 닿지 않습니다.
-                </span>
-                <button onClick={saveProjectsOnly} disabled={busy}
-                  style={{padding:'7px 14px',borderRadius:7,border:'none',background:'#0369a1',
-                    color:'#fff',cursor:'pointer',fontSize:12,fontWeight:700}}>
-                  {busy?'처리 중…':'프로젝트만 저장'}
-                </button>
-              </div>
-            )}
           </div>
         )}
 
