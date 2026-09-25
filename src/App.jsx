@@ -5322,10 +5322,13 @@ function TabProfit({workers,dupNames,jiraTree,jiraDone=new Set(),showToast}){
           {cell('계약금액(원) *',<input type="number" value={cForm.amount}
             onChange={e=>setCForm({...cForm,amount:e.target.value})} placeholder="0" style={inS}/>)}
           {cell('부가세',
-            <label style={{display:'flex',alignItems:'center',gap:6,fontSize:13,padding:'7px 0',cursor:'pointer'}}>
+            // ⚠ 머리글이 이미 「부가세」라 한 단어로 둔다 — 길게 쓰면 좁은 칸에서 두 줄로 꺾였다
+            <label title="적은 계약금액에 부가세가 들어 있으면 켭니다"
+              style={{display:'flex',alignItems:'center',gap:6,fontSize:13,padding:'7px 0',
+                cursor:'pointer',whiteSpace:'nowrap'}}>
               <input type="checkbox" checked={cForm.vat_included}
                 onChange={e=>setCForm({...cForm,vat_included:e.target.checked})}/>
-              위 금액에 부가세 포함
+              포함
             </label>)}
           {cell('계약일',<input type="date" value={cForm.contract_date}
             onChange={e=>setCForm({...cForm,contract_date:e.target.value})} style={inS}/>)}
@@ -5365,6 +5368,9 @@ function TabProfit({workers,dupNames,jiraTree,jiraDone=new Set(),showToast}){
               <tbody>
                 {contractGroups.map(g=>{
                   const c=g.current, open=openKey===g.key
+                  // 🔑 줄 수가 아니라 «변경» 줄을 센다 — 최초 줄을 지워 변경만 남으면
+                  //    줄 수로는 「최초만」 이 되어 거짓말이 된다(시험 중 실제로 그랬다)
+                  const changes=g.history.filter(h=>h.kind==='change').length
                   return(<Fragment key={g.key}>
                     <tr>
                       <td style={{...tdS,textAlign:'left',fontWeight:600}}>
@@ -5379,7 +5385,7 @@ function TabProfit({workers,dupNames,jiraTree,jiraDone=new Set(),showToast}){
                       <td style={tdS}>
                         <span onClick={()=>setOpenKey(open?null:g.key)}
                           style={{cursor:'pointer',color:'#0369a1',fontWeight:600}}>
-                          {g.history.length>1?`변경 ${g.history.length-1}회`:'최초만'} {open?'▴':'▾'}
+                          {changes?`변경 ${changes}회`:'최초만'} {open?'▴':'▾'}
                         </span>
                       </td>
                     </tr>
