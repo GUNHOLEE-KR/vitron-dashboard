@@ -5208,7 +5208,8 @@ function TabExpense({workers:allWorkers,jiraTree,jiraDone=new Set(),me,canEditOt
                 <th style={{...thS,width:80}}>종류</th>
                 <th style={{...thS,textAlign:'left'}}>가맹점 · 프로젝트</th>
                 <th style={{...thS,width:92}}>금액</th>
-                <th style={{...thS,width:80}}>상태</th>
+                {/* ⚠ 「보낸 뒤 수정됨」 이 80px 에서 두 줄로 꺾였다 — 넓히고 줄바꿈을 막는다 */}
+                <th style={{...thS,width:104}}>상태</th>
               </tr></thead>
               <tbody>
                 {unsent.map(r=>(
@@ -5223,7 +5224,7 @@ function TabExpense({workers:allWorkers,jiraTree,jiraDone=new Set(),me,canEditOt
                       {r.parent_text&&<span style={{color:'#6b7280'}}> · {cleanName(r.parent_text)||r.parent_text}</span>}
                     </td>
                     <td style={{...tdS,fontWeight:700}}>{won(r.amount)}</td>
-                    <td style={{...tdS,fontSize:11}}>
+                    <td style={{...tdS,fontSize:11,whiteSpace:'nowrap'}}>
                       {r.kakao_state==='changed'
                         ?<span title={`보낸 때 ${fmtDT(r.kakao_sent_at)}`} style={{color:'#b45309',fontWeight:700}}>보낸 뒤 수정됨</span>
                         :<span style={{color:'#6b7280'}}>미전송</span>}
