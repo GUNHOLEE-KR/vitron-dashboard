@@ -2451,24 +2451,56 @@ app.get('/api/expenses/summary', requireLogin, async (req, res) => {
   }
 })
 
-// ── 카카오톡 「나에게 보내기」 (2026-09-25 신설, 마이그레이션 047) ─────────
+// ── 카카오톡 (2026-09-25 신설 · 047 「나에게 보내기」 · 048 «친구에게 보내기») ─────────
 // 받는 사람 = 대표이사 (테스트 서버는 KAKAO_TO_TEST 에 적은 사람 — 사용자 지시).
-// 🔑 «연결한 사람이 곧 받는 사람» 이다(나에게 보내기). 그래서 연결 단추는 «받는 사람 본인»
-//    에게만 연다 — 남이 자기 카톡을 연결하면 대표이사 대신 그 사람이 받게 된다.
+// 보내는 방식은 둘이다.
+//   memo   「나에게 보내기」 — 받는 사람이 연결하면 그 사람의 「나와의 채팅」 으로 간다
+//   friend «친구에게 보내기» — KAKAO_SENDER(이건호) 의 카카오에서 받는 사람(친구)에게 간다
+//          (2026-09-25 사용자 결정). 카카오 규칙상 «받는 사람도» 한 번 연결해야 친구 목록에 보인다.
+//   KAKAO_SENDER 가 없거나 받는 사람과 같으면 memo 다(테스트 서버는 이건호 한 사람이라 memo).
+// 🔑 연결 단추는 «보내는 사람 · 받는 사람 본인» 에게만 연다 — 남이 연결하면 엉뚱한 계정이 된다.
 // 🔑 보내는 때(사용자 지시) = 경비를 등록·수정·삭제할 때 «보내지 않는다».
 //    「미전송」 목록에서 체크한 것만 [보내기] 로 보낸다.
 // 🔴 실패는 조용히 넘기지 않는다 — kakao_links.last_error 에 남기고 화면이 붉게 알린다.
 //    연결은 약 두 달이면 끝나므로 하루 한 번 갱신하고(아래 app.listen), 그래도 끊기면 드러나야 한다.
+async function kakaoUserByLogin(loginId) {
+  const { rows } = await pool.query(
+    `SELECT u.id, coalesce(w.name, u.display_name) AS name FROM kpi_users u
+       LEFT JOIN workers w ON w.id = u.worker_id WHERE u.login_id = $1 AND u.active`, [loginId])
+  return rows[0] || null
+}
 async function kakaoRecipient() {
   const testTo = kakao.cfg().testTo
-  const { rows } = testTo
-    ? await pool.query(
-        `SELECT u.id, coalesce(w.name, u.display_name) AS name FROM kpi_users u
-           LEFT JOIN workers w ON w.id = u.worker_id WHERE u.login_id = $1 AND u.active`, [testTo])
-    : await pool.query(
-        `SELECT u.id, w.name FROM kpi_users u JOIN workers w ON w.id = u.worker_id
-          WHERE u.active AND w.position = '대표이사' ORDER BY u.id LIMIT 1`)
+  if (testTo) return kakaoUserByLogin(testTo)
+  const { rows } = await pool.query(
+    `SELECT u.id, w.name FROM kpi_users u JOIN workers w ON w.id = u.worker_id
+      WHERE u.active AND w.position = '대표이사' ORDER BY u.id LIMIT 1`)
   return rows[0] || null
+}
+// 누가 보내고 누가 받나 — 한 곳에서만 정한다
+async function kakaoPlan() {
+  const recipient = await kakaoRecipient()
+  const s = kakao.cfg().sender
+  const sender = s ? await kakaoUserByLogin(s) : null
+  const friend = !!(sender && recipient && Number(sender.id) !== Number(recipient.id))
+  return { recipient, sender: friend ? sender : null, mode: friend ? 'friend' : 'memo' }
+}
+// 이 사람이 맡은 몫 — 연결 단추와 동의 항목이 여기서 갈린다
+function kakaoRolesOf(uid, plan) {
+  const r = []
+  if (plan.sender && Number(plan.sender.id) === Number(uid)) r.push('sender')
+  if (plan.recipient && Number(plan.recipient.id) === Number(uid)) r.push('recipient')
+  return r
+}
+// 요청할 동의 — 보내는 사람은 친구 목록이 있어야 받는 사람을 찾는다. 받는 사람도(친구 메시지일 때)
+// 친구 목록·메시지 전송에 동의해야 카카오가 보내 준다. 「나에게 보내기」 는 메시지 전송만.
+// ⚠ KAKAO_SENDER 로 지정된 사람은 memo 방식이어도 친구 목록을 함께 요청한다 — 테스트 서버에서
+//    친구 목록 확인(/api/kakao/check)까지 미리 재 볼 수 있게.
+function kakaoScopesFor(uid, plan) {
+  const isSenderLogin = !!kakao.cfg().sender
+  const wantFriends = kakaoRolesOf(uid, plan).includes('sender') || plan.mode === 'friend'
+    || (isSenderLogin && plan.recipient && Number(plan.recipient.id) === Number(uid))
+  return wantFriends ? ['talk_message', 'friends'] : ['talk_message']
 }
 
 async function kakaoMarkError(uid, why) {
@@ -2501,10 +2533,10 @@ async function kakaoRefresh(uid, link) {
 }
 
 // 보낼 수 있는 access 토큰. 5분 넘게 남았으면 그대로, 아니면 갱신한다
-async function kakaoAccess(uid) {
+async function kakaoAccess(uid, who = '받는 사람') {
   const { rows } = await pool.query('SELECT * FROM kakao_links WHERE user_id = $1', [uid])
   if (!rows.length) {
-    const e = new Error('받는 사람이 아직 카카오 계정을 연결하지 않았습니다. [설정] 탭에서 연결해 주십시오.')
+    const e = new Error(`${who}이(가) 아직 카카오 계정을 연결하지 않았습니다. [설정] 탭에서 연결해 주십시오.`)
     e.status = 409
     throw e
   }
@@ -2513,6 +2545,42 @@ async function kakaoAccess(uid) {
     return mailcred.open(l.access_token)
   }
   return kakaoRefresh(uid, l)
+}
+
+// 그 사람의 카카오 사용자 번호 — 048 전에 연결한 사람은 비어 있어 그 자리에서 채운다
+async function kakaoUserIdOf(uid, who) {
+  const { rows } = await pool.query('SELECT kakao_user_id FROM kakao_links WHERE user_id = $1', [uid])
+  if (rows[0]?.kakao_user_id) return String(rows[0].kakao_user_id)
+  const id = await kakao.userId(await kakaoAccess(uid, who))
+  if (id) await pool.query('UPDATE kakao_links SET kakao_user_id = $1 WHERE user_id = $2', [id, uid])
+  return id
+}
+
+// 보내는 사람의 친구 목록에서 받는 사람을 찾는다. 못 찾으면 «왜» 를 사람 말로.
+async function kakaoFindRecipient(plan) {
+  const access = await kakaoAccess(plan.sender.id, `보내는 사람(${plan.sender.name})`)
+  const kid = await kakaoUserIdOf(plan.recipient.id, `받는 사람(${plan.recipient.name})`)
+  let list
+  try {
+    list = await kakao.friends(access)
+  } catch (e) {
+    // 친구 목록 동의가 없으면 카카오가 403(-402) 을 준다
+    const err = new Error(e.status === 403
+      ? `보내는 사람(${plan.sender.name})의 「친구 목록」 동의가 없습니다. [설정] 탭에서 [다시 연결] 해 주십시오.`
+      : `친구 목록을 읽지 못했습니다 — ${e.message}`)
+    err.status = 409
+    throw err
+  }
+  const hit = list.find(f => String(f.id) === String(kid))
+  if (!hit) {
+    const err = new Error(`${plan.sender.name} 님의 카카오 친구 목록(앱 연결 ${list.length}명)에서 `
+      + `${plan.recipient.name} 님을 찾지 못했습니다. 카카오톡 친구인지 · ${plan.recipient.name} 님이 `
+      + '「친구 목록」 에 동의했는지 · (심사 전) 앱 멤버인지 · 프로필 공개인지 확인해 주십시오. '
+      + '방금 바꿨으면 카카오 쪽 반영에 최대 10분 걸립니다.')
+    err.status = 409
+    throw err
+  }
+  return { access, uuid: hit.uuid, friendCount: list.length }
 }
 
 // 하루 한 번 — 연결마다 갱신해 두어 약 두 달의 끝을 계속 밀어낸다
@@ -2525,24 +2593,36 @@ async function refreshKakaoLinks() {
 }
 
 // 연결 상태 — 경비 탭·설정 탭이 본다
+const KAKAO_LINK_COLS = `connected_at, refreshed_at, refresh_expires_at, last_ok_at, last_error, last_error_at,
+  (kakao_user_id IS NOT NULL) AS has_user_id, coalesce(' ' || scopes || ' ', '') LIKE '% friends %' AS has_friends`
 app.get('/api/kakao/status', requireLogin, async (req, res) => {
   try {
     const configured = kakao.isConfigured()
-    const who = await kakaoRecipient()
-    const { rows } = who
-      ? await pool.query(
-          `SELECT connected_at, refreshed_at, refresh_expires_at, last_ok_at, last_error, last_error_at
-             FROM kakao_links WHERE user_id = $1`, [who.id])
-      : { rows: [] }
+    const plan = await kakaoPlan()
+    const linkOf = async u => {
+      if (!u) return null
+      const { rows } = await pool.query(`SELECT ${KAKAO_LINK_COLS} FROM kakao_links WHERE user_id = $1`, [u.id])
+      return { name: u.name, connected: rows.length > 0, ...(rows[0] || {}) }
+    }
+    const recipient = await linkOf(plan.recipient)
+    const sender = await linkOf(plan.sender)
+    // 보내는 데 쓰는 연결 — 친구 메시지면 보내는 사람의 것, 아니면 받는 사람의 것
+    const via = plan.mode === 'friend' ? sender : recipient
+    const roles = kakaoRolesOf(req.session.uid, plan)
     res.json({
       configured,
       cred_ready: mailcred.isReady(),
       test: !!kakao.cfg().testTo,
-      recipient: who ? { name: who.name } : null,
-      connected: rows.length > 0,
-      // 🔑 연결은 «받는 사람 본인» 만 한다
-      can_connect: configured && !!who && Number(who.id) === Number(req.session.uid),
-      ...(rows[0] || {}),
+      mode: plan.mode,
+      recipient, sender,
+      // 보낼 준비 = 친구 메시지면 두 사람 모두, 아니면 받는 사람
+      connected: plan.mode === 'friend' ? !!(sender?.connected && recipient?.connected) : !!recipient?.connected,
+      my_roles: roles,
+      can_connect: configured && roles.length > 0,
+      last_ok_at: via?.last_ok_at || null,
+      last_error: [sender?.last_error && `보내는 사람: ${sender.last_error}`,
+                   recipient?.last_error && (plan.mode === 'friend' ? `받는 사람: ${recipient.last_error}` : recipient.last_error)]
+        .filter(Boolean).join(' / ') || null,
     })
   } catch (e) {
     res.status(500).json({ error: e.message })
@@ -2558,15 +2638,16 @@ app.get('/api/kakao/connect', requireLogin, async (req, res) => {
   try {
     if (!kakao.isConfigured()) return kakaoBack(res, '카카오 앱 키가 서버에 설정되지 않았습니다.')
     if (!mailcred.isReady()) return kakaoBack(res, 'MAIL_CRED_KEY 가 서버에 없어 연결 정보를 담을 수 없습니다.')
-    const who = await kakaoRecipient()
-    if (!who || Number(who.id) !== Number(req.session.uid)) {
-      return kakaoBack(res, `카카오 연결은 받는 사람(${who?.name || '대표이사'}) 본인만 할 수 있습니다.`)
+    const plan = await kakaoPlan()
+    if (!kakaoRolesOf(req.session.uid, plan).length) {
+      const names = [plan.sender?.name, plan.recipient?.name].filter(Boolean).join(' · ') || '대표이사'
+      return kakaoBack(res, `카카오 연결은 보내는 사람·받는 사람(${names}) 본인만 할 수 있습니다.`)
     }
     const state = crypto.randomBytes(16).toString('hex')
     const now = Date.now()
     for (const [k, v] of kakaoStates) if (now - v.at > 10 * 60 * 1000) kakaoStates.delete(k)
     kakaoStates.set(state, { uid: req.session.uid, at: now })
-    res.redirect(kakao.authorizeUrl(state))
+    res.redirect(kakao.authorizeUrl(state, kakaoScopesFor(req.session.uid, plan)))
   } catch (e) {
     kakaoBack(res, e.message)
   }
@@ -2584,48 +2665,97 @@ app.get('/api/kakao/callback', requireLogin, async (req, res) => {
   try {
     const t = await kakao.exchangeCode(String(code || ''))
     if (!t.refresh) throw new Error('카카오가 갱신 토큰을 주지 않았습니다.')
+    // 카카오 사용자 번호 — 친구 목록에서 이 사람을 찾는 열쇠(048). 못 받아도 연결은 살린다
+    const kid = await kakao.userId(t.access).catch(() => null)
     await pool.query(
-      `INSERT INTO kakao_links (user_id, access_token, access_expires_at, refresh_token, refresh_expires_at)
-       VALUES ($1,$2,$3,$4,$5)
+      `INSERT INTO kakao_links (user_id, access_token, access_expires_at, refresh_token, refresh_expires_at,
+                                kakao_user_id, scopes)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
        ON CONFLICT (user_id) DO UPDATE SET
          access_token = EXCLUDED.access_token, access_expires_at = EXCLUDED.access_expires_at,
          refresh_token = EXCLUDED.refresh_token, refresh_expires_at = EXCLUDED.refresh_expires_at,
+         kakao_user_id = coalesce(EXCLUDED.kakao_user_id, kakao_links.kakao_user_id),
+         scopes = EXCLUDED.scopes,
          connected_at = now(), refreshed_at = NULL, last_error = NULL, last_error_at = NULL`,
-      [st.uid, mailcred.seal(t.access), t.accessExpiresAt, mailcred.seal(t.refresh), t.refreshExpiresAt])
+      [st.uid, mailcred.seal(t.access), t.accessExpiresAt, mailcred.seal(t.refresh), t.refreshExpiresAt,
+       kid, t.scope])
     kakaoBack(res, null)
   } catch (e) {
     kakaoBack(res, `연결 실패 — ${e.message}`)
   }
 })
 
-// 연결 끊기 — 받는 사람 본인 또는 관리자
+// 연결 끊기 — 본인 것. 관리자는 ?role=sender|recipient 로 대신 끊는다
 app.delete('/api/kakao/link', requireLogin, async (req, res) => {
   try {
-    const who = await kakaoRecipient()
-    const mine = who && Number(who.id) === Number(req.session.uid)
-    if (!mine && !isAdmin(req.session)) return res.status(403).json({ error: '받는 사람 본인(또는 관리자)만 끊을 수 있습니다.' })
-    await pool.query('DELETE FROM kakao_links WHERE user_id = $1', [who?.id ?? -1])
+    const plan = await kakaoPlan()
+    const role = String(req.query.role || '')
+    let target = null
+    if (role === 'sender' || role === 'recipient') {
+      const who = plan[role]
+      const mine = who && Number(who.id) === Number(req.session.uid)
+      if (!mine && !isAdmin(req.session)) return res.status(403).json({ error: '본인(또는 관리자)만 끊을 수 있습니다.' })
+      target = who?.id
+    } else if (kakaoRolesOf(req.session.uid, plan).length) {
+      target = req.session.uid
+    } else {
+      return res.status(403).json({ error: '보내는 사람·받는 사람 본인(또는 관리자)만 끊을 수 있습니다.' })
+    }
+    await pool.query('DELETE FROM kakao_links WHERE user_id = $1', [target ?? -1])
     res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
 })
 
-// 보낼 글 — 「나에게 보내기」 는 200자까지라, 합계를 먼저 쓰고 들어가는 만큼만 낱건을 적는다
+// 친구 목록 확인 — 보내기 전에 «받는 사람이 보이는가» 만 잰다(친구 목록 자체는 내보내지 않는다)
+app.get('/api/kakao/check', requireLogin, async (req, res) => {
+  try {
+    if (!kakao.isConfigured()) return res.status(409).json({ error: '카카오톡이 아직 설정되지 않았습니다.' })
+    const plan = await kakaoPlan()
+    if (!kakaoRolesOf(req.session.uid, plan).length && !isAdmin(req.session)) {
+      return res.status(403).json({ error: '보내는 사람·받는 사람 본인(또는 관리자)만 볼 수 있습니다.' })
+    }
+    // memo 방식이어도 KAKAO_SENDER 가 있으면 그 사람의 친구 목록을 재 본다(테스트 서버용)
+    const s = kakao.cfg().sender ? await kakaoUserByLogin(kakao.cfg().sender) : null
+    if (!s) return res.status(409).json({ error: 'KAKAO_SENDER(보내는 사람)가 설정되지 않았습니다.' })
+    const access = await kakaoAccess(s.id, `보내는 사람(${s.name})`)
+    let list
+    try { list = await kakao.friends(access) } catch (e) {
+      return res.status(409).json({ error: e.status === 403
+        ? `${s.name} 님의 「친구 목록」 동의가 없습니다 — [다시 연결] 해 주십시오. (${e.message})`
+        : `친구 목록을 읽지 못했습니다 — ${e.message}` })
+    }
+    let found = null
+    if (plan.mode === 'friend') {
+      const kid = await kakaoUserIdOf(plan.recipient.id, `받는 사람(${plan.recipient.name})`).catch(() => null)
+      found = kid ? list.some(f => String(f.id) === String(kid)) : false
+    }
+    res.json({ mode: plan.mode, sender: s.name, friend_count: list.length,
+               recipient: plan.recipient?.name || null, recipient_found: found })
+  } catch (e) {
+    res.status(e.status && e.status < 500 && e.status !== 401 ? e.status : 500).json({ error: e.message })
+  }
+})
+
+// 보낼 글 — 기본 글 템플릿은 200자까지라, 합계를 먼저 쓰고 들어가는 만큼만 낱건을 적는다.
+// 🔑 줄마다 «쓴 직원 이름» 을 맨 앞에 둔다(사용자 지시) — 친구 메시지는 보낸 사람이 늘 이건호로
+//    보이므로, 누구의 경비인지는 본문이 말해야 한다.
 const EXPENSE_KIND_KO = { meal: '식비', lodging: '숙박', transport: '교통', fuel: '주유·충전',
   entertain: '접대', supply: '소모품', etc: '기타' }
 function expenseKakaoText(rows) {
   const won = n => Number(n || 0).toLocaleString('ko-KR')
   const md = d => { const [, m, dd] = String(d).split('-'); return `${Number(m)}/${Number(dd)}` }
+  const cut = (s, n) => { const t = String(s || '').trim(); return t.length > n ? t.slice(0, n - 1) + '…' : t }
   const names = [...new Set(rows.map(r => r.worker_name || '?'))]
   const total = rows.reduce((s, r) => s + Number(r.amount || 0), 0)
   const head = `[경비] ${names.length === 1 ? names[0] : `${names[0]} 외 ${names.length - 1}명`}`
     + ` · ${rows.length}건 · 합계 ${won(total)}원`
   const lines = rows.map(r => {
     const proj = r.parent_text ? String(r.parent_text).replace(/^\s*\[[^\]]*\]\s*/, '') : ''
-    return `${md(r.spent_on)}${names.length > 1 ? ' ' + (r.worker_name || '') : ''}`
-      + ` ${EXPENSE_KIND_KO[r.kind] || r.kind} ${won(r.amount)}`
-      + (r.merchant ? ` ${r.merchant}` : '') + (proj ? ` (${proj})` : '')
+    return `${r.worker_name || '?'} ${md(r.spent_on)} ${EXPENSE_KIND_KO[r.kind] || r.kind} ${won(r.amount)}원`
+      + (r.merchant ? ` ${cut(r.merchant, 14)}` : '') + (proj ? ` (${cut(proj, 14)})` : '')
+      + (r.note ? ` - ${cut(r.note, 16)}` : '')
       + (r.kakao_state === 'changed' ? ' [수정]' : '')
   })
   let text = head
@@ -2651,14 +2781,21 @@ app.post('/api/expenses/kakao-send', requireLogin, async (req, res) => {
       `${EXPENSE_SELECT} WHERE e.id = ANY($1::int[]) ORDER BY e.spent_on, e.id`, [ids])
     if (rows.length !== ids.length) return res.status(404).json({ error: '없는 경비가 섞여 있습니다. 새로고침해 주십시오.' })
     if (rows.some(r => !canEditWorker(req.session, r.worker_id))) return denyOther(res)
-    const who = await kakaoRecipient()
-    if (!who) return res.status(409).json({ error: '받는 사람(대표이사)을 찾지 못했습니다.' })
-    const access = await kakaoAccess(who.id)
+    const plan = await kakaoPlan()
+    if (!plan.recipient) return res.status(409).json({ error: '받는 사람(대표이사)을 찾지 못했습니다.' })
     const text = expenseKakaoText(rows)
+    const url = kakao.appUrl('#expense')
+    // 실패를 적을 연결 — 친구 메시지면 보내는 사람, 아니면 받는 사람
+    const viaId = plan.mode === 'friend' ? plan.sender.id : plan.recipient.id
     try {
-      await kakao.sendMemo(access, { text, url: kakao.appUrl('#expense') })
+      if (plan.mode === 'friend') {
+        const { access, uuid } = await kakaoFindRecipient(plan)
+        await kakao.sendFriend(access, uuid, { text, url })
+      } else {
+        await kakao.sendMemo(await kakaoAccess(plan.recipient.id), { text, url })
+      }
     } catch (e) {
-      await kakaoMarkError(who.id, `보내기 실패 — ${e.message}`)
+      await kakaoMarkError(viaId, `보내기 실패 — ${e.message}`)
       throw e
     }
     // ⚠ updated_at 은 건드리지 않는다 — 건드리면 보낸 순간 「수정됨」 이 된다
@@ -2667,8 +2804,9 @@ app.post('/api/expenses/kakao-send', requireLogin, async (req, res) => {
       [req.session.uid, ids])
     await pool.query(
       'UPDATE kakao_links SET last_ok_at = now(), last_error = NULL, last_error_at = NULL WHERE user_id = $1',
-      [who.id])
-    res.json({ ok: true, sent: ids.length, to: who.name, text })
+      [viaId])
+    res.json({ ok: true, sent: ids.length, to: plan.recipient.name, from: plan.sender?.name || null,
+               mode: plan.mode, text })
   } catch (e) {
     // ⚠ 502·503·504 는 nginx 가 가로채 문구를 덮는다 — 이 저장소 규칙대로 500 으로
     res.status(e.status && e.status < 500 && e.status !== 401 ? e.status : 500).json({ error: e.message })

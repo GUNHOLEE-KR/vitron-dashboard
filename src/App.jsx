@@ -8,7 +8,7 @@ import { getMyMailSender, saveMyMailSender, removeMyMailSender,
          getMailAccount, saveMailAccount, removeMailAccount } from './repositories/mailSenderRepo'
 import { getAbsences, addAbsence, removeAbsence } from './repositories/absenceRepo'
 import { getExpenses, getExpenseSummary, addExpense, updateExpense,
-         removeExpense, receiptUrl, sendExpensesKakao, getKakaoStatus, disconnectKakao,
+         removeExpense, receiptUrl, sendExpensesKakao, getKakaoStatus, disconnectKakao, checkKakaoFriends,
          KAKAO_CONNECT_URL } from './repositories/expenseRepo'
 import { getContracts, addContract, removeContract,
          getRates, addRate, removeRate, getProfitSummary } from './repositories/profitRepo'
@@ -4830,9 +4830,12 @@ const EXP_PAY_MAP=Object.fromEntries(EXP_PAYS.map(p=>[p.v,p.label]))
 //    화면에서 먼저 걸러 「올리다 실패」가 아니라 「고르는 순간」 알린다.
 const RECEIPT_MAX=8*1024*1024
 
-// ── 카카오톡 「나에게 보내기」 연결 카드 (2026-09-25 · 047) ─────
-// 받는 사람 = 대표이사(테스트 서버는 KAKAO_TO_TEST). 연결은 «받는 사람 본인» 만 한다 —
-// 연결한 사람의 「나와의 채팅」 으로 가기 때문이다.
+// ── 카카오톡 연결 카드 (2026-09-25 · 047 「나에게 보내기」 · 048 «친구에게 보내기») ─────
+// 받는 사람 = 대표이사(테스트 서버는 KAKAO_TO_TEST). 보내는 방식은 서버가 정한다(status.mode).
+//   friend — KAKAO_SENDER(이건호)의 카카오에서 대표이사(친구)에게. «두 사람 모두» 한 번 연결해야 한다
+//            (카카오 규칙: 받는 사람도 앱에 연결해야 친구 목록에 보인다)
+//   memo   — 받는 사람의 「나와의 채팅」 으로. 받는 사람만 연결한다
+// 연결 단추는 «그 몫을 맡은 본인» 에게만 보인다 — 남이 연결하면 엉뚱한 계정이 된다.
 // 🔴 끊기거나 실패하면 붉게 알린다. 연결은 약 두 달이면 끝나므로 서버가 날마다 갱신하지만,
 //    그래도 끊기면 «조용히 멈춘» 것을 아무도 모른다.
 const fmtDT=v=>v?String(new Date(v).toLocaleString('ko-KR',{hour12:false})).replace(/:\d\d$/,''):'—'
@@ -4840,6 +4843,7 @@ function KakaoCard({showToast}){
   const [st,setSt]=useState(null)
   const [err,setErr]=useState('')
   const [busy,setBusy]=useState(false)
+  const [chk,setChk]=useState(null)     // 친구 목록 확인 결과
   const load=()=>getKakaoStatus().then(s=>{setSt(s);setErr('')}).catch(e=>setErr(e.message))
   // ⚠ showToast 는 대시보드가 그려질 때마다 새로 만들어지는 함수라 의존성에 넣으면
   //   그때마다 상태를 다시 조회한다 — 처음 한 번만 돈다
@@ -4858,14 +4862,36 @@ function KakaoCard({showToast}){
   },[])
   async function unlink(){
     if(!await askConfirm('끊으면 경비를 카카오톡으로 보낼 수 없습니다. 다시 연결하면 됩니다.',
-      {title:'카카오 연결을 끊을까요?',ok:'연결 끊기'})) return
-    try{ setBusy(true); await disconnectKakao(); showToast('연결을 끊었습니다'); await load() }
+      {title:'내 카카오 연결을 끊을까요?',ok:'연결 끊기'})) return
+    try{ setBusy(true); await disconnectKakao(); showToast('연결을 끊었습니다'); setChk(null); await load() }
     catch(e){ showToast('실패: '+e.message) } finally{ setBusy(false) }
+  }
+  async function check(){
+    try{ setBusy(true); setChk(await checkKakaoFriends()) }
+    catch(e){ setChk({error:e.message}) } finally{ setBusy(false) }
   }
   const row=(l,v)=><div style={{display:'flex',gap:8,fontSize:12,marginBottom:3}}>
     <span style={{color:'#6b7280',minWidth:88}}>{l}</span><span>{v}</span></div>
+  const friend=st?.mode==='friend'
+  const mine=new Set(st?.my_roles||[])
+  // 한 사람 몫(보내는 사람 / 받는 사람)의 연결 상태
+  const person=(label,p,role)=>(
+    <div style={{border:'1px solid #e5e7eb',borderRadius:8,padding:'8px 10px',marginBottom:8}}>
+      {row(label,<strong>{p?.name||'— (찾지 못함)'}
+        {mine.has(role)&&<span style={{marginLeft:6,fontSize:11,color:'#1a56db'}}>나</span>}</strong>)}
+      {row('연결',p?.connected
+        ?<span style={{color:'#059669',fontWeight:700}}>✓ 연결됨 <span style={{fontWeight:400,color:'#6b7280'}}>({fmtDT(p.connected_at)})</span></span>
+        :<span style={{color:'#b91c1c',fontWeight:700}}>연결 안 됨</span>)}
+      {/* 친구 메시지는 두 사람 모두 「친구 목록」 동의가 있어야 한다 — 없으면 다시 연결 */}
+      {friend&&p?.connected&&row('친구 목록 동의',p.has_friends
+        ?<span style={{color:'#059669'}}>✓ 있음</span>
+        :<span style={{color:'#b91c1c',fontWeight:700}}>없음 — [다시 연결] 필요</span>)}
+      {p?.connected&&row('연결 만료',<>{fmtDT(p.refresh_expires_at)}
+        <span style={{color:'#9ca3af'}}> — 서버가 날마다 갱신</span></>)}
+    </div>
+  )
   return(
-    <Card title="💬 카카오톡 — 경비 받는 사람" style={{flex:1,minWidth:300}}>
+    <Card title="💬 카카오톡 — 경비 보내기" style={{flex:1,minWidth:300}}>
       {err&&<div style={{fontSize:12,color:'#991b1b'}}>⚠ {err}</div>}
       {!st?<p style={{fontSize:12,color:'#9ca3af'}}>{err?'':'불러오는 중…'}</p>:<>
         {!st.configured&&(
@@ -4877,33 +4903,48 @@ function KakaoCard({showToast}){
         {st.configured&&st.last_error&&(
           <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:8,padding:'8px 10px',
             fontSize:12,color:'#991b1b',marginBottom:8,lineHeight:1.6}}>
-            🔴 <strong>마지막 실패</strong> ({fmtDT(st.last_error_at)}) — {st.last_error}
-            {st.can_connect&&<><br/>아래 <strong>[다시 연결]</strong> 을 눌러 주십시오.</>}
+            🔴 <strong>마지막 실패</strong> — {st.last_error}
           </div>)}
-        {row('받는 사람',<strong>{st.recipient?.name||'— (대표이사를 찾지 못함)'}
+        {row('보내는 방식',<strong>{friend
+          ?<>{st.sender?.name} 카카오 → {st.recipient?.name} <span style={{fontWeight:400,color:'#6b7280'}}>(친구 메시지)</span></>
+          :<>{st.recipient?.name||'대표이사'} 「나와의 채팅」 <span style={{fontWeight:400,color:'#6b7280'}}>(나에게 보내기)</span></>}
           {st.test&&<span style={{marginLeft:6,fontSize:11,color:'#b91c1c'}}>테스트 서버</span>}</strong>)}
-        {row('연결',st.connected
-          ?<span style={{color:'#059669',fontWeight:700}}>✓ 연결됨 <span style={{fontWeight:400,color:'#6b7280'}}>({fmtDT(st.connected_at)})</span></span>
-          :<span style={{color:'#b91c1c',fontWeight:700}}>연결 안 됨</span>)}
         {st.connected&&row('마지막 보냄',fmtDT(st.last_ok_at))}
-        {st.connected&&row('연결 만료',<>{fmtDT(st.refresh_expires_at)}
-          <span style={{color:'#9ca3af'}}> — 서버가 날마다 갱신합니다</span></>)}
-        <div style={{display:'flex',gap:8,marginTop:10,flexWrap:'wrap'}}>
+        <div style={{marginTop:8}}>
+          {friend&&person('보내는 사람',st.sender,'sender')}
+          {person('받는 사람',st.recipient,'recipient')}
+        </div>
+        <div style={{display:'flex',gap:8,marginTop:4,flexWrap:'wrap',alignItems:'center'}}>
           {st.can_connect&&st.cred_ready&&(
             // ⚠ fetch 가 아니라 «주소 이동» — 카카오 동의 화면을 거쳐 이 탭으로 돌아온다
             <a href={KAKAO_CONNECT_URL}
               style={{padding:'7px 14px',borderRadius:7,background:'#fee500',color:'#191600',
                 fontSize:12,fontWeight:700,textDecoration:'none'}}>
-              {st.connected?'다시 연결':'카카오 계정 연결'}</a>)}
-          {st.connected&&(st.can_connect)&&(
+              {[...mine].some(r=>st[r]?.connected)?'내 카카오 다시 연결':'내 카카오 계정 연결'}</a>)}
+          {st.can_connect&&[...mine].some(r=>st[r]?.connected)&&(
             <button onClick={unlink} disabled={busy}
               style={{padding:'7px 12px',borderRadius:7,border:'1px solid #e5e7eb',background:'#fff',
                 color:'#6b7280',fontSize:12,cursor:'pointer'}}>연결 끊기</button>)}
+          {st.configured&&(friend||mine.size>0)&&(
+            <button onClick={check} disabled={busy}
+              style={{padding:'7px 12px',borderRadius:7,border:'1px solid #bae6fd',background:'#f0f9ff',
+                color:'#075985',fontSize:12,cursor:'pointer'}}>친구 목록 확인</button>)}
         </div>
-        {st.configured&&!st.can_connect&&(
+        {chk&&(
+          <div style={{fontSize:12,marginTop:8,lineHeight:1.6,
+            color:chk.error||chk.recipient_found===false?'#991b1b':'#065f46'}}>
+            {chk.error?<>⚠ {chk.error}</>
+              :<>{chk.sender} 님 친구 목록(우리 앱에 연결한 친구) <strong>{chk.friend_count}명</strong>
+                {chk.mode==='friend'&&<> — {chk.recipient} 님이 <strong>{chk.recipient_found?'보입니다 ✓':'안 보입니다'}</strong></>}</>}
+          </div>)}
+        {st.configured&&(
           <div style={{fontSize:11,color:'#9ca3af',marginTop:8,lineHeight:1.6}}>
-            연결은 <strong>받는 사람({st.recipient?.name||'대표이사'}) 본인</strong>만 할 수 있습니다 —
-            연결한 사람의 「나와의 채팅」 으로 가기 때문입니다.
+            {friend
+              ?<>연결은 <strong>보내는 사람({st.sender?.name}) · 받는 사람({st.recipient?.name}) 본인</strong>이 각각 한 번 합니다.
+                카카오 규칙상 <strong>받는 사람도</strong> 연결해야 친구 목록에 보입니다. 심사 전에는 받는 사람이
+                <strong> 카카오 앱 멤버</strong>여야 하고 하루 30건까지입니다.</>
+              :<>연결은 <strong>받는 사람({st.recipient?.name||'대표이사'}) 본인</strong>만 합니다 —
+                연결한 사람의 「나와의 채팅」 으로 가기 때문입니다.</>}
           </div>)}
         {st.configured&&!st.cred_ready&&(
           <div style={{fontSize:11,color:'#b91c1c',marginTop:8}}>⚠ 서버에 MAIL_CRED_KEY 가 없어 연결 정보를 담을 수 없습니다.</div>)}
@@ -4999,7 +5040,9 @@ function TabExpense({workers:allWorkers,jiraTree,jiraDone=new Set(),me,canEditOt
     const total=chosen.reduce((s,r)=>s+Number(r.amount||0),0)
     if(!await askConfirm(
       `${chosen.length}건 · 합계 ${Number(total).toLocaleString()}원\n`
-      +`→ ${kst?.recipient?.name||'대표이사'} 님 카카오톡(나와의 채팅)`,
+      +(kst?.mode==='friend'
+        ?`→ ${kst.sender?.name} 카카오톡에서 ${kst.recipient?.name} 님께 (친구 메시지)`
+        :`→ ${kst?.recipient?.name||'대표이사'} 님 카카오톡(나와의 채팅)`),
       {title:'골라 둔 경비를 카카오톡으로 보낼까요?',ok:'카카오톡 보내기'})) return
     try{
       setSending(true)
@@ -5183,11 +5226,16 @@ function TabExpense({workers:allWorkers,jiraTree,jiraDone=new Set(),me,canEditOt
       {/* ── 카카오톡으로 보내기 (047) — 체크한 것만 보낸다 ── */}
       <Card title={`💬 카카오톡으로 보내기 — 미전송 ${unsent.length}건`}>
         <div style={{fontSize:12,marginBottom:8,display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}}>
-          <span>받는 사람 <strong>{kst?.recipient?.name||'대표이사'}</strong></span>
+          {/* 048 — 친구 메시지면 「보내는 사람 → 받는 사람」, 아니면 받는 사람만 */}
+          {kst?.mode==='friend'
+            ?<span>보내는 방식 <strong>{kst.sender?.name} 카카오 → {kst.recipient?.name}</strong></span>
+            :<span>받는 사람 <strong>{kst?.recipient?.name||'대표이사'}</strong></span>}
           {!kst?<span style={{color:'#9ca3af'}}>확인 중…</span>
            :!kst.configured?<span style={{color:'#6b7280'}}>⏸ 아직 꺼져 있습니다 (카카오 앱 키 설정 전)</span>
            :!kst.connected?<span style={{color:'#b91c1c',fontWeight:700}}>
-              카카오 계정이 연결되지 않았습니다 — 받는 사람이 [설정] 탭에서 연결해야 보낼 수 있습니다</span>
+              카카오 연결이 덜 됐습니다 — {kst.mode==='friend'
+                ?[!kst.sender?.connected&&`보내는 사람(${kst.sender?.name})`,!kst.recipient?.connected&&`받는 사람(${kst.recipient?.name})`].filter(Boolean).join(' · ')
+                :'받는 사람'}이 [설정] 탭에서 연결해야 보낼 수 있습니다</span>
            :<span style={{color:'#059669',fontWeight:700}}>✓ 연결됨</span>}
         </div>
         {kst?.last_error&&(

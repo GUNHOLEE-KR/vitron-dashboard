@@ -58,7 +58,11 @@ async function kakaoCall(method, path) {
   return data
 }
 // { configured, cred_ready, test, recipient:{name}, connected, can_connect, last_ok_at, last_error, … }
+// 048 — mode('friend'|'memo') · sender · recipient · my_roles 가 더해졌다
 export const getKakaoStatus = () => kakaoCall('GET', '/status')
-export const disconnectKakao = () => kakaoCall('DELETE', '/link')
+// role 을 주면(관리자) 그 사람의 연결을 끊는다. 없으면 «내» 연결
+export const disconnectKakao = (role) => kakaoCall('DELETE', role ? `/link?role=${role}` : '/link')
+// 친구 목록에서 받는 사람이 보이는가 — { mode, sender, friend_count, recipient, recipient_found }
+export const checkKakaoFriends = () => kakaoCall('GET', '/check')
 // ⚠ 연결은 fetch 가 아니라 «주소 이동» 이다 — 카카오 동의 화면을 거쳐 설정 탭으로 돌아온다
 export const KAKAO_CONNECT_URL = '/api/kakao/connect'
